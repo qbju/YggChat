@@ -1,7 +1,7 @@
 // YggChat PWA shim: runs a Yggdrasil node in WASM and emulates the native
 // daemon's /api/* (see API.md) so the same UI works in the browser.
-// The node, keys and history live only in this browser; the relay only
-// forwards encrypted Yggdrasil link traffic.
+// The node, keys and history live only in this browser; it peers directly
+// with public wss Yggdrasil peers that accept this page's Origin (no relay).
 (() => {
   // No third-party relay: browsers connect straight to Yggdrasil peers whose
   // WebSocket listener allows this page's Origin (yggdrasil-go "?origin=").

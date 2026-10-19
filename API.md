@@ -21,7 +21,7 @@ Delivery result arrives as a `status` event.
 ## POST /api/peers {Add: uri} | {Remove: uri} | {Reset: true} -> same shape as GET
 ## GET  /api/peers/public -> { peers: [ {uri, region, continent?, asia, up?, reliability?, label?} ] }
   Built from the official github.com/yggdrasil-network/public-peers list. Asia first.
-  On web, `uri` is a relay URL; show `label` (the original peer URI) when present.
+  On web, `uri` is a wss peer that accepts the page Origin (no relay since v0.7); show `label` when present.
   On native, show uri; many entries (~370): needs a search box + region filter.
   Web can only use ws/wss peers; native can use tcp/tls/quic/ws/wss.
 
@@ -47,7 +47,7 @@ POST /api/block {Addr, Block}; POST /api/passcode {Old, New("" removes)}; POST /
 POST /api/identity/reset {Confirm:true} -> new key, contacts/history wiped, node restarts.
 Events add: msg_del {peer,id}, locked.
 Wire adds: msg.ttl; {t:"prof",nick,bio,av,pk}; {t:"ttl",ttl}; hi/hiack carry pk. Receivers verify pk against the source address.
-Mailbox (worker yggws): POST /mb/put {to:tag, box}; /mb/get and /mb/del {pk, ts, sig=Ed25519("yggchat-mb-<op>:<tag>:<ts>"), keys?}. tag = hex(sha256("yggchat-mb:"+pkHex))[:32]. Box = base64(nacl sealed box to X25519(pk) of {pk, w, sig=Ed25519(recipientPK||w)}). 7-day expiry, 200 boxes per tag.
+Mailbox: removed in v0.7 (no server-side store-and-forward; offline messages stay queued on the sender).
 
 ## v0.6 images
 POST /api/send {To, Text?, Img: "data:image/(jpeg|png|webp|gif);base64,..."} (decoded ≤ 600 KB; UI compresses to ≤ ~400 KB JPEG). Message.img holds the data URL.
