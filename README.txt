@@ -15,8 +15,8 @@ Linux:   ./yggchat-linux-amd64
 - ネイティブ版: ノードは端末内で動作。UIは127.0.0.1のみで待ち受け、Host/Origin/Content-Typeを検証します。
 - PWA版: ノードはブラウザ内(WebAssembly)で動作し、秘密鍵と履歴はブラウザのIndexedDBにだけ保存されます。
   ブラウザは生のTCP/UDPを開けないため、ブラウザのOriginを許可したYggdrasilピアにwssで直接つなぎます。
-  既定は自前の入口ピア(InstaBox上のyggdrasil、origin=https://yggchat.surge.sh限定)とygg.being.pet。
-  Cloudflareなどの第三者中継は使いません。ピアが見るのは暗号化済みのYggdrasilリンク通信だけです
+  既定はygg.being.pet(2026-10-19時点で公開一覧から見つかった唯一のブラウザ可ピア)。
+  YggChat側の中継サーバーはありません。ピアが見るのは暗号化済みのYggdrasilリンク通信だけです
   (接続元IPと通信量・時刻は見えます)。自分でピアを立てる場合: Listen に
   "ws://[::]:PORT?origin=https://yggchat.surge.sh" を書き、TLS終端してwssで公開してください。
   PWAはタブ/アプリを開いている間だけ動きます。
@@ -31,6 +31,7 @@ Linux:   ./yggchat-linux-amd64
 SHA256SUMS で各ファイルのハッシュを確認できます。バイナリは未署名のため、WindowsではSmartScreenの警告が出ます。
 
 ■ 履歴
+v0.7.1: PWAの自前入口ピアを撤去し、公開ピアygg.being.petのみに。
 v0.7:   Cloudflare中継と中継メールボックス(置き配)を廃止。PWAはOrigin許可済みピアにwssで直接接続。
         旧メールボックスのデータはサーバー側で削除済み。
 v0.6:   写真の送信(端末内で最大1600px・約400KB以下のJPEGに縮小し、Ygg越しに約1KBずつ分割送信、

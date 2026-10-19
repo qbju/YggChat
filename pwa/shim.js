@@ -5,11 +5,9 @@
 (() => {
   // No third-party relay: browsers connect straight to Yggdrasil peers whose
   // WebSocket listener allows this page's Origin (yggdrasil-go "?origin=").
-  const RECOMMENDED = [
-    'wss://8097-agquq2sivri3jtxt3l2lgdk4ri.instabox.tech/', // YggChat entry peer (self-hosted, origin=https://yggchat.surge.sh)
-    'wss://ygg.being.pet/ygg',                              // public peer that accepts browser Origins
-  ];
-  const LABELS = { [RECOMMENDED[0]]: 'YggChat入口ピア（自前）', [RECOMMENDED[1]]: 'ygg.being.pet（公開・ブラウザ可）' };
+  // As of 2026-10-19 the only public peer found that accepts this page's Origin.
+  const RECOMMENDED = ['wss://ygg.being.pet/ygg'];
+  const LABELS = { [RECOMMENDED[0]]: 'ygg.being.pet（公開・ブラウザ可）' };
   const LS = 'yggchat_pwa_v1';
   const MAXTTL = 4 * 7 * 86400;
   const now = () => Math.floor(Date.now() / 1000);
@@ -40,7 +38,7 @@
       if (Object.keys(raw).length) { await idbPut('state', raw); localStorage.removeItem(LS); }
     }
     Object.assign(outer, { key: raw.key || '', peers: raw.peers || null, enc: raw.enc || null });
-    if (outer.peers && outer.peers.some(p => /workers\.dev/.test(p))) outer.peers = null; // v0.7: old Cloudflare relay peers -> direct defaults
+    if (outer.peers && outer.peers.some(p => /workers\.dev|instabox\.tech/.test(p))) outer.peers = null; // old Cloudflare relay / removed entry peer -> defaults
     if (!outer.peers) outer.peers = RECOMMENDED.slice();
     locked = !!outer.enc;
     if (!locked) { Object.assign(st, { nick: raw.nick || 'anon', bio: raw.bio || '', avatar: raw.avatar || '', contacts: raw.contacts || {}, messages: raw.messages || [], blocked: raw.blocked || {} }); migrate(); }

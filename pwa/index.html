@@ -1793,7 +1793,7 @@ function openSettings(){
   $('settings-nick').value = state.nick || '';
   $('settings-own-addr').textContent = state.addr;
   $('platform-info').textContent = state.platform === 'web'
-    ? 'PWA版: ノードはこのブラウザ内(WebAssembly)で動作し、鍵と履歴はこの端末にだけ保存されます。ブラウザは自前の入口ピア(InstaBox)などのYggdrasilピアにwssで直接つながり、Cloudflareなどの第三者中継は使いません。'
+    ? 'PWA版: ノードはこのブラウザ内(WebAssembly)で動作し、鍵と履歴はこの端末にだけ保存されます。ブラウザはOriginを許可した公開Yggdrasilピア(既定: ygg.being.pet)にwssで直接つながり、中継サーバーは使いません。'
     : 'ネイティブ版: ノードはこの端末内で動作しています。';
   $('peers-count').textContent = '接続中 ' + (state.peers||0);
   $('settings-screen').classList.add('active');
