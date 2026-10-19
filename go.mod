@@ -6,6 +6,7 @@ require (
 	github.com/btcsuite/btcd/btcec/v2 v2.5.0
 	github.com/coder/websocket v1.8.15
 	github.com/gologme/log v1.3.0
+	github.com/jchv/go-webview2 v0.0.0-20260205173254-56598839c808
 	github.com/yggdrasil-network/yggdrasil-go v0.5.14
 	github.com/yggdrasil-network/yggstack v0.0.0-20260619214331-c39db65e5bcc
 	golang.org/x/crypto v0.53.0
@@ -21,6 +22,7 @@ require (
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.0 // indirect
 	github.com/google/btree v1.1.3 // indirect
 	github.com/hjson/hjson-go/v4 v4.6.0 // indirect
+	github.com/jchv/go-winloader v0.0.0-20250406163304-c1995be93bd1 // indirect
 	github.com/quic-go/quic-go v0.60.0 // indirect
 	github.com/wlynxg/anet v0.0.5 // indirect
 	golang.org/x/net v0.56.0 // indirect

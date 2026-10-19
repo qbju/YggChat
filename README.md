@@ -1,6 +1,6 @@
 # YggChat
 
-NAT越え不要のP2Pチャット（Yggdrasil内蔵）。現在のバージョン: **v0.11.2**
+NAT越え不要のP2Pチャット（Yggdrasil内蔵）。現在のバージョン: **v0.12.0**
 
 [![build](https://github.com/qbju/YggChat/actions/workflows/build.yml/badge.svg)](https://github.com/qbju/YggChat/actions/workflows/build.yml)
 
@@ -9,12 +9,13 @@ NAT越え不要のP2Pチャット（Yggdrasil内蔵）。現在のバージョ�
 | 環境 | 使い方 |
 | --- | --- |
 | PWA（インストール不要） | <https://yggchat.surge.sh/> |
-| Windows | `yggchat-windows-amd64.exe` を起動 → ブラウザで <http://127.0.0.1:7780/> |
+| Windows | `yggchat-windows-amd64.exe` をダブルクリック → アプリのウィンドウ（WebView2）が開きます。WebView2ランタイムがない環境では既定のブラウザで <http://127.0.0.1:7780/> を開きます |
 | Android | APK版推奨。Termuxなら `yggchat-android-arm64` |
 | Linux | `./yggchat-linux-amd64` |
 
 - データ: `~/.yggchat/`（`node.json` = 秘密鍵、`chat.json` = 履歴、どちらも `0600`）
-- オプション: `-peers` `-listen` `-ui` `-data` `-cli` `-licenses`
+- オプション: `-peers` `-listen` `-ui` `-data` `-cli` `-nowindow` `-licenses`
+- Windows版はウィンドウを閉じると終了します。`-nowindow` を付けると従来どおりウィンドウを出さずにブラウザから使えます。2回起動した場合は動いているノードのウィンドウを開くだけです。
 - ビルド済みファイルは [Releases](https://github.com/qbju/YggChat/releases) / [Actions](https://github.com/qbju/YggChat/actions) と、アプリの設定→ダウンロードから入手できます。
 
 ## 端末のYggdrasilを使う（VPN型アプリと併用）
@@ -111,6 +112,7 @@ Android APK（Gradle不使用）: `libyggchat.so`（`GOOS=android GOARCH=arm64` 
 
 | バージョン | 内容 |
 | --- | --- |
+| v0.12 | Windows版がWebView2のアプリウィンドウで開くように（ブラウザ不要、ダブルクリック起動時は黒いコンソールも閉じる）。 |
 | v0.11 | メッセージの編集・削除、VPNの受信ファイアウォール、Twemoji同梱、スクロール修正。 |
 | v0.10 | LANチャット、finger。ライセンス表記（GPL-3.0-or-later）。 |
 | v0.9 | AndroidのVPNモード（YggChatが端末のYggdrasilになり、他アプリも `200::/7` へ）。 |
@@ -130,7 +132,7 @@ v0.2以降はUDP/7777。v0.1とは非互換。
 YggChat is free software, licensed under the GNU General Public License v3.0 or later ([LICENSE](LICENSE)).
 Copyright (C) 2026 h6e and YggChat contributors.
 
-- 内蔵しているYggdrasil Network（yggdrasil-go/yggstack: LGPLv3+静的リンク例外、ironwood/phony: MPL-2.0）、gVisor（Apache-2.0）、Go（BSD-3-Clause）、quic-go（MIT）、coder/websocket（ISC）、qrcode-generator（MIT, Kazuhiko Arase）などの一覧と全文は [THIRD_PARTY_NOTICES.txt](THIRD_PARTY_NOTICES.txt) にあります（アプリの設定→About、または `yggchat -licenses` でも表示）。
+- 内蔵しているYggdrasil Network（yggdrasil-go/yggstack: LGPLv3+静的リンク例外、ironwood/phony: MPL-2.0）、gVisor（Apache-2.0）、Go（BSD-3-Clause）、quic-go（MIT）、coder/websocket（ISC）、qrcode-generator（MIT, Kazuhiko Arase）、Windows版のgo-webview2（MIT）・WebView2 SDK（BSD-3-Clause）・go-winloader（ISC）などの一覧と全文は [THIRD_PARTY_NOTICES.txt](THIRD_PARTY_NOTICES.txt) にあります（アプリの設定→About、または `yggchat -licenses` でも表示）。
 - yggdrasil-go は WebAssembly 対応のため一部ファイルを改変しています（該当ファイルに改変の注記あり）。
 - 絵文字は[Twemoji](https://github.com/jdecked/twemoji)（© Twitter, Inc. and other contributors, CC-BY 4.0）の画像を同梱して表示します（CDN不使用）。
 - 「QRコード」は株式会社デンソーウェーブの登録商標です。

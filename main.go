@@ -1027,6 +1027,7 @@ func main() {
 	peers := flag.String("peers", "", "comma-separated Yggdrasil peer URIs (overrides config)")
 	listen := flag.String("listen", "", "comma-separated Yggdrasil listen URIs, e.g. tls://0.0.0.0:12345")
 	cliMode := flag.Bool("cli", false, "terminal chat (attaches to a node already running on -ui, or starts one)")
+	noWindow := flag.Bool("nowindow", false, "Windows: don't open the app window (use a browser on -ui instead)")
 	licenses := flag.Bool("licenses", false, "print the license (GPL-3.0-or-later) and third-party notices, then exit")
 	flag.Parse()
 	if *licenses {
@@ -1039,6 +1040,12 @@ func main() {
 	}
 	if *cliMode && apiUp(*uiAddr) {
 		runCLI(*uiAddr)
+		return
+	}
+	wantWindow := !*cliMode && !*noWindow && runtime.GOOS == "windows"
+	if wantWindow && apiUp(*uiAddr) {
+		// Already running (e.g. double-clicked twice): just show it.
+		openWindow("http://"+*uiAddr+"/", *dataDir)
 		return
 	}
 	_ = os.MkdirAll(*dataDir, 0700)
@@ -1190,7 +1197,15 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	log.Fatal(http.Serve(ln, localOnly(*uiAddr, a.lockGuard(mux))))
+	handler := localOnly(*uiAddr, a.lockGuard(mux))
+	if wantWindow {
+		go func() { log.Fatal(http.Serve(ln, handler)) }()
+		if openWindow("http://"+*uiAddr+"/", *dataDir) {
+			return // window closed: quit
+		}
+		select {}
+	}
+	log.Fatal(http.Serve(ln, handler))
 }
 
 // lockGuard: while the history is locked only unlock/state/events/peers work.
