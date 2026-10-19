@@ -82,6 +82,7 @@ func (a *App) systemHandlers(mux *http.ServeMux, dataDir string) {
 				return
 			}
 			if req.On {
+				_ = os.Remove(vpnModeFile(dataDir))
 				if err := writeAtomic(sysModeFile(dataDir), []byte("1\n")); err != nil {
 					http.Error(w, err.Error(), 500)
 					return

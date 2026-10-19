@@ -67,3 +67,10 @@ GET → {"on":bool,"detected":"<200::/7 source address the OS would use, or empt
 POST {"On":bool} → writes/removes <data>/system-ygg and restarts the node.
 In system mode /api/state has "system":true, "pubkey":"" and the address of the device's own Yggdrasil;
 peers lists one pseudo-peer "system://…"; /api/peers POST and identity reset return errors; Nostr is inactive.
+
+## /api/vpn (Android)
+GET → {"on":bool,"tun":bool,"addr":"…","mtu":1280,"in":n,"out":n,"werr":n,"err":"…"}
+POST {"On":bool} → writes/removes <data>/vpn-mode and restarts (Android only; clears system-ygg).
+In VPN mode the node runs core + ipv6rwc without netstack, listens for a TUN fd on abstract unix socket
+@yggchat-tun (SCM_RIGHTS, same uid only, replies 1 byte), pumps TUN<->core, and chats over the OS UDP stack.
+The Java VpnService (YggVpn) polls /api/vpn every 3 s, establishes addr/7 + route 200::/7, and re-sends the fd when tun=false.

@@ -187,6 +187,8 @@ type App struct {
 	core     *core.Core
 	ns       *netstack.YggdrasilNetstack
 	sys      bool // using the device's own Yggdrasil (VPN/TUN) instead of the embedded node
+	vpn      bool // Android: we ARE the device's Yggdrasil (VpnService TUN pumped into core)
+	vpnS     *vpnState
 	addr     string
 	store    *Store
 	subMu    sync.Mutex
@@ -260,7 +262,7 @@ type wire struct {
 func (a *App) serveChat() {
 	var pc net.PacketConn
 	var err error
-	if a.sys {
+	if a.sys || a.vpn {
 		pc, err = net.ListenUDP("udp6", &net.UDPAddr{Port: chatPort})
 	} else {
 		pc, err = a.ns.ListenUDP(&net.UDPAddr{IP: net.ParseIP(a.addr), Port: chatPort})
@@ -781,7 +783,7 @@ func (a *App) httpHandlers(mux *http.ServeMux) {
 		}
 		sort.Strings(blocked)
 		json.NewEncoder(w).Encode(map[string]any{
-			"addr": a.addr, "pubkey": hex.EncodeToString(a.pub()), "system": a.sys,
+			"addr": a.addr, "pubkey": hex.EncodeToString(a.pub()), "system": a.sys, "vpn": a.vpn,
 			"nick": a.store.Nick, "bio": a.store.Bio, "avatar": a.store.Avatar,
 			"contacts": a.store.Contacts, "messages": a.store.Messages, "peers": peers, "platform": "native",
 			"locked": false, "haspass": a.store.key != nil, "blocked": blocked,
@@ -1034,6 +1036,7 @@ func main() {
 		}()
 	}
 	sys := sysModeOn(*dataDir)
+	vpn := !sys && vpnModeOn(*dataDir)
 	logger := gologme.New(logOut, "[ygg] ", gologme.LstdFlags)
 	logger.EnableLevel("error")
 	logger.EnableLevel("warn")
@@ -1051,8 +1054,10 @@ func main() {
 		if c, err = core.New(cfg.Certificate, logger, opts...); err != nil {
 			log.Fatal(err)
 		}
-		if ns, err = netstack.CreateYggdrasilNetstack(c); err != nil {
-			log.Fatal(err)
+		if !vpn {
+			if ns, err = netstack.CreateYggdrasilNetstack(c); err != nil {
+				log.Fatal(err)
+			}
 		}
 	}
 
@@ -1064,7 +1069,7 @@ func main() {
 		st.Contacts, st.Blocked = map[string]Contact{}, map[string]bool{}
 	}
 
-	a := &App{core: c, ns: ns, sys: sys, store: st, subs: map[chan []byte]struct{}{}, acks: map[string]chan struct{}{}, inflight: map[string]bool{}, seen: map[string]bool{}, profAt: map[string]time.Time{}, cfg: cfg, cfgPath: filepath.Join(*dataDir, "node.json")}
+	a := &App{core: c, ns: ns, sys: sys, vpn: vpn, store: st, subs: map[chan []byte]struct{}{}, acks: map[string]chan struct{}{}, inflight: map[string]bool{}, seen: map[string]bool{}, profAt: map[string]time.Time{}, cfg: cfg, cfgPath: filepath.Join(*dataDir, "node.json")}
 	// Messages left "sending" by a previous run never got an ack.
 	for i := range st.Messages {
 		if st.Messages[i].Status == "sending" || st.Messages[i].Status == "failed" {
@@ -1088,6 +1093,9 @@ func main() {
 		go a.watchSys()
 	} else {
 		a.addr = c.Address().String()
+		if vpn {
+			a.startVPN()
+		}
 	}
 	go a.serveChat()
 	go a.sweep()
@@ -1120,6 +1128,7 @@ func main() {
 	a.featureHandlers(mux)
 	a.nostrHandlers(mux)
 	a.systemHandlers(mux, *dataDir)
+	a.vpnHandlers(mux, *dataDir)
 	if !*cliMode {
 		fmt.Printf("YggChat\n  your address: %s\n  open UI:      http://%s/\n", a.addr, *uiAddr)
 	}

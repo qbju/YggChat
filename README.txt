@@ -1,4 +1,4 @@
-YggChat v0.8 - NAT越え不要のP2Pチャット (Yggdrasil内蔵)
+YggChat v0.9 - NAT越え不要のP2Pチャット (Yggdrasil内蔵)
 
 ■ 使い方
 PWA(インストール不要): https://yggchat.surge.sh/
@@ -14,6 +14,12 @@ Linux:   ./yggchat-linux-amd64
   環境変数 YGGCHAT_SYSTEM=1)。アドレスは端末側Yggdrasilのものになり、ピア設定もそちらで行います。
   内蔵ノードの鍵は残るので、オフにすれば元のアドレスに戻ります。このモードではNostr置き配は使えません。
   受信はUDP 7777番をOS上で待ち受け、送信元が200::/7のものだけを受け付けます。
+
+■ YggChatを端末のYggdrasilにする (Android VPNモード)
+  設定→ピア→「YggChatを端末のYggdrasilにする（VPN）」をオンにすると、公式アプリの代わりになります。
+  200::/7宛てだけをVPN(TUN)で受け持ち、ブラウザやSSHなど他のアプリもYggdrasilに接続できます。
+  アドレス・鍵はYggChatのまま。通常のネット通信はVPNを通りません(allowBypass/IPv4は素通し)。
+  TUNのfdは同じアプリ(同じUID)からだけ受け取ります。公式アプリのVPNとは同時に使えません。
 
 ■ 端末チャット (CLI)
   ./yggchat-linux-amd64 -cli        (Termux: ./yggchat-android-arm64 -cli)
@@ -45,6 +51,7 @@ Linux:   ./yggchat-linux-amd64
 SHA256SUMS で各ファイルのハッシュを確認できます。バイナリは未署名のため、WindowsではSmartScreenの警告が出ます。
 
 ■ 履歴
+v0.9:   AndroidのVPNモード(YggChatが端末のYggdrasilになり、他アプリも200::/7へ)。
 v0.8:   CLIチャット(-cli)。端末のYggdrasil(VPN型アプリ/TUN)を使うモード。Android版はアプリ自身が通知を出すように(WebViewには通知機能がないため)、
         画面を閉じていても受信通知が出ます。設定に「置き配（Nostr）」を追加（非推奨・既定オフ）。届かなかった文章を相手の鍵で暗号化し、使い捨て鍵で署名したNostrイベントとして公開リレーに最大7日預ける。受信側は読んだら削除イベントを出す。リレーには宛先タグ・時刻・IPが見える。写真は対象外。
 v0.7.1: PWAの自前入口ピアを撤去し、公開ピアygg.being.petのみに。

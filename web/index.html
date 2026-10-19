@@ -1085,6 +1085,13 @@ select { font:inherit; font-size:16px; color:var(--fg); background:var(--surface
           <div class="toggle-label">端末のYggdrasilを使う（VPN型アプリ）</div>
           <div class="switch" id="sys-switch"><div class="switch-handle"></div></div>
         </div>
+        <div id="vpn-box" style="display:none;">
+          <div class="toggle">
+            <div class="toggle-label">YggChatを端末のYggdrasilにする（VPN）</div>
+            <div class="switch" id="vpn-switch"><div class="switch-handle"></div></div>
+          </div>
+          <div class="row-sub">公式アプリの代わりになります。ブラウザ・SSHなど他のアプリからも200::/7（Yggdrasil）につながり、アドレスはYggChatのまま。通常のネット通信はVPNを通りません。公式アプリのVPNとは同時に使えません。</div>
+        </div>
         <div class="row-sub" id="sys-note">Yggdrasil公式アプリ（Android）や常駐のyggdrasilサービスが動いていれば、内蔵ノードの代わりにそれで通信します。アドレスは端末側Yggdrasilのものに変わり、相手からは別人として見えます。Nostr置き配は使えません。</div>
       </div>
     </div>
@@ -1816,6 +1823,9 @@ function openSettings(){
   $('peers-count').textContent = '接続中 ' + (state.peers||0);
   $('sys-box').style.display = state.platform === 'web' ? 'none' : '';
   setSwitch('sys-switch', !!state.system);
+  $('vpn-box').style.display = (window.YggAndroid && typeof window.YggAndroid.vpnSupported === 'function') ? '' : 'none';
+  setSwitch('vpn-switch', !!state.vpn);
+  if(state.vpn) $('platform-info').textContent = 'ネイティブ版（VPNモード）: YggChatがこの端末のYggdrasilとして動き、他のアプリも200::/7につながります。';
   if(state.system) $('platform-info').textContent = 'ネイティブ版（端末のYggdrasilを使用中）: 通信は端末のYggdrasil（VPN/TUN）経由です。' + (state.addr ? '' : ' いまは見つかりません。Yggdrasilアプリを起動してください。');
   $('settings-screen').classList.add('active');
   renderShareQR();
@@ -2482,12 +2492,37 @@ $('sys-switch').addEventListener('click', async () => {
     if(!(await uiDialog(msg, {okText:'切り替える'}))) return;
   }
   try{ await api('/api/system', {On: on}); }catch(e){ toast(e.message); return; }
+  if(on && state.vpn && window.YggAndroid && window.YggAndroid.setVpn) window.YggAndroid.setVpn(false);
   toast('再起動中…');
   for(let i = 0; i < 40; i++){
     await new Promise(r => setTimeout(r, 500));
     try{ const s2 = await api('/api/state'); if(!!s2.system === on){ location.reload(); return; } }catch(e){}
   }
   location.reload();
+});
+async function waitRestart(check){
+  toast('再起動中…');
+  for(let i = 0; i < 40; i++){
+    await new Promise(r => setTimeout(r, 500));
+    try{ const s2 = await api('/api/state'); if(check(s2)){ location.reload(); return; } }catch(e){}
+  }
+  location.reload();
+}
+$('vpn-switch').addEventListener('click', async () => {
+  const A = window.YggAndroid; if(!A || !A.setVpn) return;
+  const on = !state.vpn;
+  if(on){
+    if(!(await uiDialog('YggChatをこの端末のYggdrasil VPNにしますか？\n\n200::/7宛ての通信だけをVPNで受け持ち、他のアプリもYggdrasilを使えるようになります。次にAndroidのVPN許可画面が出ます。公式Yggdrasilアプリを使っている場合はそちらのVPNが切れます。', {okText:'オンにする'}))) return;
+    const ok = await new Promise(res => { window.ygVpnResult = res; A.setVpn(true); });
+    window.ygVpnResult = null;
+    if(!ok){ toast('VPNが許可されませんでした'); return; }
+    try{ await api('/api/vpn', {On: true}); }catch(e){ toast(e.message); A.setVpn(false); return; }
+    waitRestart(s2 => !!s2.vpn);
+  } else {
+    A.setVpn(false);
+    try{ await api('/api/vpn', {On: false}); }catch(e){ toast(e.message); return; }
+    waitRestart(s2 => !s2.vpn);
+  }
 });
 $('reset-id').addEventListener('click', async () => {
   if(!(await uiDialog('新しいIDを作りますか？今のアドレス・連絡先・履歴はすべて消え、元に戻せません。', {okText:'作り直す', danger:true}))) return;
