@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 h6e and YggChat contributors
+
 // System Yggdrasil mode: instead of the embedded node, use a Yggdrasil that is
 // already running on the device as a VPN/TUN (yggdrasil-android, the desktop
 // yggdrasil service). The chat identity is then that node's address; YggChat

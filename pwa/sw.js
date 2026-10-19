@@ -1,8 +1,10 @@
-const CACHE = 'yggchat-pwa-v16';
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 h6e and YggChat contributors
+const CACHE = 'yggchat-pwa-v17';
 const INDEX = './index.html';
 
 self.addEventListener('install', e => {
-  e.waitUntil(caches.open(CACHE).then(c => c.addAll([INDEX, './manifest.webmanifest', './wasm_exec.js', './shim.js', './qrcode.js', './ygg.wasm'])).then(() => self.skipWaiting()));
+  e.waitUntil(caches.open(CACHE).then(c => c.addAll([INDEX, './manifest.webmanifest', './wasm_exec.js', './shim.js', './qrcode.js', './ygg.wasm', './THIRD_PARTY_NOTICES.txt', './LICENSE.txt'])).then(() => self.skipWaiting()));
 });
 
 self.addEventListener('activate', e => {

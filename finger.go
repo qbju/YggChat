@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 h6e and YggChat contributors
+
 // finger over Yggdrasil (RFC 1288, opt-in). When enabled the node answers
 // `finger @[addr]` on TCP port 79 of its Yggdrasil address with the nickname
 // and a user-written .plan, and answers the same over the chat UDP port

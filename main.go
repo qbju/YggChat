@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 h6e and YggChat contributors
+
 // YggChat: serverless P2P chat over Yggdrasil.
 // Every node gets a global, stable IPv6 (200::/7) derived from its key,
 // so peers dial each other directly. No NAT traversal, no server.
@@ -1014,7 +1017,16 @@ func main() {
 	peers := flag.String("peers", "", "comma-separated Yggdrasil peer URIs (overrides config)")
 	listen := flag.String("listen", "", "comma-separated Yggdrasil listen URIs, e.g. tls://0.0.0.0:12345")
 	cliMode := flag.Bool("cli", false, "terminal chat (attaches to a node already running on -ui, or starts one)")
+	licenses := flag.Bool("licenses", false, "print the license (GPL-3.0-or-later) and third-party notices, then exit")
 	flag.Parse()
+	if *licenses {
+		for _, f := range []string{"web/THIRD_PARTY_NOTICES.txt", "web/LICENSE.txt"} {
+			b, _ := webFS.ReadFile(f)
+			os.Stdout.Write(b)
+			fmt.Println()
+		}
+		return
+	}
 	if *cliMode && apiUp(*uiAddr) {
 		runCLI(*uiAddr)
 		return

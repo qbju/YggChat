@@ -1,4 +1,4 @@
-YggChat v0.10 - NAT越え不要のP2Pチャット (Yggdrasil内蔵)
+YggChat v0.10.1 - NAT越え不要のP2Pチャット (Yggdrasil内蔵)
 
 ■ 使い方
 PWA(インストール不要): https://yggchat.surge.sh/
@@ -6,7 +6,7 @@ Windows: yggchat-windows-amd64.exe → ブラウザで http://127.0.0.1:7780/
 Android: APK版推奨。Termuxなら yggchat-android-arm64
 Linux:   ./yggchat-linux-amd64
 データ: ~/.yggchat/ (node.json=秘密鍵, chat.json=履歴, どちらも0600)
-オプション: -peers -listen -ui -data -cli
+オプション: -peers -listen -ui -data -cli -licenses
 
 ■ 端末のYggdrasilを使う (VPN型アプリと併用)
   Yggdrasil公式Androidアプリや、PCで常駐しているyggdrasilサービス(TUN)があれば、設定→ピア→
@@ -84,3 +84,13 @@ v0.4.2: 日付をまたぐとチャット画面が空になる不具合を修正
 v0.4:   相手がオフラインのときは「オンライン待ち」になり、双方オンラインで自動再送。
 v0.3:   Signal/Session風UI、送信状態、QRと招待リンク、ピア管理、公式public-peers一覧、通知。
 v0.2以降はUDP/7777。v0.1とは非互換。
+
+■ ライセンスとクレジット
+  YggChat is free software, licensed under the GNU General Public License v3.0 or later (LICENSE).
+  Copyright (C) 2026 h6e and YggChat contributors.
+  内蔵しているYggdrasil Network(yggdrasil-go/yggstack: LGPLv3+静的リンク例外, ironwood/phony: MPL-2.0)、
+  gVisor(Apache-2.0)、Go(BSD-3-Clause)、quic-go(MIT)、coder/websocket(ISC)、
+  qrcode-generator(MIT, Kazuhiko Arase)などの一覧と全文は THIRD_PARTY_NOTICES.txt にあります
+  (アプリの設定→About、または yggchat -licenses でも表示)。
+  yggdrasil-go は WebAssembly 対応のため一部ファイルを改変しています(該当ファイルに改変の注記あり)。
+  「QRコード」は株式会社デンソーウェーブの登録商標です。

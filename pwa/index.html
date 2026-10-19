@@ -1182,7 +1182,7 @@ select { font:inherit; font-size:16px; color:var(--fg); background:var(--surface
       <a class="dl-btn" href="https://yggchat.surge.sh/dl/yggchat-windows-amd64.exe" download>🪟 Windows (exe)</a>
       <a class="dl-btn" href="https://yggchat.surge.sh/dl/yggchat-linux-amd64" download>🐧 Linux (amd64)</a>
       <a class="dl-btn" href="https://yggchat.surge.sh/dl/yggchat-android-arm64" download>⌨️ Termux (arm64)</a>
-      <div class="row-sub" id="dl-ver">最新: v0.10 ・ SHA256SUMS で検証できます</div>
+      <div class="row-sub" id="dl-ver">最新: v0.10.1 ・ SHA256SUMS で検証できます</div>
     </div>
     <div class="section">
       <div class="section-title">About</div>
@@ -1192,6 +1192,12 @@ select { font:inherit; font-size:16px; color:var(--fg); background:var(--surface
           <div class="row-sub">Yggdrasil上のサーバーレスP2Pチャット。メッセージは端末間で直接届きます。</div>
           <div class="row-sub" id="platform-info"></div>
         </div>
+      </div>
+      <div class="row-sub">YggChatはフリーソフトウェアです（GPL-3.0-or-later）。© 2026 h6e and YggChat contributors</div>
+      <div class="row-sub">Yggdrasil Network（yggdrasil-go・yggstack・ironwood）、gVisor、Go、quic-go、coder/websocket、qrcode-generator（Kazuhiko Arase）ほか多くのオープンソースに支えられています。「QRコード」はデンソーウェーブの登録商標です。</div>
+      <div class="row-btns">
+        <button id="about-credits">クレジットと第三者ライセンス</button>
+        <button id="about-license">ライセンス（GPL-3.0）</button>
       </div>
     </div>
   </div>
@@ -2663,6 +2669,23 @@ async function fingerShow(addr, user){
     else pre.textContent = r.raw || '(空)';
   }catch(e){ pre.textContent = e.message; }
 }
+// ---------- About: license texts ----------
+async function showText(title, url){
+  const bg = document.createElement('div'); bg.className = 'modal-bg';
+  const m = document.createElement('div'); m.className = 'modal';
+  const t = document.createElement('div'); t.className = 'mt'; t.textContent = title;
+  const pre = document.createElement('pre');
+  pre.style.cssText = 'white-space:pre-wrap;word-break:break-word;font-family:ui-monospace,monospace;font-size:11px;max-height:65vh;overflow:auto;margin:8px 0;';
+  pre.textContent = '読み込み中…';
+  const b = document.createElement('div'); b.className = 'mb';
+  const ok = document.createElement('button'); ok.className = 'ok'; ok.textContent = '閉じる';
+  b.appendChild(ok); m.append(t, pre, b); bg.appendChild(m); document.body.appendChild(bg);
+  const done = () => { bg.remove(); modalClose = null; };
+  modalClose = done; ok.onclick = done; bg.onclick = e => { if(e.target === bg) done(); };
+  try{ const r = await fetch(url); if(!r.ok) throw new Error('HTTP ' + r.status); pre.textContent = await r.text(); }catch(e){ pre.textContent = '読み込めませんでした: ' + e.message; }
+}
+$('about-credits').addEventListener('click', () => showText('クレジットと第三者ライセンス', 'THIRD_PARTY_NOTICES.txt'));
+$('about-license').addEventListener('click', () => showText('GNU General Public License v3', 'LICENSE.txt'));
 $('reset-id').addEventListener('click', async () => {
   if(!(await uiDialog('新しいIDを作りますか？今のアドレス・連絡先・履歴はすべて消え、元に戻せません。', {okText:'作り直す', danger:true}))) return;
   const old = state.addr;

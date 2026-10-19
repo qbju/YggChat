@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 h6e and YggChat contributors
 const CACHE = 'yggchat-v7';
 const INDEX = './index.html';
 

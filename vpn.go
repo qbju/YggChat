@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 h6e and YggChat contributors
+
 // Android VPN mode: YggChat acts as the device's Yggdrasil (like the official
 // app). The Java VpnService creates a TUN for 200::/7 and hands its fd to this
 // process over an abstract unix socket; packets are pumped between the TUN and

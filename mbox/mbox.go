@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 h6e and YggChat contributors
+
 // Package mbox: sealed boxes for the YggChat relay mailbox (shared by the
 // native node and the WASM/PWA node).
 package mbox

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 h6e and YggChat contributors
+
 // LAN chat (opt-in): Yggdrasil multicast discovery on the local network.
 // Nodes on the same Wi-Fi / Ethernet / tethering find each other and peer
 // directly over link-local addresses, so chat keeps working with no Internet

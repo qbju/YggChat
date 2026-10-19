@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 h6e and YggChat contributors
+
 // Image messages: the UI compresses the picture, the node sends it as a
 // header ({t:"fh"}) plus base64 chunks ({t:"fc"}) that the receiver acks one
 // by one ({t:"fca"}); once all chunks arrive and the SHA-256 matches, the

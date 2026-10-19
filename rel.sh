@@ -11,6 +11,6 @@ CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build -trimpath -ldflags="-s -w -chec
 cp pwa/dl/yggchat-android-arm64 android/libyggchat.so
 ./android/build.sh >/dev/null
 cp android/out/yggchat.apk pwa/dl/yggchat.apk
-cp README.txt pwa/dl/README.txt
-(cd pwa/dl && sha256sum yggchat.apk yggchat-android-arm64 yggchat-linux-amd64 yggchat-windows-amd64.exe README.txt > SHA256SUMS && cat SHA256SUMS)
+cp README.txt LICENSE THIRD_PARTY_NOTICES.txt pwa/dl/
+(cd pwa/dl && sha256sum yggchat.apk yggchat-android-arm64 yggchat-linux-amd64 yggchat-windows-amd64.exe README.txt LICENSE THIRD_PARTY_NOTICES.txt > SHA256SUMS && cat SHA256SUMS)
 go version -m pwa/dl/yggchat-linux-amd64 | grep vcs

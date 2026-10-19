@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 h6e and YggChat contributors
 // YggChat PWA shim: runs a Yggdrasil node in WASM and emulates the native
 // daemon's /api/* (see API.md) so the same UI works in the browser.
 // The node, keys and history live only in this browser; it peers directly

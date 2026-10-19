@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 h6e and YggChat contributors
+
 // Native side of the optional Nostr offline delivery (see mbox/nostr.go).
 package main
 

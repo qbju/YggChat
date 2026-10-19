@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 h6e and YggChat contributors
+
 // v0.5 features: passcode-encrypted history, disappearing messages,
 // message requests with profile sharing on accept, blocking, identity reset.
 package main

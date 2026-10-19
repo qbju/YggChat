@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 h6e and YggChat contributors
+
 // Terminal chat: `yggchat -cli`. Talks to the node's local API, so it attaches
 // to a node that is already running (desktop, Termux, the Android app's node)
 // or, if none answers on -ui, the same process starts one and attaches to it.

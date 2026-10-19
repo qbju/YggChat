@@ -1,5 +1,8 @@
 //go:build js && wasm
 
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 h6e and YggChat contributors
+
 // Browser Yggdrasil node for the YggChat PWA.
 // Runs yggdrasil-go core in WASM, peers over wss://, and speaks the same
 // UDP/7777 JSON datagram protocol as the native node by hand-building IPv6+UDP packets.
