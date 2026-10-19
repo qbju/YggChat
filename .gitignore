@@ -1,0 +1,8 @@
+dist/
+*.zip
+*.apk
+/yggchat
+pwa/dl/
+android/out/
+android/libyggchat.so
+*.tmp

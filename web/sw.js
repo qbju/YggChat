@@ -1,0 +1,35 @@
+const CACHE = 'yggchat-v5';
+const INDEX = './index.html';
+
+self.addEventListener('install', e => {
+  e.waitUntil(caches.open(CACHE).then(c => c.addAll([INDEX, './manifest.webmanifest', './qrcode.js'])).then(() => self.skipWaiting()));
+});
+
+self.addEventListener('activate', e => {
+  e.waitUntil(
+    caches.keys()
+      .then(keys => Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k))))
+      .then(() => self.clients.claim())
+  );
+});
+
+// Cache-first for the shell; network-first for /api/* (never cached).
+self.addEventListener('fetch', e => {
+  const url = new URL(e.request.url);
+  if (e.request.method !== 'GET' || url.origin !== location.origin || url.pathname.startsWith('/api/')) return;
+  // Pages: network-first so updates show up immediately; other assets: cache-first.
+  if (e.request.mode === 'navigate') {
+    e.respondWith(fetch(e.request).then(res => { const c = res.clone(); if (res.ok) caches.open(CACHE).then(x => x.put(INDEX, c)); return res; }).catch(() => caches.match(INDEX)));
+    return;
+  }
+  e.respondWith(
+    caches.match(e.request, { ignoreSearch: true }).then(hit =>
+      hit ||
+      fetch(e.request).then(res => {
+        const copy = res.clone();
+        if (res.ok) caches.open(CACHE).then(c => c.put(e.request, copy));
+        return res;
+      }).catch(() => caches.match(INDEX))
+    )
+  );
+});
