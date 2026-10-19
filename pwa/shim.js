@@ -19,17 +19,34 @@
   // ---- persistent state ----
   // Outer record (always readable): key, peers, enc. Inner data (encrypted when
   // a passcode is set): nick, bio, avatar, contacts, messages, blocked.
-  const raw = JSON.parse(localStorage.getItem(LS) || '{}');
-  const outer = { key: raw.key || '', peers: raw.peers || null, enc: raw.enc || null };
-  if (outer.peers && outer.peers.some(p => /workers\.dev\/(evn|dnct)$/.test(p))) outer.peers = null;
-  if (!outer.peers) outer.peers = RECOMMENDED.slice();
+  // Stored in IndexedDB (images need more room than localStorage's ~5 MB);
+  // older versions kept everything in localStorage and are migrated once.
+  const idb = new Promise((res, rej) => {
+    const q = indexedDB.open('yggchat', 1);
+    q.onupgradeneeded = () => q.result.createObjectStore('kv');
+    q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error);
+  });
+  const idbGet = k => idb.then(db => new Promise((res, rej) => { const q = db.transaction('kv').objectStore('kv').get(k); q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error); }));
+  const idbPut = (k, v) => idb.then(db => new Promise((res, rej) => { const t = db.transaction('kv', 'readwrite'); t.objectStore('kv').put(v, k); t.oncomplete = res; t.onerror = () => rej(t.error); }));
+  let raw = {};
+  const outer = { key: '', peers: null, enc: null };
   const blank = () => ({ nick: 'anon', bio: '', avatar: '', contacts: {}, messages: [], blocked: {} });
   let st = blank();
-  let locked = !!outer.enc;
+  let locked = false;
   let aesKey = null; // CryptoKey while unlocked with a passcode
-  if (!locked) Object.assign(st, { nick: raw.nick || 'anon', bio: raw.bio || '', avatar: raw.avatar || '', contacts: raw.contacts || {}, messages: raw.messages || [], blocked: raw.blocked || {} });
   const migrate = () => { for (const m of st.messages) if (m.status === 'sending' || m.status === 'failed') m.status = 'queued'; };
-  if (!locked) migrate();
+  async function loadStore() {
+    raw = (await idbGet('state').catch(() => null)) || null;
+    if (!raw) {
+      raw = JSON.parse(localStorage.getItem(LS) || '{}');
+      if (Object.keys(raw).length) { await idbPut('state', raw); localStorage.removeItem(LS); }
+    }
+    Object.assign(outer, { key: raw.key || '', peers: raw.peers || null, enc: raw.enc || null });
+    if (outer.peers && outer.peers.some(p => /workers\.dev\/(evn|dnct)$/.test(p))) outer.peers = null;
+    if (!outer.peers) outer.peers = RECOMMENDED.slice();
+    locked = !!outer.enc;
+    if (!locked) { Object.assign(st, { nick: raw.nick || 'anon', bio: raw.bio || '', avatar: raw.avatar || '', contacts: raw.contacts || {}, messages: raw.messages || [], blocked: raw.blocked || {} }); migrate(); }
+  }
 
   const b64 = u8 => btoa(String.fromCharCode(...new Uint8Array(u8)));
   const unb64 = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
@@ -48,10 +65,11 @@
         rec.enc = { v: 1, salt: outer.enc.salt, iv: b64(iv), ct: b64(ct) };
         outer.enc = rec.enc;
       } else Object.assign(rec, st);
-      localStorage.setItem(LS, JSON.stringify(rec));
+      raw = rec;
+      await idbPut('state', rec);
     }).catch(e => console.error('save', e));
   }
-  const saveOuter = () => { const rec = JSON.parse(localStorage.getItem(LS) || '{}'); rec.key = outer.key; rec.peers = outer.peers; localStorage.setItem(LS, JSON.stringify(rec)); };
+  const saveOuter = () => { saving = saving.then(() => { raw = Object.assign({}, raw, { key: outer.key, peers: outer.peers }); return idbPut('state', raw); }).catch(e => console.error('save', e)); };
 
   let addr = '';
   const subs = new Set();
@@ -103,13 +121,15 @@
   const hello = p => send(p, { t: 'hi', pk: myPK() });
   function helloAll() { if (!locked) for (const p of Object.keys(st.contacts)) hello(p); }
 
-  function handleMsg(src, w) {
-    if (!w.text || w.text.length > 8000 || !/^[0-9A-Za-z_-]{1,40}$/.test(String(w.id))) return false;
+  const handleMsg = (src, w) => !!w.text && acceptMsg(src, w, '');
+  function acceptMsg(src, w, img) {
+    if ((!w.text && !img) || String(w.text || '').length > 8000 || !/^[0-9A-Za-z_-]{1,40}$/.test(String(w.id))) return false;
     if (locked || st.blocked[src]) return false;
     if (st.messages.some(m => m.peer === src && m.id === w.id)) return true;
     let ttl = w.ttl | 0; if (ttl < 0 || ttl > MAXTTL) ttl = 0;
     if (st.contacts[src] && (st.contacts[src].ttl || 0) !== ttl) setTTL(src, ttl, false);
-    const m = { id: w.id, peer: src, from: src, nick: cleanNick(w.nick), text: w.text, ts: w.ts || now(), out: false };
+    const m = { id: w.id, peer: src, from: src, nick: cleanNick(w.nick), text: w.text || '', ts: w.ts || now(), out: false };
+    if (img) m.img = img;
     if (ttl) { m.ttl = ttl; m.exp = now() + ttl; }
     addMessage(m);
     return true;
@@ -117,6 +137,7 @@
 
   function onPacket(src, json) {
     let w; try { w = JSON.parse(json) } catch { return }
+    if (w.t === 'fca') { const g = chunkAcks.get(w.id); if (g) g.add(w.i | 0); return; }
     if (w.t === 'ack') { const f = acks.get(w.id); if (f) { acks.delete(w.id); f(); } return; }
     if (locked || st.blocked[src]) return; // stay silent: the sender keeps it queued
     if (w.pk) learnPK(src, String(w.pk));
@@ -127,7 +148,74 @@
       c.bio = cleanText(w.bio, 140); c.avatar = cleanText(w.av, 8); c.hasprof = true; save(); emit('contact', c); return;
     }
     if (w.t === 'ttl') { setTTL(src, w.ttl | 0, false); return; }
+    if (w.t === 'fh') { onFileHeader(src, w); return; }
+    if (w.t === 'fc') { onFileChunk(src, w); return; }
     if (w.t === 'msg' && handleMsg(src, w)) { send(src, { t: 'ack', id: w.id }); if (queuedFor(src).length) flush(src); }
+  }
+
+  // ---- images: header + 12 KiB chunks, per-chunk acks, SHA-256 check ----
+  // Each datagram must fit a 1280-byte IPv6 packet (no fragmentation here).
+  const CHUNK = 864, IMGMAX = 600 * 1024, MAXN = Math.ceil(IMGMAX / CHUNK), CAPMAX = 800; // caption bytes
+  const u8len = t => new TextEncoder().encode(String(t || '')).length;
+  const MIMES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif']);
+  const hexOf = b => [...new Uint8Array(b)].map(x => x.toString(16).padStart(2, '0')).join('');
+  const sha = async u8 => hexOf(await crypto.subtle.digest('SHA-256', u8));
+  function parseImg(u) {
+    const m = /^data:(image\/(?:jpeg|png|webp|gif));base64,([A-Za-z0-9+/=]+)$/.exec(String(u || ''));
+    if (!m) return null;
+    const bytes = unb64(m[2]);
+    return bytes.length && bytes.length <= IMGMAX ? { mime: m[1], bytes } : null;
+  }
+  const chunkAcks = new Map();
+  const inFiles = new Map();
+  async function deliverImg(m, tries) {
+    const p = parseImg(m.img); if (!p) { setStatus(m.peer, m.id, 'failed'); return false; }
+    const n = Math.ceil(p.bytes.length / CHUNK);
+    const hdr = { t: 'fh', id: m.id, nick: m.nick, text: m.text || undefined, ts: m.ts, ttl: m.ttl || undefined, mime: p.mime, size: p.bytes.length, n, sha: await sha(p.bytes) };
+    const got = new Set(); chunkAcks.set(m.id, got);
+    const acked = new Promise(r => acks.set(m.id, r));
+    let done = false; acked.then(() => done = true);
+    try {
+      let idle = 0, last = -1;
+      while (idle < tries) {
+        send(m.peer, hdr);
+        if (got.size === last) idle++; else { idle = 0; last = got.size; }
+        await new Promise(r => setTimeout(r, 30));
+        for (let i = 0; i < n && !done; i++) if (!got.has(i)) { send(m.peer, { t: 'fc', id: m.id, i, d: b64(p.bytes.subarray(i * CHUNK, (i + 1) * CHUNK)) }); if (i % 8 === 7) await new Promise(r => setTimeout(r, 4)); }
+        const ok = await Promise.race([acked.then(() => true), new Promise(r => setTimeout(() => r(false), 2500))]);
+        if (ok) { setStatus(m.peer, m.id, 'sent'); return true; }
+      }
+      acks.delete(m.id);
+      setStatus(m.peer, m.id, 'queued'); // images don't go through the mailbox
+      return false;
+    } finally { chunkAcks.delete(m.id); }
+  }
+  function onFileHeader(src, w) {
+    const n = w.n | 0, size = w.size | 0;
+    if (!/^[0-9A-Za-z_-]{1,40}$/.test(String(w.id)) || !MIMES.has(w.mime) || n < 1 || n > MAXN || size < 1 || size > IMGMAX || Math.ceil(size / CHUNK) !== n || !/^[0-9a-f]{64}$/.test(String(w.sha)) || u8len(w.text) > CAPMAX || u8len(w.nick) > 120) return;
+    if (st.messages.some(m => m.peer === src && m.id === w.id)) { send(src, { t: 'ack', id: w.id }); return; }
+    const t = Date.now();
+    for (const [k, f] of inFiles) if (t - f.at > 180000) inFiles.delete(k);
+    const key = src + '/' + w.id;
+    if (inFiles.has(key) || inFiles.size >= 16) return;
+    inFiles.set(key, { hdr: w, chunks: new Array(n), got: 0, at: t });
+  }
+  async function onFileChunk(src, w) {
+    const key = src + '/' + w.id, f = inFiles.get(key), i = w.i | 0;
+    if (!f || i < 0 || i >= f.hdr.n) return;
+    if (!f.chunks[i]) {
+      let b; try { b = unb64(String(w.d || '')) } catch { return }
+      if (!b.length || b.length > CHUNK) return;
+      f.chunks[i] = b; f.got++; f.at = Date.now();
+    }
+    send(src, { t: 'fca', id: w.id, i });
+    if (f.got !== f.hdr.n || f.done) return;
+    f.done = true; inFiles.delete(key);
+    const all = new Uint8Array(f.hdr.size); let off = 0;
+    for (const c of f.chunks) { if (off + c.length > all.length) return; all.set(c, off); off += c.length; }
+    if (off !== f.hdr.size || await sha(all) !== f.hdr.sha) return;
+    let s = ''; for (let j = 0; j < all.length; j += 0x8000) s += String.fromCharCode(...all.subarray(j, j + 0x8000));
+    if (acceptMsg(src, f.hdr, 'data:' + f.hdr.mime + ';base64,' + btoa(s))) send(src, { t: 'ack', id: w.id });
   }
 
   // ---- mailbox ----
@@ -165,6 +253,7 @@
     if (inflight.has(m.id)) return false;
     inflight.add(m.id);
     if (m.status !== 'sending') setStatus(m.peer, m.id, 'sending');
+    if (m.img) { try { return await deliverImg(m, tries); } finally { inflight.delete(m.id); } }
     const pkt = JSON.stringify({ t: 'msg', id: m.id, nick: m.nick, text: m.text, ts: m.ts, ttl: m.ttl || undefined });
     const acked = new Promise(r => acks.set(m.id, r));
     const wasStored = m.status === 'stored';
@@ -190,6 +279,7 @@
   }, 2000);
 
   const ready = (async () => {
+    await loadStore();
     const go = new Go();
     const wasmReady = new Promise(r => addEventListener('yggready', r, { once: true }));
     const res = await WebAssembly.instantiateStreaming(fetch('ygg.wasm'), go.importObject);
@@ -272,12 +362,15 @@
         }
         const dst = norm(body.To || '');
         if (!isYgg(dst)) return bad('not a Yggdrasil address: ' + body.To);
-        if (!body.Text || body.Text.length > 8000) return bad('message empty or too long');
+        if ((!body.Text && !body.Img) || String(body.Text || '').length > 8000) return bad('message empty or too long');
+        if (body.Img && !parseImg(body.Img)) return bad('unsupported or too large image (max 600KB)');
+        if (body.Img && u8len(body.Text) > CAPMAX) return bad('写真に添える文章が長すぎます（約260文字まで）');
         const c = st.contacts[dst];
         const share = !c || !c.shared;
         if (c && (c.req || !c.shared)) { c.req = false; c.shared = true; emit('contact', c); }
         const ttl = (c && c.ttl) || 0;
-        const m = { id: Date.now().toString(16) + Math.random().toString(16).slice(2, 6), peer: dst, from: addr, nick: st.nick, text: body.Text, ts: now(), out: true, status: 'sending' };
+        const m = { id: Date.now().toString(16) + Math.random().toString(16).slice(2, 6), peer: dst, from: addr, nick: st.nick, text: body.Text || '', ts: now(), out: true, status: 'sending' };
+        if (body.Img) m.img = body.Img;
         if (ttl) { m.ttl = ttl; m.exp = m.ts + ttl; }
         addMessage(m); if (share) sendProf(dst); deliver(m); return ok(m);
       }
@@ -311,7 +404,7 @@
       }
       case 'identity/reset': {
         if (!body.Confirm) return bad('confirm required');
-        outer.key = ''; st.contacts = {}; st.messages = []; save(); await saving; saveOuter();
+        outer.key = ''; st.contacts = {}; st.messages = []; save(); saveOuter(); await saving;
         setTimeout(() => location.reload(), 300);
         return ok({});
       }

@@ -913,9 +913,18 @@ input, textarea { font-size:16px !important; }
 .btn-danger { color:var(--error) !important; }
 .row-btns { display:flex; gap:8px; flex-wrap:wrap; }
 select { font:inherit; font-size:16px; color:var(--fg); background:var(--surface); border:1px solid var(--border); border-radius:10px; padding:8px 10px; }
+.img-bubble { padding:4px !important; max-width:72%; }
+.msg-img { display:block; max-width:100%; max-height:320px; border-radius:12px; cursor:zoom-in; -webkit-touch-callout:default; }
+.img-cap { padding:6px 8px 4px; white-space:pre-wrap; word-break:break-word; }
+#attach-btn { flex:0 0 auto; font-size:20px; }
+.img-viewer { position:fixed; inset:0; z-index:90; background:rgba(0,0,0,.92); display:none; align-items:center; justify-content:center; flex-direction:column; padding:calc(12px + env(safe-area-inset-top)) 12px calc(12px + env(safe-area-inset-bottom)); }
+.img-viewer.active { display:flex; }
+.img-viewer img { max-width:100%; max-height:calc(100% - 64px); object-fit:contain; -webkit-touch-callout:default; }
+.iv-bar { display:flex; gap:10px; margin-top:12px; }
 </style>
 </head>
 <body class="two-pane">
+<div id="img-viewer" class="img-viewer"><img id="img-viewer-img" alt=""><div class="iv-bar"><button id="iv-save">保存</button><button id="iv-close">閉じる</button></div></div>
 <div class="screen" id="lock-screen">
   <div style="font-size:42px;">🔒</div>
   <div style="font-weight:600;">YggChat はロックされています</div>
@@ -970,6 +979,8 @@ select { font:inherit; font-size:16px; color:var(--fg); background:var(--surface
     </div>
     <div class="composer" id="composer">
       <div class="composer-inner">
+        <button id="attach-btn" class="icon-btn" title="写真を送る" aria-label="写真を送る">📎</button>
+        <input id="img-input" type="file" accept="image/*" style="display:none;">
         <textarea id="msg-text" rows="1" placeholder="メッセージ…" autocomplete="off" maxlength="4096"></textarea>
         <button id="send-btn" disabled>送信</button>
       </div>
@@ -1114,7 +1125,7 @@ select { font:inherit; font-size:16px; color:var(--fg); background:var(--surface
       <a class="dl-btn" href="https://yggchat.surge.sh/dl/yggchat-windows-amd64.exe" download>🪟 Windows (exe)</a>
       <a class="dl-btn" href="https://yggchat.surge.sh/dl/yggchat-linux-amd64" download>🐧 Linux (amd64)</a>
       <a class="dl-btn" href="https://yggchat.surge.sh/dl/yggchat-android-arm64" download>⌨️ Termux (arm64)</a>
-      <div class="row-sub" id="dl-ver">最新: v0.5 ・ SHA256SUMS で検証できます</div>
+      <div class="row-sub" id="dl-ver">最新: v0.6 ・ SHA256SUMS で検証できます</div>
     </div>
     <div class="section">
       <div class="section-title">About</div>
@@ -1373,9 +1384,9 @@ function renderList(){
       lastText = '⏱ 消えるメッセージ: ' + ttlLabel((last.sys.split(':')[1])|0);
     }else if(last){
       if(last.out){
-        lastText = 'あなた: ' + safeText(last.text);
+        lastText = 'あなた: ' + (last.img ? '📷 ' : '') + (safeText(last.text) || (last.img ? '写真' : ''));
       }else{
-        lastText = safeText(last.text);
+        lastText = (last.img ? '📷 ' : '') + (safeText(last.text) || (last.img ? '写真' : ''));
       }
     }
     const uc = unreadCount(a);
@@ -1462,7 +1473,11 @@ function renderMessages(){
         + '<div style="font-size:11px; color:var(--dim);">' + escapeHtml(m.nick || addrShort(m.from||curAddr)) + '</div>'
         + '</div>';
     }
-    html += '<div class="bubble">' + escapeHtml(m.text) + '</div>';
+    if(m.img && /^data:image\/(jpeg|png|webp|gif);base64,[A-Za-z0-9+\/=]+$/.test(m.img)){
+      html += '<div class="bubble img-bubble"><img class="msg-img" alt="写真" loading="lazy" src="' + m.img + '">' + (m.text ? '<div class="img-cap">' + escapeHtml(m.text) + '</div>' : '') + '</div>';
+    }else{
+      html += '<div class="bubble">' + escapeHtml(m.text) + '</div>';
+    }
     const st = m.out ? (m.status || 'sent') : null;
     html += '<div class="msg-meta">';
     html += '<span title="' + escapeHtml(fullTimeStr(m.ts)) + '">' + escapeHtml(hmStr(m.ts)) + '</span>';
@@ -2182,7 +2197,7 @@ function notifyIncoming(m){
   }
   if(document.hidden || document.visibilityState === 'hidden'){
     try{
-      const n = new Notification(m.nick || addrShort(m.from||m.peer), {body: m.text, tag: m.id || ('msg:'+m.peer)});
+      const n = new Notification(m.nick || addrShort(m.from||m.peer), {body: m.img ? ('📷 写真' + (m.text ? ' ' + m.text : '')) : m.text, tag: m.id || ('msg:'+m.peer)});
     }catch(e){}
   }
 }
@@ -2434,7 +2449,66 @@ $('ci-ttl').addEventListener('change', async () => {
   try{ const c = await api('/api/contact', {Addr: curAddr, TTL: v}); state.contacts[curAddr] = c; updateChatHeader(); renderList(); toast('消えるメッセージ: ' + ttlLabel(v)); }catch(e){ toast(e.message); }
 });
 
+// ===== images =====
+async function compressImage(file){
+  // Downscale to ≤1600px and re-encode as JPEG until it fits in ~600KB.
+  let bmp;
+  try{ bmp = await createImageBitmap(file, {imageOrientation:'from-image'}); }
+  catch(e){
+    bmp = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = URL.createObjectURL(file); });
+  }
+  const W = bmp.width, H = bmp.height;
+  for(const [max, q] of [[1600,.75],[1280,.72],[1280,.6],[1024,.6],[800,.55],[640,.5]]){
+    const k = Math.min(1, max / Math.max(W, H));
+    const c = document.createElement('canvas');
+    c.width = Math.max(1, Math.round(W*k)); c.height = Math.max(1, Math.round(H*k));
+    const g = c.getContext('2d'); g.fillStyle = '#fff'; g.fillRect(0,0,c.width,c.height); g.drawImage(bmp, 0, 0, c.width, c.height);
+    const url = c.toDataURL('image/jpeg', q);
+    if(url.length * 0.75 <= 400*1024) return url;
+  }
+  throw new Error('画像が大きすぎます');
+}
+$('attach-btn').addEventListener('click', () => { if(curAddr) $('img-input').click(); });
+$('img-input').addEventListener('change', async () => {
+  const f = $('img-input').files && $('img-input').files[0];
+  $('img-input').value = '';
+  if(!f || !curAddr) return;
+  if(!/^image\//.test(f.type)){ toast('画像を選んでください'); return; }
+  let url;
+  try{ url = await compressImage(f); }catch(e){ toast('画像を読み込めませんでした'); return; }
+  const kb = Math.round(url.length * 0.75 / 1024);
+  const cap = $('msg-text').value.trim();
+  if(new TextEncoder().encode(cap).length > 800){ toast('写真に添える文章が長すぎます（約260文字まで）'); return; }
+  const okd = await uiDialog('この写真を送りますか？（' + kb + 'KB' + (cap ? '・入力中の文章を添えて' : '') + '）', {okText:'送信'});
+  if(!okd) return;
+  try{
+    const m = await api('/api/send', {To: curAddr, Text: cap, Img: url});
+    if(m && m.id && !state.messages.some(x => x.id === m.id)) state.messages.push(m);
+    $('msg-text').value = ''; $('msg-text').style.height = 'auto'; $('send-btn').disabled = true;
+    renderMessages(); renderList();
+  }catch(e){ toast(e.message); }
+});
+$('messages').addEventListener('click', (e) => {
+  const im = e.target.closest && e.target.closest('.msg-img');
+  if(!im) return;
+  $('img-viewer-img').src = im.src;
+  $('img-viewer').classList.add('active');
+});
+function closeViewer(){ $('img-viewer').classList.remove('active'); $('img-viewer-img').removeAttribute('src'); }
+$('iv-close').addEventListener('click', closeViewer);
+$('img-viewer').addEventListener('click', (e) => { if(e.target.id === 'img-viewer') closeViewer(); });
+$('iv-save').addEventListener('click', async () => {
+  const src = $('img-viewer-img').src;
+  try{
+    const blob = await (await fetch(src)).blob();
+    const file = new File([blob], 'yggchat-' + Date.now() + '.jpg', {type: blob.type});
+    if(navigator.canShare && navigator.canShare({files:[file]})){ await navigator.share({files:[file]}); return; }
+  }catch(e){ if(e && e.name === 'AbortError') return; }
+  const a = document.createElement('a'); a.href = src; a.download = 'yggchat-' + Date.now() + '.jpg'; document.body.appendChild(a); a.click(); a.remove();
+});
+
 window.ygBack = () => {
+  if($('img-viewer').classList.contains('active')){ closeViewer(); return true; }
   if(modalClose){ modalClose(); return true; }
   if($('contact-info-screen').classList.contains('active')){
     closeContactInfo();

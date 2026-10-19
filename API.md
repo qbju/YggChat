@@ -48,3 +48,7 @@ POST /api/identity/reset {Confirm:true} -> new key, contacts/history wiped, node
 Events add: msg_del {peer,id}, locked.
 Wire adds: msg.ttl; {t:"prof",nick,bio,av,pk}; {t:"ttl",ttl}; hi/hiack carry pk. Receivers verify pk against the source address.
 Mailbox (worker yggws): POST /mb/put {to:tag, box}; /mb/get and /mb/del {pk, ts, sig=Ed25519("yggchat-mb-<op>:<tag>:<ts>"), keys?}. tag = hex(sha256("yggchat-mb:"+pkHex))[:32]. Box = base64(nacl sealed box to X25519(pk) of {pk, w, sig=Ed25519(recipientPK||w)}). 7-day expiry, 200 boxes per tag.
+
+## v0.6 images
+POST /api/send {To, Text?, Img: "data:image/(jpeg|png|webp|gif);base64,..."} (decoded ≤ 600 KB; UI compresses to ≤ ~400 KB JPEG). Message.img holds the data URL.
+Wire: {t:"fh", id, nick, text?, ts, ttl?, mime, size, n, sha} then {t:"fc", id, i, d} (864-byte raw chunks so every datagram fits the 1280-byte IPv6 MTU unfragmented — the PWA can't do IPv6 fragments; caption ≤800 UTF-8 bytes so the header fits too; image ≤600 KB) acked by {t:"fca", id, i}; after all chunks + SHA-256 match the receiver stores it and sends {t:"ack", id}. Sender rounds: header + unacked chunks every 2.5 s; gives up after `tries` rounds without progress → queued (no mailbox for images).

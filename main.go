@@ -60,6 +60,7 @@ type Message struct {
 	TTL    int    `json:"ttl,omitempty"` // disappearing timer (seconds)
 	Exp    int64  `json:"exp,omitempty"` // unix time when this message is deleted
 	Sys    string `json:"sys,omitempty"` // system line, e.g. "ttl:300"
+	Img    string `json:"img,omitempty"` // data:image/...;base64,... (compressed by the UI)
 }
 
 type Contact struct {
@@ -190,6 +191,8 @@ type App struct {
 	acks     map[string]chan struct{}
 	flMu     sync.Mutex
 	inflight map[string]bool
+	fsOnce   sync.Once
+	fs       *fileState
 	seenMu   sync.Mutex
 	seen     map[string]bool
 	profAt   map[string]time.Time
@@ -240,7 +243,13 @@ type wire struct {
 	TTL  int    `json:"ttl,omitempty"`
 	Bio  string `json:"bio,omitempty"`
 	Av   string `json:"av,omitempty"`
-	PK   string `json:"pk,omitempty"` // sender's full Ed25519 key (hi/hiack/prof)
+	PK   string `json:"pk,omitempty"`   // sender's full Ed25519 key (hi/hiack/prof)
+	Mime string `json:"mime,omitempty"` // image header (fh)
+	Size int    `json:"size,omitempty"`
+	N    int    `json:"n,omitempty"`
+	Sha  string `json:"sha,omitempty"`
+	I    int    `json:"i,omitempty"` // chunk index (fc/fca)
+	D    string `json:"d,omitempty"` // chunk data, base64
 }
 
 func (a *App) serveChat() {
@@ -261,6 +270,10 @@ func (a *App) serveChat() {
 		}
 		// The source IP is cryptographically bound to the sender's key by Yggdrasil.
 		from := raddr.(*net.UDPAddr).IP.String()
+		if w.T == "fca" {
+			a.onFileAck(w)
+			continue
+		}
 		if w.T == "ack" {
 			a.ackMu.Lock()
 			if ch, ok := a.acks[w.ID]; ok {
@@ -287,6 +300,10 @@ func (a *App) serveChat() {
 			}
 			a.maybeProf(from)
 			go a.flush(from)
+		case "fh":
+			a.onFileHeader(from, w)
+		case "fc":
+			a.onFileChunk(from, w)
 		case "prof", "ttl":
 			a.handleCtl(from, w)
 		case "msg":
@@ -301,7 +318,14 @@ func (a *App) serveChat() {
 // handleMsg validates and stores an incoming message (direct or from the
 // mailbox). Returns true when it should be acked.
 func (a *App) handleMsg(from string, w wire) bool {
-	if w.Text == "" || len(w.Text) > 8000 || !msgIDRe.MatchString(w.ID) {
+	if w.Text == "" {
+		return false
+	}
+	return a.acceptMsg(from, w, "")
+}
+
+func (a *App) acceptMsg(from string, w wire, img string) bool {
+	if (w.Text == "" && img == "") || len(w.Text) > 8000 || !msgIDRe.MatchString(w.ID) {
 		return false
 	}
 	a.store.mu.Lock()
@@ -329,7 +353,7 @@ func (a *App) handleMsg(from string, w wire) bool {
 	if known && c.TTL != w.TTL {
 		a.setTTL(from, w.TTL, false)
 	}
-	m := Message{ID: w.ID, Peer: from, From: from, Nick: cleanNick(w.Nick), Text: w.Text, TS: w.TS, TTL: w.TTL}
+	m := Message{ID: w.ID, Peer: from, From: from, Nick: cleanNick(w.Nick), Text: w.Text, TS: w.TS, TTL: w.TTL, Img: img}
 	if w.TTL > 0 {
 		m.Exp = time.Now().Unix() + int64(w.TTL)
 	}
@@ -370,13 +394,21 @@ func (a *App) setStatus(peer, id, status string) {
 }
 
 // send stores the message as "sending" and delivers it in the background.
-func (a *App) send(to, text string) (Message, error) {
+func (a *App) send(to, text, img string) (Message, error) {
 	ip := net.ParseIP(to)
 	if ip == nil || len(ip) != 16 || (ip[0]&0xfe) != 0x02 {
 		return Message{}, fmt.Errorf("not a Yggdrasil address: %s", to)
 	}
-	if text == "" || len(text) > 8000 {
+	if (text == "" && img == "") || len(text) > 8000 {
 		return Message{}, fmt.Errorf("message empty or too long")
+	}
+	if img != "" {
+		if _, _, err := parseImg(img); err != nil {
+			return Message{}, err
+		}
+		if len(text) > capMax {
+			return Message{}, fmt.Errorf("caption too long (max %d bytes, about 260 Japanese characters)", capMax)
+		}
 	}
 	peer := ip.String()
 	a.store.mu.Lock()
@@ -396,7 +428,7 @@ func (a *App) send(to, text string) (Message, error) {
 	if ok && share {
 		a.broadcast("contact", c)
 	}
-	m := Message{ID: fmt.Sprintf("%x", time.Now().UnixNano()), Peer: peer, From: a.addr, Nick: nick, Text: text, TS: time.Now().Unix(), Out: true, Status: "sending", TTL: c.TTL}
+	m := Message{ID: fmt.Sprintf("%x", time.Now().UnixNano()), Peer: peer, From: a.addr, Nick: nick, Text: text, TS: time.Now().Unix(), Out: true, Status: "sending", TTL: c.TTL, Img: img}
 	if c.TTL > 0 {
 		m.Exp = m.TS + int64(c.TTL)
 	}
@@ -442,6 +474,9 @@ func (a *App) deliverN(m Message, tries int) bool {
 	defer func() { a.flMu.Lock(); delete(a.inflight, m.ID); a.flMu.Unlock() }()
 	if m.Status != "sending" {
 		a.setStatus(m.Peer, m.ID, "sending")
+	}
+	if m.Img != "" {
+		return a.deliverImg(m, tries)
 	}
 	b, _ := json.Marshal(wire{T: "msg", ID: m.ID, Nick: m.Nick, Text: m.Text, TS: m.TS, TTL: m.TTL})
 	ch := make(chan struct{})
@@ -701,8 +736,8 @@ func (a *App) httpHandlers(mux *http.ServeMux) {
 		})
 	})
 	mux.HandleFunc("/api/send", func(w http.ResponseWriter, r *http.Request) {
-		var req struct{ To, Text, Retry string }
-		if r.Method != "POST" || json.NewDecoder(r.Body).Decode(&req) != nil {
+		var req struct{ To, Text, Retry, Img string }
+		if r.Method != "POST" || json.NewDecoder(http.MaxBytesReader(w, r.Body, 2<<20)).Decode(&req) != nil {
 			http.Error(w, "bad request", 400)
 			return
 		}
@@ -716,7 +751,7 @@ func (a *App) httpHandlers(mux *http.ServeMux) {
 			}
 			m, err = a.retry(ip.String(), req.Retry)
 		} else {
-			m, err = a.send(strings.TrimSpace(req.To), req.Text)
+			m, err = a.send(strings.TrimSpace(req.To), req.Text, req.Img)
 		}
 		if err != nil {
 			http.Error(w, err.Error(), 502)
