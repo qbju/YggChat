@@ -1069,6 +1069,12 @@ func main() {
 	if err := checkUIAddr(*uiAddr); err != nil {
 		log.Fatal(err)
 	}
+	_ = os.MkdirAll(*dataDir, 0700)
+	if k, err := loadUIKey(*dataDir); err != nil {
+		log.Fatal("ui key: ", err)
+	} else {
+		uiKey = k
+	}
 	if *cliMode && apiUp(*uiAddr) {
 		runCLI(*uiAddr)
 		return
@@ -1076,7 +1082,7 @@ func main() {
 	wantWindow := !*cliMode && !*noWindow && runtime.GOOS == "windows"
 	if wantWindow && apiUp(*uiAddr) {
 		// Already running (e.g. double-clicked twice): just show it.
-		openWindow("http://"+*uiAddr+"/", *dataDir)
+		openWindow(uiURL(*uiAddr), *dataDir)
 		return
 	}
 	_ = os.MkdirAll(*dataDir, 0700)
@@ -1222,16 +1228,16 @@ func main() {
 	a.vpnFWHandlers(mux, *dataDir)
 	a.lanHandlers(mux)
 	if !*cliMode {
-		fmt.Printf("YggChat\n  your address: %s\n  open UI:      http://%s/\n", a.addr, *uiAddr)
+		fmt.Printf("YggChat\n  your address: %s\n  open UI:      %s\n", a.addr, uiURL(*uiAddr))
 	}
 	ln, err := listenRetry(*uiAddr)
 	if err != nil {
 		log.Fatal(err)
 	}
-	handler := localOnly(*uiAddr, a.lockGuard(mux))
+	handler := localOnly(*uiAddr, keyGuard(*uiAddr, a.lockGuard(mux)))
 	if wantWindow {
 		go func() { log.Fatal(http.Serve(ln, handler)) }()
-		if openWindow("http://"+*uiAddr+"/", *dataDir) {
+		if openWindow(uiURL(*uiAddr), *dataDir) {
 			return // window closed: quit
 		}
 		select {}

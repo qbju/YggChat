@@ -49,7 +49,7 @@ public class YggService extends Service {
             while (running) {
                 boolean on = false;
                 try {
-                    HttpURLConnection c = (HttpURLConnection) new URL("http://127.0.0.1:7780/api/lan").openConnection();
+                    HttpURLConnection c = api(YggService.this, "/api/lan");
                     c.setConnectTimeout(3000); c.setReadTimeout(5000);
                     BufferedReader r = new BufferedReader(new InputStreamReader(c.getInputStream(), "UTF-8"));
                     StringBuilder sb = new StringBuilder(); String line;
@@ -86,7 +86,7 @@ public class YggService extends Service {
         watcher = new Thread(new Runnable() { public void run() {
             while (running) {
                 try {
-                    HttpURLConnection c = (HttpURLConnection) new URL("http://127.0.0.1:7780/api/events").openConnection();
+                    HttpURLConnection c = api(YggService.this, "/api/events");
                     c.setReadTimeout(60000);
                     BufferedReader r = new BufferedReader(new InputStreamReader(c.getInputStream(), "UTF-8"));
                     String line;
@@ -129,6 +129,22 @@ public class YggService extends Service {
             if (Build.VERSION.SDK_INT < 26) b.setPriority(Notification.PRIORITY_HIGH).setDefaults(Notification.DEFAULT_ALL);
             nm.notify(notifId++, b.build());
         } catch (Exception e) { }
+    }
+
+    // The node's local API key (<data>/ui-key): every request must carry it,
+    // because other apps on the device can reach 127.0.0.1 too.
+    static String uiKey(android.content.Context ctx) {
+        try {
+            java.io.FileInputStream in = new java.io.FileInputStream(new File(new File(ctx.getFilesDir(), "yggchat"), "ui-key"));
+            byte[] b = new byte[128]; int n = in.read(b); in.close();
+            return n > 0 ? new String(b, 0, n, "UTF-8").trim() : "";
+        } catch (Exception e) { return ""; }
+    }
+
+    static HttpURLConnection api(android.content.Context ctx, String path) throws java.io.IOException {
+        HttpURLConnection c = (HttpURLConnection) new URL("http://127.0.0.1:7780" + path).openConnection();
+        c.setRequestProperty("X-YggChat-Key", uiKey(ctx));
+        return c;
     }
 
     private synchronized void startNode() {

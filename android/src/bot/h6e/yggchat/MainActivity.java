@@ -18,6 +18,17 @@ public class MainActivity extends Activity {
     // bridge refuses to act for any other page.
     private volatile boolean onHome;
 
+    // Opens the UI through the launch URL, which gives the WebView the API key
+    // as an HttpOnly cookie. Waits for the node to create the key on first run.
+    void loadHome(final WebView v, final int tries) {
+        String k = YggService.uiKey(this);
+        if (k.isEmpty() && tries < 50) {
+            new Handler().postDelayed(new Runnable(){ public void run(){ loadHome(v, tries + 1); }}, 200);
+            return;
+        }
+        v.loadUrl(HOME + "?k=" + k);
+    }
+
     static boolean isHome(String u) { return u != null && u.startsWith(HOME); }
 
     // Anything that is not the app's own UI goes to the user's browser.
@@ -113,20 +124,20 @@ public class MainActivity extends Activity {
             }
             @Override public void onPageStarted(WebView v, String url, android.graphics.Bitmap f) {
                 onHome = isHome(url);
-                if (!onHome) { v.stopLoading(); openOutside(Uri.parse(url)); v.loadUrl(HOME); }
+                if (!onHome) { v.stopLoading(); openOutside(Uri.parse(url)); loadHome(v, 0); }
             }
             @Override public void doUpdateVisitedHistory(WebView v, String url, boolean reload) {
                 onHome = isHome(url);
             }
             @Override public void onReceivedError(WebView v, WebResourceRequest r, WebResourceError e) {
-                if (r.isForMainFrame()) { final WebView vv = v; new Handler().postDelayed(new Runnable(){ public void run(){ vv.loadUrl(HOME); }}, 700); }
+                if (r.isForMainFrame()) { final WebView vv = v; new Handler().postDelayed(new Runnable(){ public void run(){ loadHome(vv, 0); }}, 700); }
             }
         });
         web.setDownloadListener(new DownloadListener() {
             public void onDownloadStart(String url, String ua, String cd, String mime, long len) { openOutside(Uri.parse(url)); }
         });
         setContentView(web);
-        new Handler().postDelayed(new Runnable(){ public void run(){ web.loadUrl(HOME); }}, 800);
+        new Handler().postDelayed(new Runnable(){ public void run(){ loadHome(web, 0); }}, 800);
     }
 
     void vpnResult(boolean ok) {

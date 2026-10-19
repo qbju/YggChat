@@ -38,7 +38,7 @@ public class YggVpn extends VpnService {
     private void work() {
         while (running) {
             try {
-                HttpURLConnection c = (HttpURLConnection) new URL("http://127.0.0.1:7780/api/vpn").openConnection();
+                HttpURLConnection c = YggService.api(this, "/api/vpn");
                 c.setConnectTimeout(2000); c.setReadTimeout(3000);
                 InputStream in = c.getInputStream();
                 java.util.Scanner sc = new java.util.Scanner(in, "UTF-8").useDelimiter("\\A");

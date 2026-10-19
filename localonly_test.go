@@ -35,3 +35,47 @@ func TestLocalOnlyRemoteAddr(t *testing.T) {
 		}
 	}
 }
+
+func TestKeyGuard(t *testing.T) {
+	uiKey = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	defer func() { uiKey = "" }()
+	h := keyGuard("127.0.0.1:7780", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(204) }))
+	do := func(path string, hdr map[string]string, c *http.Cookie) *httptest.ResponseRecorder {
+		r := httptest.NewRequest("GET", path, nil)
+		for k, v := range hdr {
+			r.Header.Set(k, v)
+		}
+		if c != nil {
+			r.AddCookie(c)
+		}
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		return w
+	}
+	if w := do("/api/state", nil, nil); w.Code != 401 {
+		t.Fatal("no key:", w.Code)
+	}
+	if w := do("/", nil, nil); w.Code != 401 {
+		t.Fatal("no key page:", w.Code)
+	}
+	if w := do("/api/state", map[string]string{uiKeyHeader: "bad"}, nil); w.Code != 401 {
+		t.Fatal("bad header:", w.Code)
+	}
+	if w := do("/?k=nope", nil, nil); w.Code != 403 {
+		t.Fatal("bad k:", w.Code)
+	}
+	if w := do("/api/state", map[string]string{uiKeyHeader: uiKey}, nil); w.Code != 204 {
+		t.Fatal("header:", w.Code)
+	}
+	w := do("/?k="+uiKey, nil, nil)
+	if w.Code != 303 || w.Header().Get("Location") != "/" {
+		t.Fatal("launch:", w.Code, w.Header().Get("Location"))
+	}
+	ck := w.Result().Cookies()
+	if len(ck) != 1 || !ck[0].HttpOnly {
+		t.Fatal("cookie", ck)
+	}
+	if w := do("/api/state", nil, ck[0]); w.Code != 204 {
+		t.Fatal("cookie auth:", w.Code)
+	}
+}

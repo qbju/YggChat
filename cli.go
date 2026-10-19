@@ -42,10 +42,10 @@ type cli struct {
 	out  *bufio.Writer
 }
 
-var cliHTTP = &http.Client{Timeout: 30 * time.Second}
+var cliHTTP = &http.Client{Timeout: 30 * time.Second, Transport: keyTransport{}}
 
 func apiUp(ui string) bool {
-	c := &http.Client{Timeout: 1500 * time.Millisecond}
+	c := &http.Client{Timeout: 1500 * time.Millisecond, Transport: keyTransport{}}
 	r, err := c.Get("http://" + ui + "/api/state")
 	if err != nil {
 		return false
@@ -152,7 +152,7 @@ func (c *cli) line(m Message) string {
 
 func (c *cli) events() {
 	for {
-		r, err := (&http.Client{}).Get(c.base + "/api/events")
+		r, err := (&http.Client{Transport: keyTransport{}}).Get(c.base + "/api/events")
 		if err == nil {
 			sc := bufio.NewScanner(r.Body)
 			sc.Buffer(make([]byte, 64<<10), 4<<20)

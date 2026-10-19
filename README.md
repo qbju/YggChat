@@ -1,6 +1,6 @@
 # YggChat
 
-NAT越え不要のP2Pチャット（Yggdrasil内蔵）。現在のバージョン: **v0.12.1**
+NAT越え不要のP2Pチャット（Yggdrasil内蔵）。現在のバージョン: **v0.12.2**
 
 [![build](https://github.com/qbju/YggChat/actions/workflows/build.yml/badge.svg)](https://github.com/qbju/YggChat/actions/workflows/build.yml)
 
@@ -9,7 +9,7 @@ NAT越え不要のP2Pチャット（Yggdrasil内蔵）。現在のバージョ�
 | 環境 | 使い方 |
 | --- | --- |
 | PWA（インストール不要） | <https://yggchat.surge.sh/> |
-| Windows | `yggchat-windows-amd64.exe` をダブルクリック → アプリのウィンドウ（WebView2）が開きます。WebView2ランタイムがない環境では既定のブラウザで <http://127.0.0.1:7780/> を開きます |
+| Windows | `yggchat-windows-amd64.exe` をダブルクリック → アプリのウィンドウ（WebView2）が開きます。WebView2ランタイムがない環境では既定のブラウザで鍵付きの `http://127.0.0.1:7780/?k=…` を開きます |
 | Android | APK版推奨。Termuxなら `yggchat-android-arm64` |
 | Linux | `./yggchat-linux-amd64` |
 
@@ -79,7 +79,7 @@ Yggdrasil公式Androidアプリや、PCで常駐しているyggdrasilサービ�
 
 - メッセージはYggdrasilのセッション暗号で端末間エンドツーエンドに暗号化されます。アドレスは公開鍵から導出されるため、QR／招待リンクでアドレスを確認すれば相手の鍵も確認できます。
 - 受信メッセージの送信者は、Yggdrasilが暗号的に保証する送信元IPv6アドレスで判定しています（自己申告は使いません）。
-- **ネイティブ版**: ノードは端末内で動作。UI/APIは認証がないためループバック（`127.0.0.1`／`[::1]`／`localhost`）でしか待ち受けられず、接続元アドレス・Host／Origin／Content-Typeを検証します。ブラウザ上の他サイトからは使えませんが、同じ端末で動く他のプログラムからは接続できる点に注意してください。
+- **ネイティブ版**: ノードは端末内で動作。UI/APIはループバック（`127.0.0.1`／`[::1]`／`localhost`）でしか待ち受けられず、接続元アドレス・Host／Origin／Content-Typeを検証します。さらにデータフォルダの `ui-key` に置いた鍵（Cookieまたは `X-YggChat-Key` ヘッダー）がないリクエストは拒否するので、同じ端末の他アプリ・他ユーザーからも操作できません（同じユーザー権限で動く悪意あるプログラムは鍵ファイルを読めるため防げません）。ブラウザで使う場合は起動時に表示される `http://127.0.0.1:7780/?k=…` を開いてください。
 - **PWA版**: ノードはブラウザ内（WebAssembly）で動作し、秘密鍵と履歴はブラウザのIndexedDBにだけ保存されます。
   - ブラウザは生のTCP/UDPを開けないため、ブラウザのOriginを許可したYggdrasilピアにwssで直接つなぎます。
   - 既定は `ygg.being.pet`（2026-10-19時点で公開一覧から見つかった唯一のブラウザ可ピア）。
@@ -112,6 +112,7 @@ Android APK（Gradle不使用）: `libyggchat.so`（`GOOS=android GOARCH=arm64` 
 
 | バージョン | 内容 |
 | --- | --- |
+| v0.12.2 | ローカルUI/APIに鍵を導入。データフォルダの `ui-key`（所有者のみ読める）の鍵がないと使えず、同じ端末の他アプリ・他ユーザーからの操作を防ぎます。ブラウザでは起動時に表示される `?k=` 付きURLで開きます。 |
 | v0.12.1 | ローカルAPIが接続元アドレスもループバックか検証し、`-ui` をループバック以外にすると起動を拒否。AndroidのWebViewはアプリ自身の画面以外を開かず外部URLはブラウザへ渡し、JavaScriptブリッジはアプリの画面からしか動かないように。 |
 | v0.12 | Windows版がWebView2のアプリウィンドウで開くように（ブラウザ不要、ダブルクリック起動時は黒いコンソールも閉じる）。 |
 | v0.11 | メッセージの編集・削除、VPNの受信ファイアウォール、Twemoji同梱、スクロール修正。 |
