@@ -1,4 +1,4 @@
-YggChat v0.10.1 - NAT越え不要のP2Pチャット (Yggdrasil内蔵)
+YggChat v0.10.2 - NAT越え不要のP2Pチャット (Yggdrasil内蔵)
 
 ■ 使い方
 PWA(インストール不要): https://yggchat.surge.sh/
@@ -32,6 +32,8 @@ Linux:   ./yggchat-linux-amd64
 ■ finger (.plan公開・既定オフ)
   設定→fingerをオンにすると、Yggdrasil上の誰でも finger @[あなたのアドレス] (TCP 79番, RFC 1288)で
   表示名と.planを見られます。オンライン状態・連絡先・鍵などは返しません。転送(user@host@host)は拒否します。
+  オフの間はTCP 79番の待ち受け自体を閉じ、UDPの問い合わせにも無言なので、外からYggChatだと見分けられません。
+  他人をfingerすると、問い合わせ先にはあなたのアドレスが見えます。
   アプリ内の「fingerで調べる」や連絡先の「finger」ボタンで、他のYggChat(UDPの{t:"fq"})や
   一般のfingerサーバー(TCP 79)を問い合わせられます。AndroidのVPNモードではOSが79番を開けないため、
   TUNの中継で79番⇔7979番を付け替えます。PWAはTCPを使えないので、YggChat同士の問い合わせだけ対応です。

@@ -1113,7 +1113,7 @@ select { font:inherit; font-size:16px; color:var(--fg); background:var(--surface
     </div>
     <div class="section">
       <div class="section-title">finger（.plan）</div>
-      <div class="row-sub">オンにすると、Yggdrasil上の誰でも <span style="font-family:ui-monospace,monospace;">finger @[あなたのアドレス]</span> で表示名と.planを見られます。オンラインかどうか・連絡先などは出しません。</div>
+      <div class="row-sub">オンにすると、Yggdrasil上の誰でも <span style="font-family:ui-monospace,monospace;">finger @[あなたのアドレス]</span> で表示名と.planを見られます。オンラインかどうか・連絡先などは出しません。オフの間は79番ポート自体を閉じるので、外からYggChatだと見分けられません。</div>
       <div class="toggle">
         <div class="toggle-label">fingerで公開する</div>
         <div class="switch" id="finger-switch"><div class="switch-handle"></div></div>
@@ -1182,7 +1182,7 @@ select { font:inherit; font-size:16px; color:var(--fg); background:var(--surface
       <a class="dl-btn" href="https://yggchat.surge.sh/dl/yggchat-windows-amd64.exe" download>🪟 Windows (exe)</a>
       <a class="dl-btn" href="https://yggchat.surge.sh/dl/yggchat-linux-amd64" download>🐧 Linux (amd64)</a>
       <a class="dl-btn" href="https://yggchat.surge.sh/dl/yggchat-android-arm64" download>⌨️ Termux (arm64)</a>
-      <div class="row-sub" id="dl-ver">最新: v0.10.1 ・ SHA256SUMS で検証できます</div>
+      <div class="row-sub" id="dl-ver">最新: v0.10.2 ・ SHA256SUMS で検証できます</div>
     </div>
     <div class="section">
       <div class="section-title">About</div>
@@ -2642,7 +2642,7 @@ $('finger-switch').addEventListener('click', async () => {
 });
 $('finger-save').addEventListener('click', async () => { if(await fingerSet(!!(state.finger && state.finger.on))) toast('.planを保存しました'); });
 $('finger-lookup').addEventListener('click', async () => {
-  const v = await uiPrompt('調べるアドレス（user@[200:…] も可）', ''); if(!v) return;
+  const v = await uiPrompt('調べるアドレス（user@[200:…] も可）\n※問い合わせ先にはあなたのアドレスが見えます', ''); if(!v) return;
   let user = '', addr = v.trim();
   const m = addr.match(/^([^@\s]*)@\[?([0-9a-fA-F:]+)\]?$/);
   if(m){ user = m[1]; addr = m[2]; }

@@ -37,7 +37,8 @@ type fingerState struct {
 	mu     sync.Mutex
 	path   string
 	cfg    fingerCfg
-	tcp    string // "" | "listening" | error text
+	tcp    string // "" (off: no listener at all) | "listening" | error text
+	ln     net.Listener
 	waitMu sync.Mutex
 	wait   map[string]chan wire
 	sem    chan struct{}
@@ -65,7 +66,28 @@ func (a *App) fingerInit(dataDir string) {
 		_ = json.Unmarshal(b, &f.cfg)
 	}
 	a.fing = f
-	go a.fingerListen()
+	a.fingerApply()
+}
+
+// fingerApply opens the TCP listener only while finger is on. When off, port
+// 79 is simply closed (same RST as any unused port), so nothing reveals that
+// this address runs YggChat; UDP fq is ignored too.
+func (a *App) fingerApply() {
+	a.fing.mu.Lock()
+	on, ln := a.fing.cfg.On, a.fing.ln
+	if !on && ln != nil {
+		a.fing.ln, a.fing.tcp = nil, ""
+	}
+	a.fing.mu.Unlock()
+	if !on {
+		if ln != nil {
+			ln.Close()
+		}
+		return
+	}
+	if ln == nil {
+		a.fingerListen()
+	}
 }
 
 func (a *App) fingerConf() fingerCfg {
@@ -90,26 +112,34 @@ func (a *App) fingerListen() {
 	if err != nil {
 		a.fing.tcp = err.Error()
 	} else {
-		a.fing.tcp = "listening"
+		a.fing.tcp, a.fing.ln = "listening", ln
 	}
 	a.fing.mu.Unlock()
 	if err != nil {
 		log.Println("finger: listen:", err)
 		return
 	}
-	for {
-		c, err := ln.Accept()
-		if err != nil {
-			time.Sleep(200 * time.Millisecond)
-			continue
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				a.fing.mu.Lock()
+				closed := a.fing.ln != ln
+				a.fing.mu.Unlock()
+				if closed {
+					return
+				}
+				time.Sleep(200 * time.Millisecond)
+				continue
+			}
+			select {
+			case a.fing.sem <- struct{}{}:
+				go func() { a.fingerServe(c); <-a.fing.sem }()
+			default:
+				c.Close()
+			}
 		}
-		select {
-		case a.fing.sem <- struct{}{}:
-			go func() { a.fingerServe(c); <-a.fing.sem }()
-		default:
-			c.Close()
-		}
-	}
+	}()
 }
 
 func isYggIP(ip net.IP) bool { return len(ip) == 16 && ip[0]&0xfe == 0x02 }
@@ -308,6 +338,7 @@ func (a *App) fingerHandlers(mux *http.ServeMux) {
 				http.Error(w, err.Error(), 500)
 				return
 			}
+			a.fingerApply()
 		}
 		a.fing.mu.Lock()
 		res := map[string]any{"on": a.fing.cfg.On, "plan": a.fing.cfg.Plan, "tcp": a.fing.tcp, "addr": a.myAddr()}
