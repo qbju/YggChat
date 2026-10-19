@@ -1194,7 +1194,7 @@ img.emoji { height:1.2em; width:1.2em; margin:0 .05em 0 .1em; vertical-align:-0.
       <a class="dl-btn" href="https://yggchat.surge.sh/dl/yggchat-windows-amd64.exe" download>🪟 Windows (exe)</a>
       <a class="dl-btn" href="https://yggchat.surge.sh/dl/yggchat-linux-amd64" download>🐧 Linux (amd64)</a>
       <a class="dl-btn" href="https://yggchat.surge.sh/dl/yggchat-android-arm64" download>⌨️ Termux (arm64)</a>
-      <div class="row-sub" id="dl-ver">最新: v0.11 ・ SHA256SUMS で検証できます</div>
+      <div class="row-sub" id="dl-ver">最新: v0.11.1 ・ SHA256SUMS で検証できます</div>
     </div>
     <div class="section">
       <div class="section-title">About</div>
@@ -1596,7 +1596,8 @@ function renderMessages(){
     el.addEventListener('touchmove', cancelLp, {passive:true});
     el.addEventListener('touchcancel', cancelLp);
   });
-  checkNearBottom();
+  if(forceBottom){ forceBottom = false; isNearBottom = true; }
+  else checkNearBottom();
   if(isNearBottom){
     box.scrollTop = box.scrollHeight;
   }else{
@@ -1659,8 +1660,10 @@ function updateChatHeader(){
   $('chat-addr').textContent = curAddr;
 }
 
+let forceBottom = false;
 function openChat(addr){
   curAddr = addr;
+  forceBottom = true;
   document.body.classList.add('chat-open');
   updateChatHeader();
   markRead(addr);

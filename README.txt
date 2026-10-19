@@ -1,4 +1,4 @@
-YggChat v0.11 - NAT越え不要のP2Pチャット (Yggdrasil内蔵)
+YggChat v0.11.1 - NAT越え不要のP2Pチャット (Yggdrasil内蔵)
 
 ■ 使い方
 PWA(インストール不要): https://yggchat.surge.sh/
