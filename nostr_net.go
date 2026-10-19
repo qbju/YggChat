@@ -20,7 +20,7 @@ import (
 func (a *App) nostrRelays() []string {
 	a.store.mu.Lock()
 	defer a.store.mu.Unlock()
-	if a.store.locked || !a.store.NostrOn {
+	if a.store.locked || !a.store.NostrOn || a.sys {
 		return nil
 	}
 	if len(a.store.NostrRelays) == 0 {
@@ -148,7 +148,7 @@ func (a *App) nostrFetch() {
 	if relays == nil {
 		return
 	}
-	tag := mbox.NostrTag(a.core.PublicKey())
+	tag := mbox.NostrTag(a.pub())
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	evs := map[string]string{}

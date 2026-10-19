@@ -8,6 +8,13 @@ Linux:   ./yggchat-linux-amd64
 データ: ~/.yggchat/ (node.json=秘密鍵, chat.json=履歴, どちらも0600)
 オプション: -peers -listen -ui -data -cli
 
+■ 端末のYggdrasilを使う (VPN型アプリと併用)
+  Yggdrasil公式Androidアプリや、PCで常駐しているyggdrasilサービス(TUN)があれば、設定→ピア→
+  「端末のYggdrasilを使う」でそちら経由に切り替えられます(またはデータフォルダに system-ygg ファイル、
+  環境変数 YGGCHAT_SYSTEM=1)。アドレスは端末側Yggdrasilのものになり、ピア設定もそちらで行います。
+  内蔵ノードの鍵は残るので、オフにすれば元のアドレスに戻ります。このモードではNostr置き配は使えません。
+  受信はUDP 7777番をOS上で待ち受け、送信元が200::/7のものだけを受け付けます。
+
 ■ 端末チャット (CLI)
   ./yggchat-linux-amd64 -cli        (Termux: ./yggchat-android-arm64 -cli)
   同じ -ui でノードが動いていればそれにつながり、なければその場でノードを起動します
@@ -38,7 +45,7 @@ Linux:   ./yggchat-linux-amd64
 SHA256SUMS で各ファイルのハッシュを確認できます。バイナリは未署名のため、WindowsではSmartScreenの警告が出ます。
 
 ■ 履歴
-v0.8:   CLIチャット(-cli)。Android版はアプリ自身が通知を出すように(WebViewには通知機能がないため)、
+v0.8:   CLIチャット(-cli)。端末のYggdrasil(VPN型アプリ/TUN)を使うモード。Android版はアプリ自身が通知を出すように(WebViewには通知機能がないため)、
         画面を閉じていても受信通知が出ます。設定に「置き配（Nostr）」を追加（非推奨・既定オフ）。届かなかった文章を相手の鍵で暗号化し、使い捨て鍵で署名したNostrイベントとして公開リレーに最大7日預ける。受信側は読んだら削除イベントを出す。リレーには宛先タグ・時刻・IPが見える。写真は対象外。
 v0.7.1: PWAの自前入口ピアを撤去し、公開ピアygg.being.petのみに。
 v0.7:   Cloudflare中継と中継メールボックス(置き配)を廃止。PWAはOrigin許可済みピアにwssで直接接続。

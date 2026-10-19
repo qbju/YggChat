@@ -1,4 +1,4 @@
-const CACHE = 'yggchat-pwa-v13';
+const CACHE = 'yggchat-pwa-v14';
 const INDEX = './index.html';
 
 self.addEventListener('install', e => {

@@ -61,3 +61,9 @@ sealed box (mbox.Seal of `{"w": wire, "nk": throwaway-secp256k1-key}`) as the co
 tags `["p", sha256("yggchat-nostr:"+hex(ed25519 pk))]`, `["expiration", now+7d]`. The recipient polls `#p` every 3 min,
 opens, acks directly over Ygg and publishes the NIP-09 deletion signed with `nk`. Images are never parked. Direct resend continues.
 Defaults: wss://nos.lol, wss://relay.primal.net, wss://nostr.mom (relay.damus.io accepts but does not return kind 1059 to unauthenticated readers).
+
+## /api/system (native only)
+GET → {"on":bool,"detected":"<200::/7 source address the OS would use, or empty>"}
+POST {"On":bool} → writes/removes <data>/system-ygg and restarts the node.
+In system mode /api/state has "system":true, "pubkey":"" and the address of the device's own Yggdrasil;
+peers lists one pseudo-peer "system://…"; /api/peers POST and identity reset return errors; Nostr is inactive.

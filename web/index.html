@@ -1080,6 +1080,13 @@ select { font:inherit; font-size:16px; color:var(--fg); background:var(--surface
         </div>
         <button id="peers-btn" class="row-action">詳細</button>
       </div>
+      <div id="sys-box" style="display:none;">
+        <div class="toggle">
+          <div class="toggle-label">端末のYggdrasilを使う（VPN型アプリ）</div>
+          <div class="switch" id="sys-switch"><div class="switch-handle"></div></div>
+        </div>
+        <div class="row-sub" id="sys-note">Yggdrasil公式アプリ（Android）や常駐のyggdrasilサービスが動いていれば、内蔵ノードの代わりにそれで通信します。アドレスは端末側Yggdrasilのものに変わり、相手からは別人として見えます。Nostr置き配は使えません。</div>
+      </div>
     </div>
     <div class="section">
       <div class="section-title">通知</div>
@@ -1807,6 +1814,9 @@ function openSettings(){
     ? 'PWA版: ノードはこのブラウザ内(WebAssembly)で動作し、鍵と履歴はこの端末にだけ保存されます。ブラウザはOriginを許可した公開Yggdrasilピア(既定: ygg.being.pet)にwssで直接つながり、中継サーバーは使いません。'
     : 'ネイティブ版: ノードはこの端末内で動作しています。';
   $('peers-count').textContent = '接続中 ' + (state.peers||0);
+  $('sys-box').style.display = state.platform === 'web' ? 'none' : '';
+  setSwitch('sys-switch', !!state.system);
+  if(state.system) $('platform-info').textContent = 'ネイティブ版（端末のYggdrasilを使用中）: 通信は端末のYggdrasil（VPN/TUN）経由です。' + (state.addr ? '' : ' いまは見つかりません。Yggdrasilアプリを起動してください。');
   $('settings-screen').classList.add('active');
   renderShareQR();
 }
@@ -2461,6 +2471,24 @@ $('secure-switch').addEventListener('click', () => {
   renderPrivacy();
 });
 try{ if(window.YggAndroid && localStorage.getItem('yggchat_secure') === '1') window.YggAndroid.setSecure(true); }catch(e){}
+$('sys-switch').addEventListener('click', async () => {
+  const on = !state.system;
+  if(on){
+    let det = '';
+    try{ det = (await api('/api/system')).detected || ''; }catch(e){}
+    const msg = det
+      ? '端末のYggdrasil（' + det + '）で通信しますか？\n\nあなたのアドレスがこれに変わり、相手には新しい連絡先として見えます。内蔵ノードの鍵は残るので、オフに戻せば元のアドレスに戻ります。'
+      : '端末のYggdrasilが見つかりません。Yggdrasilアプリ（VPN）を先に起動してください。それでも切り替えますか？（見つかるまで接続中0になります）';
+    if(!(await uiDialog(msg, {okText:'切り替える'}))) return;
+  }
+  try{ await api('/api/system', {On: on}); }catch(e){ toast(e.message); return; }
+  toast('再起動中…');
+  for(let i = 0; i < 40; i++){
+    await new Promise(r => setTimeout(r, 500));
+    try{ const s2 = await api('/api/state'); if(!!s2.system === on){ location.reload(); return; } }catch(e){}
+  }
+  location.reload();
+});
 $('reset-id').addEventListener('click', async () => {
   if(!(await uiDialog('新しいIDを作りますか？今のアドレス・連絡先・履歴はすべて消え、元に戻せません。', {okText:'作り直す', danger:true}))) return;
   const old = state.addr;

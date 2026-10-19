@@ -186,6 +186,7 @@ func localOnly(uiAddr string, h http.Handler) http.Handler {
 type App struct {
 	core     *core.Core
 	ns       *netstack.YggdrasilNetstack
+	sys      bool // using the device's own Yggdrasil (VPN/TUN) instead of the embedded node
 	addr     string
 	store    *Store
 	subMu    sync.Mutex
@@ -257,7 +258,13 @@ type wire struct {
 }
 
 func (a *App) serveChat() {
-	pc, err := a.ns.ListenUDP(&net.UDPAddr{IP: net.ParseIP(a.addr), Port: chatPort})
+	var pc net.PacketConn
+	var err error
+	if a.sys {
+		pc, err = net.ListenUDP("udp6", &net.UDPAddr{Port: chatPort})
+	} else {
+		pc, err = a.ns.ListenUDP(&net.UDPAddr{IP: net.ParseIP(a.addr), Port: chatPort})
+	}
 	if err != nil {
 		log.Fatal("listen: ", err)
 	}
@@ -273,7 +280,11 @@ func (a *App) serveChat() {
 			continue
 		}
 		// The source IP is cryptographically bound to the sender's key by Yggdrasil.
-		from := raddr.(*net.UDPAddr).IP.String()
+		rip := raddr.(*net.UDPAddr).IP
+		if len(rip) != 16 || (rip[0]&0xfe) != 0x02 {
+			continue // only Yggdrasil sources (system mode listens on the OS stack)
+		}
+		from := rip.String()
 		if w.T == "fca" {
 			a.onFileAck(w)
 			continue
@@ -301,7 +312,7 @@ func (a *App) serveChat() {
 		switch w.T {
 		case "hi", "hiack":
 			if w.T == "hi" {
-				a.sendWire(from, wire{T: "hiack", PK: hex.EncodeToString(a.core.PublicKey())})
+				a.sendWire(from, wire{T: "hiack", PK: hex.EncodeToString(a.pub())})
 			}
 			a.maybeProf(from)
 			go a.flush(from)
@@ -558,7 +569,7 @@ func (a *App) hello(peer string) {
 	if a.udp == nil {
 		return
 	}
-	a.sendWire(peer, wire{T: "hi", PK: hex.EncodeToString(a.core.PublicKey())})
+	a.sendWire(peer, wire{T: "hi", PK: hex.EncodeToString(a.pub())})
 }
 
 func (a *App) helloAll() {
@@ -583,6 +594,13 @@ type peerView struct {
 }
 
 func (a *App) peerList() []peerView {
+	if a.sys {
+		v := peerView{URI: "system://（端末のYggdrasilアプリ）", Up: a.addr != ""}
+		if a.addr == "" {
+			v.Error = "端末のYggdrasilが見つかりません（VPNがオフ?）"
+		}
+		return []peerView{v}
+	}
 	saved := map[string]bool{}
 	for _, p := range a.cfg.Peers {
 		saved[p] = true
@@ -606,6 +624,12 @@ func (a *App) peerList() []peerView {
 }
 
 func (a *App) upPeers() int {
+	if a.sys {
+		if a.addr != "" {
+			return 1
+		}
+		return 0
+	}
 	n := 0
 	for _, p := range a.core.GetPeers() {
 		if p.Up {
@@ -621,6 +645,9 @@ func (a *App) saveCfg() {
 }
 
 func (a *App) setPeers(list []string) error {
+	if a.sys {
+		return fmt.Errorf("端末のYggdrasilを使用中です。ピアはYggdrasilアプリ側で設定してください")
+	}
 	want := map[string]bool{}
 	for _, p := range list {
 		u, err := url.Parse(p)
@@ -754,7 +781,7 @@ func (a *App) httpHandlers(mux *http.ServeMux) {
 		}
 		sort.Strings(blocked)
 		json.NewEncoder(w).Encode(map[string]any{
-			"addr": a.addr, "pubkey": hex.EncodeToString(a.core.PublicKey()),
+			"addr": a.addr, "pubkey": hex.EncodeToString(a.pub()), "system": a.sys,
 			"nick": a.store.Nick, "bio": a.store.Bio, "avatar": a.store.Avatar,
 			"contacts": a.store.Contacts, "messages": a.store.Messages, "peers": peers, "platform": "native",
 			"locked": false, "haspass": a.store.key != nil, "blocked": blocked,
@@ -1006,6 +1033,7 @@ func main() {
 			os.Exit(0)
 		}()
 	}
+	sys := sysModeOn(*dataDir)
 	logger := gologme.New(logOut, "[ygg] ", gologme.LstdFlags)
 	logger.EnableLevel("error")
 	logger.EnableLevel("warn")
@@ -1016,13 +1044,16 @@ func main() {
 	for _, p := range cfg.Peers {
 		opts = append(opts, core.Peer{URI: p})
 	}
-	c, err := core.New(cfg.Certificate, logger, opts...)
-	if err != nil {
-		log.Fatal(err)
-	}
-	ns, err := netstack.CreateYggdrasilNetstack(c)
-	if err != nil {
-		log.Fatal(err)
+	var c *core.Core
+	var ns *netstack.YggdrasilNetstack
+	if !sys {
+		var err error
+		if c, err = core.New(cfg.Certificate, logger, opts...); err != nil {
+			log.Fatal(err)
+		}
+		if ns, err = netstack.CreateYggdrasilNetstack(c); err != nil {
+			log.Fatal(err)
+		}
 	}
 
 	st := &Store{path: filepath.Join(*dataDir, "chat.json")}
@@ -1033,7 +1064,7 @@ func main() {
 		st.Contacts, st.Blocked = map[string]Contact{}, map[string]bool{}
 	}
 
-	a := &App{core: c, ns: ns, addr: c.Address().String(), store: st, subs: map[chan []byte]struct{}{}, acks: map[string]chan struct{}{}, inflight: map[string]bool{}, seen: map[string]bool{}, profAt: map[string]time.Time{}, cfg: cfg, cfgPath: filepath.Join(*dataDir, "node.json")}
+	a := &App{core: c, ns: ns, sys: sys, store: st, subs: map[chan []byte]struct{}{}, acks: map[string]chan struct{}{}, inflight: map[string]bool{}, seen: map[string]bool{}, profAt: map[string]time.Time{}, cfg: cfg, cfgPath: filepath.Join(*dataDir, "node.json")}
 	// Messages left "sending" by a previous run never got an ack.
 	for i := range st.Messages {
 		if st.Messages[i].Status == "sending" || st.Messages[i].Status == "failed" {
@@ -1052,6 +1083,12 @@ func main() {
 			}
 		}
 	}()
+	if sys {
+		a.addr = detectSysAddr()
+		go a.watchSys()
+	} else {
+		a.addr = c.Address().String()
+	}
 	go a.serveChat()
 	go a.sweep()
 	go a.nostrLoop()
@@ -1082,6 +1119,7 @@ func main() {
 	a.httpHandlers(mux)
 	a.featureHandlers(mux)
 	a.nostrHandlers(mux)
+	a.systemHandlers(mux, *dataDir)
 	if !*cliMode {
 		fmt.Printf("YggChat\n  your address: %s\n  open UI:      http://%s/\n", a.addr, *uiAddr)
 	}

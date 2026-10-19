@@ -207,7 +207,7 @@ func (a *App) sendWire(peer string, w wire) {
 func (a *App) profWire() wire {
 	a.store.mu.Lock()
 	defer a.store.mu.Unlock()
-	return wire{T: "prof", Nick: a.store.Nick, Bio: a.store.Bio, Av: a.store.Avatar, PK: hex.EncodeToString(a.core.PublicKey())}
+	return wire{T: "prof", Nick: a.store.Nick, Bio: a.store.Bio, Av: a.store.Avatar, PK: hex.EncodeToString(a.pub())}
 }
 
 // sendProf shares our profile with peer (a few times, it is a datagram).
@@ -347,6 +347,9 @@ func cleanText(s string, max int) string {
 // ---------- identity reset ----------
 
 func (a *App) resetIdentity() error {
+	if a.sys {
+		return fmt.Errorf("端末のYggdrasilを使用中はIDを作り直せません（Yggdrasilアプリ側で鍵を再生成してください）")
+	}
 	nc := config.GenerateConfig()
 	a.cfg.PrivateKey = nc.PrivateKey
 	a.cfg.Certificate = nil
