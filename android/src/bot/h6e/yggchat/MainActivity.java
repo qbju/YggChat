@@ -20,6 +20,15 @@ public class MainActivity extends Activity {
         WebSettings ws = web.getSettings();
         ws.setJavaScriptEnabled(true);
         ws.setDomStorageEnabled(true);
+        web.addJavascriptInterface(new Object() {
+            // Screen security (FLAG_SECURE): blocks screenshots and hides the app in recents.
+            @JavascriptInterface public void setSecure(final boolean on) {
+                runOnUiThread(new Runnable() { public void run() {
+                    if (on) getWindow().addFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE);
+                    else getWindow().clearFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE);
+                }});
+            }
+        }, "YggAndroid");
         web.setWebViewClient(new WebViewClient() {
             @Override public void onReceivedError(WebView v, WebResourceRequest r, WebResourceError e) {
                 if (r.isForMainFrame()) { final WebView vv = v; new Handler().postDelayed(new Runnable(){ public void run(){ vv.loadUrl("http://127.0.0.1:7780/"); }}, 700); }

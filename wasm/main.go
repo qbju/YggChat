@@ -15,6 +15,7 @@ import (
 	"syscall/js"
 
 	gologme "github.com/gologme/log"
+	"github.com/h6e/yggchat/mbox"
 	"github.com/yggdrasil-network/yggdrasil-go/src/config"
 	"github.com/yggdrasil-network/yggdrasil-go/src/core"
 	"github.com/yggdrasil-network/yggdrasil-go/src/ipv6rwc"
@@ -26,6 +27,7 @@ var (
 	ygg  *core.Core
 	rwc  *ipv6rwc.ReadWriteCloser
 	self net.IP
+	priv ed25519.PrivateKey
 )
 
 func checksum(src, dst net.IP, udp []byte) uint16 {
@@ -123,6 +125,7 @@ func start(this js.Value, args []js.Value) any {
 	rwc = ipv6rwc.NewReadWriteCloser(ygg)
 	a := ygg.Address()
 	self = net.IP(a[:])
+	priv = ed25519.PrivateKey(cfg.PrivateKey)
 	go readLoop(args[2])
 	return js.ValueOf(map[string]any{"addr": self.String(), "key": hex.EncodeToString(cfg.PrivateKey)})
 }
@@ -206,7 +209,49 @@ func peerList(this js.Value, args []js.Value) any {
 	return js.ValueOf(out)
 }
 
+// Mailbox crypto (see mbox): yggPub() -> hex, yggSign(msg) -> hex,
+// yggSeal(toPkHex, wireJSON) -> base64 | "", yggOpen(b64) -> {from, pk, w} | {error},
+// yggAddrOK(addr, pkHex) -> bool, yggTag(pkHex) -> tag.
+func pub(this js.Value, args []js.Value) any {
+	return hex.EncodeToString(priv.Public().(ed25519.PublicKey))
+}
+func sign(this js.Value, args []js.Value) any {
+	return hex.EncodeToString(ed25519.Sign(priv, []byte(args[0].String())))
+}
+func sealBox(this js.Value, args []js.Value) any {
+	pk, err := hex.DecodeString(args[0].String())
+	if err != nil || len(pk) != ed25519.PublicKeySize {
+		return ""
+	}
+	b, err := mbox.Seal(pk, priv, []byte(args[1].String()))
+	if err != nil {
+		return ""
+	}
+	return b
+}
+func openBox(this js.Value, args []js.Value) any {
+	from, pk, w, err := mbox.Open(args[0].String(), priv)
+	if err != nil {
+		return js.ValueOf(map[string]any{"error": err.Error()})
+	}
+	return js.ValueOf(map[string]any{"from": from, "pk": hex.EncodeToString(pk), "w": string(w)})
+}
+func addrOK(this js.Value, args []js.Value) any {
+	pk, err := hex.DecodeString(args[1].String())
+	return err == nil && mbox.AddrOK(args[0].String(), pk)
+}
+func tag(this js.Value, args []js.Value) any {
+	pk, _ := hex.DecodeString(args[0].String())
+	return mbox.Tag(pk)
+}
+
 func main() {
+	js.Global().Set("yggPub", js.FuncOf(pub))
+	js.Global().Set("yggSign", js.FuncOf(sign))
+	js.Global().Set("yggSeal", js.FuncOf(sealBox))
+	js.Global().Set("yggOpen", js.FuncOf(openBox))
+	js.Global().Set("yggAddrOK", js.FuncOf(addrOK))
+	js.Global().Set("yggTag", js.FuncOf(tag))
 	js.Global().Set("yggAddPeer", js.FuncOf(addPeer))
 	js.Global().Set("yggRemovePeer", js.FuncOf(removePeer))
 	js.Global().Set("yggPeerList", js.FuncOf(peerList))

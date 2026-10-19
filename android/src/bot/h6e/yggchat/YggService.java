@@ -8,6 +8,7 @@ import java.io.File;
 
 public class YggService extends Service {
     private static Process proc;
+    private static volatile boolean running;
 
     @Override public IBinder onBind(Intent i) { return null; }
 
@@ -22,6 +23,7 @@ public class YggService extends Service {
             .setSmallIcon(android.R.drawable.stat_notify_chat).setContentIntent(pi).setOngoing(true).build();
         if (Build.VERSION.SDK_INT >= 34) startForeground(1, n, android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
         else startForeground(1, n);
+        running = true;
         startNode();
         return START_STICKY;
     }
@@ -34,13 +36,23 @@ public class YggService extends Service {
             data.mkdirs();
             ProcessBuilder pb = new ProcessBuilder(bin, "-data", data.getAbsolutePath(), "-ui", "127.0.0.1:7780");
             pb.environment().put("HOME", getFilesDir().getAbsolutePath());
+            pb.environment().put("YGGCHAT_SUPERVISED", "1");
             pb.redirectErrorStream(true);
             pb.redirectOutput(new File(data, "node.log"));
-            proc = pb.start();
+            final Process p = pb.start();
+            proc = p;
+            // The node exits to restart itself (e.g. after "new ID"): bring it back.
+            new Thread(new Runnable() { public void run() {
+                try { p.waitFor(); } catch (InterruptedException e) { return; }
+                if (!running) return;
+                try { Thread.sleep(500); } catch (InterruptedException e) { return; }
+                startNode();
+            }}).start();
         } catch (Exception e) { e.printStackTrace(); }
     }
 
     @Override public void onDestroy() {
+        running = false;
         if (proc != null) proc.destroy();
         proc = null;
         super.onDestroy();

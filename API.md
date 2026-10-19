@@ -36,3 +36,15 @@ Delivery result arrives as a `status` event.
 Undelivered outgoing messages become "queued" and are re-sent automatically.
 Wire additions on UDP/7777: {t:"hi"} -> reply {t:"hiack"}; receiving hi, hiack, or msg from a peer flushes everything queued for it.
 Nodes greet all contacts when their first peer comes up and every 2 min, and probe peers with queued messages every 20 s. Older clients ignore hi.
+
+## v0.5
+State adds: bio, avatar, locked, haspass, blocked[]. When locked, state is {locked:true, addr, peers, platform} and other endpoints return 423 except unlock/events/peers.
+Message adds: ttl, exp (unix delete time), sys ("ttl:<sec>" system line), status "stored" (parked in relay mailbox).
+Contact adds: bio, avatar, hasprof, ttl, req (message request), shared (we sent our profile), renamed, pk (verified Ed25519 key hex).
+POST /api/profile {Nick,Bio,Avatar} -> shares with contacts where shared.
+POST /api/contact {Addr, Nick?, TTL?, Accept?}  (merge; Accept shares profile; TTL syncs to peer)
+POST /api/block {Addr, Block}; POST /api/passcode {Old, New("" removes)}; POST /api/lock {}; POST /api/unlock {Pass}
+POST /api/identity/reset {Confirm:true} -> new key, contacts/history wiped, node restarts.
+Events add: msg_del {peer,id}, locked.
+Wire adds: msg.ttl; {t:"prof",nick,bio,av,pk}; {t:"ttl",ttl}; hi/hiack carry pk. Receivers verify pk against the source address.
+Mailbox (worker yggws): POST /mb/put {to:tag, box}; /mb/get and /mb/del {pk, ts, sig=Ed25519("yggchat-mb-<op>:<tag>:<ts>"), keys?}. tag = hex(sha256("yggchat-mb:"+pkHex))[:32]. Box = base64(nacl sealed box to X25519(pk) of {pk, w, sig=Ed25519(recipientPK||w)}). 7-day expiry, 200 boxes per tag.

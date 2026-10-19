@@ -55,26 +55,48 @@ type Message struct {
 	Text string `json:"text"`
 	TS   int64  `json:"ts"`
 	Out  bool   `json:"out"`
-	// Status of outgoing messages: sending | sent | queued (auto-resent when the peer is reachable) | failed.
+	// Status of outgoing messages: sending | sent | queued (auto-resent when the peer is reachable) | stored (also parked in the relay mailbox) | failed.
 	Status string `json:"status,omitempty"`
+	TTL    int    `json:"ttl,omitempty"` // disappearing timer (seconds)
+	Exp    int64  `json:"exp,omitempty"` // unix time when this message is deleted
+	Sys    string `json:"sys,omitempty"` // system line, e.g. "ttl:300"
 }
 
 type Contact struct {
-	Addr string `json:"addr"`
-	Nick string `json:"nick"`
+	Addr    string `json:"addr"`
+	Nick    string `json:"nick"`
+	Renamed bool   `json:"renamed,omitempty"` // nick set locally; ignore peer's
+	Bio     string `json:"bio,omitempty"`
+	Avatar  string `json:"avatar,omitempty"`
+	HasProf bool   `json:"hasprof,omitempty"`
+	TTL     int    `json:"ttl,omitempty"`
+	Req     bool   `json:"req,omitempty"`    // message request not yet accepted
+	Shared  bool   `json:"shared,omitempty"` // we shared our profile with them
+	PK      string `json:"pk,omitempty"`     // full Ed25519 key (verified against addr)
 }
 
 type Store struct {
 	mu       sync.Mutex
 	path     string
+	locked   bool
+	key      []byte
+	salt     []byte
+	env      *envelope
 	Nick     string             `json:"nick"`
+	Bio      string             `json:"bio,omitempty"`
+	Avatar   string             `json:"avatar,omitempty"`
 	Contacts map[string]Contact `json:"contacts"`
 	Messages []Message          `json:"messages"`
+	Blocked  map[string]bool    `json:"blocked,omitempty"`
 }
 
 func (s *Store) save() {
-	b, _ := json.Marshal(s)
-	_ = writeAtomic(s.path, b)
+	if s.locked {
+		return
+	}
+	if b, err := s.encode(); err == nil {
+		_ = writeAtomic(s.path, b)
+	}
 }
 
 // writeAtomic writes via a 0600 temp file + fsync + rename so a crash never
@@ -146,6 +168,10 @@ func localOnly(uiAddr string, h http.Handler) http.Handler {
 				return
 			}
 		}
+		if strings.HasPrefix(r.URL.Path, "/api/") {
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Cache-Control", "no-store")
+		}
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		h.ServeHTTP(w, r)
@@ -164,6 +190,9 @@ type App struct {
 	acks     map[string]chan struct{}
 	flMu     sync.Mutex
 	inflight map[string]bool
+	seenMu   sync.Mutex
+	seen     map[string]bool
+	profAt   map[string]time.Time
 	cfg      *config.NodeConfig
 	cfgPath  string
 }
@@ -184,11 +213,16 @@ func (a *App) addMessage(m Message) {
 	a.store.mu.Lock()
 	a.store.Messages = append(a.store.Messages, m)
 	if _, ok := a.store.Contacts[m.Peer]; !ok {
-		a.store.Contacts[m.Peer] = Contact{Addr: m.Peer, Nick: m.Nick}
-	} else if !m.Out && m.Nick != "" {
-		c := a.store.Contacts[m.Peer]
+		c := Contact{Addr: m.Peer, Req: !m.Out, Shared: m.Out, TTL: m.TTL}
+		if !m.Out {
+			c.Nick = m.Nick
+		}
+		a.store.Contacts[m.Peer] = c
+		defer a.broadcast("contact", c)
+	} else if c := a.store.Contacts[m.Peer]; !m.Out && m.Nick != "" && !c.Renamed && c.Nick != m.Nick {
 		c.Nick = m.Nick
 		a.store.Contacts[m.Peer] = c
+		defer a.broadcast("contact", c)
 	}
 	a.store.save()
 	a.store.mu.Unlock()
@@ -199,10 +233,14 @@ func (a *App) addMessage(m Message) {
 // packet on port 7777. {"t":"msg","id","nick","text","ts"} -> {"t":"ack","id"}
 type wire struct {
 	T    string `json:"t"`
-	ID   string `json:"id"`
+	ID   string `json:"id,omitempty"`
 	Nick string `json:"nick,omitempty"`
 	Text string `json:"text,omitempty"`
 	TS   int64  `json:"ts,omitempty"`
+	TTL  int    `json:"ttl,omitempty"`
+	Bio  string `json:"bio,omitempty"`
+	Av   string `json:"av,omitempty"`
+	PK   string `json:"pk,omitempty"` // sender's full Ed25519 key (hi/hiack/prof)
 }
 
 func (a *App) serveChat() {
@@ -211,7 +249,6 @@ func (a *App) serveChat() {
 		log.Fatal("listen: ", err)
 	}
 	a.udp = pc
-	seen := map[string]bool{}
 	buf := make([]byte, 65535)
 	for {
 		n, raddr, err := pc.ReadFrom(buf)
@@ -224,36 +261,99 @@ func (a *App) serveChat() {
 		}
 		// The source IP is cryptographically bound to the sender's key by Yggdrasil.
 		from := raddr.(*net.UDPAddr).IP.String()
-		switch w.T {
-		case "hi":
-			hb, _ := json.Marshal(wire{T: "hiack"})
-			_, _ = pc.WriteTo(hb, raddr)
-			go a.flush(from)
-		case "hiack":
-			go a.flush(from)
-		case "ack":
+		if w.T == "ack" {
 			a.ackMu.Lock()
 			if ch, ok := a.acks[w.ID]; ok {
 				close(ch)
 				delete(a.acks, w.ID)
 			}
 			a.ackMu.Unlock()
-		case "msg":
-			if w.Text == "" || len(w.Text) > 8000 || !msgIDRe.MatchString(w.ID) {
-				continue
+			continue
+		}
+		a.store.mu.Lock()
+		locked, blocked := a.store.locked, a.store.Blocked[from]
+		a.store.mu.Unlock()
+		// While locked we can't store anything: stay silent so the sender keeps it queued.
+		if locked || blocked {
+			continue
+		}
+		if w.PK != "" {
+			a.learnPK(from, w.PK)
+		}
+		switch w.T {
+		case "hi", "hiack":
+			if w.T == "hi" {
+				a.sendWire(from, wire{T: "hiack", PK: hex.EncodeToString(a.core.PublicKey())})
 			}
-			w.Nick = cleanNick(w.Nick)
-			ack, _ := json.Marshal(wire{T: "ack", ID: w.ID})
-			_, _ = pc.WriteTo(ack, raddr)
-			key := from + "/" + w.ID
-			if seen[key] {
-				continue
-			}
-			seen[key] = true
-			a.addMessage(Message{ID: w.ID, Peer: from, From: from, Nick: w.Nick, Text: w.Text, TS: w.TS})
+			a.maybeProf(from)
 			go a.flush(from)
+		case "prof", "ttl":
+			a.handleCtl(from, w)
+		case "msg":
+			if a.handleMsg(from, w) {
+				a.sendWire(from, wire{T: "ack", ID: w.ID})
+				go a.flush(from)
+			}
 		}
 	}
+}
+
+// handleMsg validates and stores an incoming message (direct or from the
+// mailbox). Returns true when it should be acked.
+func (a *App) handleMsg(from string, w wire) bool {
+	if w.Text == "" || len(w.Text) > 8000 || !msgIDRe.MatchString(w.ID) {
+		return false
+	}
+	a.store.mu.Lock()
+	if a.store.locked || a.store.Blocked[from] {
+		a.store.mu.Unlock()
+		return false
+	}
+	dup := false
+	for i := len(a.store.Messages) - 1; i >= 0 && !dup; i-- {
+		dup = a.store.Messages[i].Peer == from && a.store.Messages[i].ID == w.ID
+	}
+	c, known := a.store.Contacts[from]
+	a.store.mu.Unlock()
+	key := from + "/" + w.ID
+	a.seenMu.Lock()
+	dup = dup || a.seen[key]
+	a.seen[key] = true
+	a.seenMu.Unlock()
+	if dup {
+		return true
+	}
+	if w.TTL < 0 || w.TTL > 4*7*86400 {
+		w.TTL = 0
+	}
+	if known && c.TTL != w.TTL {
+		a.setTTL(from, w.TTL, false)
+	}
+	m := Message{ID: w.ID, Peer: from, From: from, Nick: cleanNick(w.Nick), Text: w.Text, TS: w.TS, TTL: w.TTL}
+	if w.TTL > 0 {
+		m.Exp = time.Now().Unix() + int64(w.TTL)
+	}
+	a.addMessage(m)
+	return true
+}
+
+// maybeProf re-shares our profile with accepted contacts (at most every 10 min).
+func (a *App) maybeProf(peer string) {
+	a.store.mu.Lock()
+	c, ok := a.store.Contacts[peer]
+	a.store.mu.Unlock()
+	if !ok || !c.Shared {
+		return
+	}
+	a.seenMu.Lock()
+	last := a.profAt[peer]
+	if time.Since(last) < 10*time.Minute {
+		a.seenMu.Unlock()
+		return
+	}
+	a.profAt[peer] = time.Now()
+	a.seenMu.Unlock()
+	a.sendProf(peer)
 }
 
 func (a *App) setStatus(peer, id, status string) {
@@ -278,11 +378,32 @@ func (a *App) send(to, text string) (Message, error) {
 	if text == "" || len(text) > 8000 {
 		return Message{}, fmt.Errorf("message empty or too long")
 	}
+	peer := ip.String()
 	a.store.mu.Lock()
+	if a.store.locked {
+		a.store.mu.Unlock()
+		return Message{}, errLocked
+	}
 	nick := a.store.Nick
+	c, ok := a.store.Contacts[peer]
+	share := !ok || !c.Shared
+	if ok && (c.Req || !c.Shared) {
+		// Replying is accepting the request.
+		c.Req, c.Shared = false, true
+		a.store.Contacts[peer] = c
+	}
 	a.store.mu.Unlock()
-	m := Message{ID: fmt.Sprintf("%x", time.Now().UnixNano()), Peer: ip.String(), From: a.addr, Nick: nick, Text: text, TS: time.Now().Unix(), Out: true, Status: "sending"}
+	if ok && share {
+		a.broadcast("contact", c)
+	}
+	m := Message{ID: fmt.Sprintf("%x", time.Now().UnixNano()), Peer: peer, From: a.addr, Nick: nick, Text: text, TS: time.Now().Unix(), Out: true, Status: "sending", TTL: c.TTL}
+	if c.TTL > 0 {
+		m.Exp = m.TS + int64(c.TTL)
+	}
 	a.addMessage(m)
+	if share {
+		a.sendProf(peer)
+	}
 	go a.deliver(m)
 	return m, nil
 }
@@ -322,7 +443,7 @@ func (a *App) deliverN(m Message, tries int) bool {
 	if m.Status != "sending" {
 		a.setStatus(m.Peer, m.ID, "sending")
 	}
-	b, _ := json.Marshal(wire{T: "msg", ID: m.ID, Nick: m.Nick, Text: m.Text, TS: m.TS})
+	b, _ := json.Marshal(wire{T: "msg", ID: m.ID, Nick: m.Nick, Text: m.Text, TS: m.TS, TTL: m.TTL})
 	ch := make(chan struct{})
 	a.ackMu.Lock()
 	a.acks[m.ID] = ch
@@ -342,7 +463,13 @@ func (a *App) deliverN(m Message, tries int) bool {
 		case <-time.After(2500 * time.Millisecond):
 		}
 	}
-	a.setStatus(m.Peer, m.ID, "queued")
+	if m.Status == "stored" {
+		a.setStatus(m.Peer, m.ID, "stored")
+	} else if a.mbPut(m) {
+		a.setStatus(m.Peer, m.ID, "stored")
+	} else {
+		a.setStatus(m.Peer, m.ID, "queued")
+	}
 	return false
 }
 
@@ -351,7 +478,7 @@ func (a *App) queued(peer string) []Message {
 	defer a.store.mu.Unlock()
 	var out []Message
 	for _, m := range a.store.Messages {
-		if m.Out && m.Status == "queued" && (peer == "" || m.Peer == peer) {
+		if m.Out && (m.Status == "queued" || m.Status == "stored") && (peer == "" || m.Peer == peer) {
 			out = append(out, m)
 		}
 	}
@@ -371,8 +498,7 @@ func (a *App) hello(peer string) {
 	if a.udp == nil {
 		return
 	}
-	b, _ := json.Marshal(wire{T: "hi"})
-	_, _ = a.udp.WriteTo(b, &net.UDPAddr{IP: net.ParseIP(peer), Port: chatPort})
+	a.sendWire(peer, wire{T: "hi", PK: hex.EncodeToString(a.core.PublicKey())})
 }
 
 func (a *App) helloAll() {
@@ -557,9 +683,21 @@ func (a *App) httpHandlers(mux *http.ServeMux) {
 		a.store.mu.Lock()
 		defer a.store.mu.Unlock()
 		peers := a.upPeers()
+		w.Header().Set("Content-Type", "application/json")
+		if a.store.locked {
+			json.NewEncoder(w).Encode(map[string]any{"locked": true, "addr": a.addr, "peers": peers, "platform": "native"})
+			return
+		}
+		blocked := []string{}
+		for b := range a.store.Blocked {
+			blocked = append(blocked, b)
+		}
+		sort.Strings(blocked)
 		json.NewEncoder(w).Encode(map[string]any{
 			"addr": a.addr, "pubkey": hex.EncodeToString(a.core.PublicKey()),
-			"nick": a.store.Nick, "contacts": a.store.Contacts, "messages": a.store.Messages, "peers": peers, "platform": "native",
+			"nick": a.store.Nick, "bio": a.store.Bio, "avatar": a.store.Avatar,
+			"contacts": a.store.Contacts, "messages": a.store.Messages, "peers": peers, "platform": "native",
+			"locked": false, "haspass": a.store.key != nil, "blocked": blocked,
 		})
 	})
 	mux.HandleFunc("/api/send", func(w http.ResponseWriter, r *http.Request) {
@@ -587,17 +725,48 @@ func (a *App) httpHandlers(mux *http.ServeMux) {
 		json.NewEncoder(w).Encode(m)
 	})
 	mux.HandleFunc("/api/contact", func(w http.ResponseWriter, r *http.Request) {
-		var c Contact
-		if r.Method != "POST" || json.NewDecoder(r.Body).Decode(&c) != nil || net.ParseIP(c.Addr) == nil {
-			http.Error(w, "bad request", 400)
+		var req struct {
+			Addr   string
+			Nick   *string
+			TTL    *int
+			Accept bool
+		}
+		if !readJSON(w, r, &req) {
 			return
 		}
-		c.Addr = net.ParseIP(c.Addr).String()
+		ip := net.ParseIP(strings.TrimSpace(req.Addr))
+		if ip == nil || len(ip) != 16 || (ip[0]&0xfe) != 0x02 {
+			http.Error(w, "not a Yggdrasil address", 400)
+			return
+		}
+		addr := ip.String()
 		a.store.mu.Lock()
-		a.store.Contacts[c.Addr] = c
+		c, ok := a.store.Contacts[addr]
+		if !ok {
+			c = Contact{Addr: addr} // added by us: not a request
+		}
+		if req.Nick != nil {
+			c.Nick = cleanNick(*req.Nick)
+			c.Renamed = ok
+		}
+		share := req.Accept && (c.Req || !c.Shared)
+		if req.Accept {
+			c.Req, c.Shared = false, true
+		}
+		delete(a.store.Blocked, addr)
+		a.store.Contacts[addr] = c
 		a.store.save()
 		a.store.mu.Unlock()
 		a.broadcast("contact", c)
+		if share {
+			a.sendProf(addr)
+		}
+		if req.TTL != nil {
+			a.setTTL(addr, *req.TTL, true)
+		}
+		a.store.mu.Lock()
+		c = a.store.Contacts[addr]
+		a.store.mu.Unlock()
 		json.NewEncoder(w).Encode(c)
 	})
 	mux.HandleFunc("/api/contact/delete", func(w http.ResponseWriter, r *http.Request) {
@@ -675,9 +844,10 @@ func (a *App) httpHandlers(mux *http.ServeMux) {
 			return
 		}
 		a.store.mu.Lock()
-		a.store.Nick = req.Nick
+		a.store.Nick = cleanNick(req.Nick)
 		a.store.save()
 		a.store.mu.Unlock()
+		a.profAll()
 		w.Write([]byte("{}"))
 	})
 	mux.HandleFunc("/api/events", func(w http.ResponseWriter, r *http.Request) {
@@ -774,18 +944,15 @@ func main() {
 		log.Fatal(err)
 	}
 
-	st := &Store{path: filepath.Join(*dataDir, "chat.json"), Contacts: map[string]Contact{}}
-	if b, err := os.ReadFile(st.path); err == nil {
-		_ = json.Unmarshal(b, st)
-		if st.Contacts == nil {
-			st.Contacts = map[string]Contact{}
-		}
-	}
-	if st.Nick == "" {
-		st.Nick = "anon"
+	st := &Store{path: filepath.Join(*dataDir, "chat.json")}
+	st.load()
+	if !st.locked {
+		st.fix()
+	} else {
+		st.Contacts, st.Blocked = map[string]Contact{}, map[string]bool{}
 	}
 
-	a := &App{core: c, ns: ns, addr: c.Address().String(), store: st, subs: map[chan []byte]struct{}{}, acks: map[string]chan struct{}{}, inflight: map[string]bool{}, cfg: cfg, cfgPath: filepath.Join(*dataDir, "node.json")}
+	a := &App{core: c, ns: ns, addr: c.Address().String(), store: st, subs: map[chan []byte]struct{}{}, acks: map[string]chan struct{}{}, inflight: map[string]bool{}, seen: map[string]bool{}, profAt: map[string]time.Time{}, cfg: cfg, cfgPath: filepath.Join(*dataDir, "node.json")}
 	// Messages left "sending" by a previous run never got an ack.
 	for i := range st.Messages {
 		if st.Messages[i].Status == "sending" || st.Messages[i].Status == "failed" {
@@ -805,6 +972,8 @@ func main() {
 		}
 	}()
 	go a.serveChat()
+	go a.sweep()
+	go a.mbLoop()
 	// Offline queue: probe peers we owe messages to every 20 s, and greet every
 	// contact every 2 min so they can flush messages queued for us.
 	go func() {
@@ -830,6 +999,27 @@ func main() {
 
 	mux := http.NewServeMux()
 	a.httpHandlers(mux)
+	a.featureHandlers(mux)
 	fmt.Printf("YggChat\n  your address: %s\n  open UI:      http://%s/\n", a.addr, *uiAddr)
-	log.Fatal(http.ListenAndServe(*uiAddr, localOnly(*uiAddr, mux)))
+	ln, err := listenRetry(*uiAddr)
+	if err != nil {
+		log.Fatal(err)
+	}
+	log.Fatal(http.Serve(ln, localOnly(*uiAddr, a.lockGuard(mux))))
+}
+
+// lockGuard: while the history is locked only unlock/state/events/peers work.
+func (a *App) lockGuard(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		p := r.URL.Path
+		if strings.HasPrefix(p, "/api/") && a.store.isLocked() {
+			switch p {
+			case "/api/state", "/api/events", "/api/unlock", "/api/peers", "/api/peers/public":
+			default:
+				http.Error(w, "locked", 423)
+				return
+			}
+		}
+		h.ServeHTTP(w, r)
+	})
 }

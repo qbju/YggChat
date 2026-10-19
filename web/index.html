@@ -9,6 +9,10 @@
 <title>YggChat</title>
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🌲</text></svg>">
+<script>
+// Apply the saved theme before first paint: system | light | dark.
+(function(){ try{ var t = localStorage.getItem('yggchat_theme') || 'system'; if(t !== 'system') document.documentElement.setAttribute('data-theme', t); }catch(e){} })();
+</script>
 <style>
 :root {
   --bg:#121212;
@@ -28,7 +32,7 @@
 }
 
 @media (prefers-color-scheme: light) {
-  :root {
+  :root:not([data-theme="dark"]) {
     --bg:#f7f7f8;
     --surface:#fff;
     --border:#d0d0d0;
@@ -44,6 +48,22 @@
     --unread-bg:#2ecc71;
     --unread-fg:#111;
   }
+}
+:root[data-theme="light"] {
+    --bg:#f7f7f8;
+    --surface:#fff;
+    --border:#d0d0d0;
+    --fg:#111;
+    --dim:#555;
+    --accent:#2ecc71;
+    --accent-dk:#1a9b4f;
+    --error:#d0021b;
+    --out-bg:#2ecc71;
+    --out-fg:#111;
+    --divider:#e0e0e0;
+    --read:#666;
+    --unread-bg:#2ecc71;
+    --unread-fg:#111;
 }
 
 * {
@@ -877,9 +897,33 @@ input, textarea { font-size:16px !important; }
 .modal .mb .danger { background:var(--error); color:#fff; border-color:var(--error); }
 .dl-btn { display:block; text-align:center; padding:10px 12px; border:1px solid var(--border); border-radius:10px; background:var(--surface); color:var(--fg); text-decoration:none; font-size:14px; }
 .dl-btn:active { opacity:.7; }
+.seg { display:flex; border:1px solid var(--border); border-radius:10px; overflow:hidden; }
+.seg button { flex:1; border:none; border-radius:0; background:var(--surface); }
+.seg button.on { background:var(--accent); color:#111; font-weight:600; }
+.sys-line { text-align:center; font-size:12px; color:var(--dim); margin:10px 0; }
+.req-bar { padding:12px; border-top:1px solid var(--divider); background:var(--surface); display:flex; flex-direction:column; gap:8px; padding-bottom:calc(12px + env(safe-area-inset-bottom)); }
+.req-bar .rb-btns { display:flex; gap:8px; }
+.req-bar .rb-btns button { flex:1; }
+.req-tag { font-size:10px; padding:1px 6px; border-radius:8px; background:var(--accent); color:#111; margin-left:6px; vertical-align:middle; }
+.list-sep { font-size:12px; color:var(--dim); padding:10px 14px 4px; font-weight:600; }
+.ttl-badge { font-size:11px; color:var(--dim); }
+#lock-screen { z-index:80; align-items:center; justify-content:center; gap:14px; padding:24px; }
+#lock-screen input { max-width:260px; text-align:center; letter-spacing:4px; }
+.btn-accent { background:var(--accent) !important; color:#111 !important; border-color:var(--accent) !important; }
+.btn-danger { color:var(--error) !important; }
+.row-btns { display:flex; gap:8px; flex-wrap:wrap; }
+select { font:inherit; font-size:16px; color:var(--fg); background:var(--surface); border:1px solid var(--border); border-radius:10px; padding:8px 10px; }
 </style>
 </head>
 <body class="two-pane">
+<div class="screen" id="lock-screen">
+  <div style="font-size:42px;">🔒</div>
+  <div style="font-weight:600;">YggChat はロックされています</div>
+  <input id="lock-pass" type="password" inputmode="text" autocomplete="current-password" placeholder="パスコード">
+  <button id="lock-unlock" class="btn-accent" style="min-width:160px;">ロック解除</button>
+  <div id="lock-err" style="color:var(--error); font-size:13px; min-height:18px;"></div>
+  <div class="row-sub" style="max-width:300px; text-align:center;">ロック中に届いたメッセージは相手側で保留され、解除後に受信します。</div>
+</div>
 <div class="header" id="main-header">
   <button class="icon-btn" id="settings-btn" title="設定">⚙</button>
   <div class="title">YggChat</div>
@@ -908,6 +952,7 @@ input, textarea { font-size:16px !important; }
       <div class="header" style="flex:1; border-bottom:none; padding:0; min-height:auto;">
         <div style="flex:1; min-width:0;">
           <div id="chat-name" style="font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;"></div>
+          <div id="chat-ttl" class="ttl-badge" style="display:none;"></div>
           <div id="chat-addr" style="font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:11px; color:var(--dim); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;"></div>
         </div>
       </div>
@@ -915,7 +960,15 @@ input, textarea { font-size:16px !important; }
     </div>
     <div id="messages"></div>
     <div class="new-msg-pill" id="new-msg-pill">↓ 新着</div>
-    <div class="composer">
+    <div class="req-bar" id="req-bar" style="display:none;">
+      <div style="font-size:13px;">知らないアドレスからのメッセージリクエストです。承認するとあなたの名前・自己紹介・アイコンが相手に共有され、返信できるようになります。</div>
+      <div class="rb-btns">
+        <button id="req-accept" class="btn-accent">承認</button>
+        <button id="req-block" class="btn-danger">ブロック</button>
+        <button id="req-delete">削除</button>
+      </div>
+    </div>
+    <div class="composer" id="composer">
       <div class="composer-inner">
         <textarea id="msg-text" rows="1" placeholder="メッセージ…" autocomplete="off" maxlength="4096"></textarea>
         <button id="send-btn" disabled>送信</button>
@@ -955,12 +1008,27 @@ input, textarea { font-size:16px !important; }
     <div style="text-align:center;">
       <div id="ci-nick" style="font-weight:600; font-size:18px;"></div>
       <div id="ci-addr" style="font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:12px; color:var(--dim); margin-top:4px; word-break:break-all;"></div>
+      <div id="ci-bio" style="font-size:13px; margin-top:8px; white-space:pre-wrap;"></div>
+      <div id="ci-keystate" class="row-sub" style="margin-top:6px;"></div>
+    </div>
+    <div class="section" style="width:100%; max-width:360px;">
+      <div class="section-title">消えるメッセージ</div>
+      <select id="ci-ttl">
+        <option value="0">オフ</option>
+        <option value="30">30秒</option>
+        <option value="300">5分</option>
+        <option value="3600">1時間</option>
+        <option value="86400">1日</option>
+        <option value="604800">1週間</option>
+      </select>
+      <div class="row-sub">送信後この時間で両方の端末から消えます。設定は相手にも反映されます。</div>
     </div>
     <div id="ci-qr-wrap" style="align-self:center; width:200px; padding:10px; background:#fff; border-radius:10px;"></div>
     <div style="display:flex; gap:8px; flex-wrap:wrap; justify-content:center;">
       <button id="ci-copy-addr">アドレスをコピー</button>
       <button id="ci-rename">名前を変更</button>
       <button id="ci-delete" style="color:var(--error);">会話を削除</button>
+      <button id="ci-block" style="color:var(--error);">ブロック</button>
     </div>
   </div>
 </div>
@@ -977,6 +1045,8 @@ input, textarea { font-size:16px !important; }
         <div class="avatar small" id="settings-avatar"></div>
         <div class="row-main">
           <input id="settings-nick" type="text" placeholder="表示名" maxlength="32">
+          <input id="settings-bio" type="text" placeholder="自己紹介（任意・140字）" maxlength="140" style="margin-top:6px;">
+          <input id="settings-avatar-emoji" type="text" placeholder="アイコンの絵文字（任意）" maxlength="8" style="margin-top:6px;">
           <div class="row-sub" id="settings-own-addr"></div>
         </div>
         <button id="settings-copy-addr" class="row-action">コピー</button>
@@ -1010,13 +1080,41 @@ input, textarea { font-size:16px !important; }
       </div>
     </div>
     <div class="section">
+      <div class="section-title">プライバシー</div>
+      <div class="row-sub">プロフィールは、あなたが承認した相手か自分から話しかけた相手にだけ共有されます。</div>
+      <div class="row"><div class="row-main"><div class="row-title">パスコード</div><div class="row-sub" id="pass-state">未設定（履歴は平文で保存）</div></div></div>
+      <div class="row-btns">
+        <button id="pass-set">設定・変更</button>
+        <button id="pass-remove" style="display:none;">解除</button>
+        <button id="lock-now" style="display:none;">今すぐロック</button>
+      </div>
+      <div class="toggle">
+        <div class="toggle-label">通知に内容を表示しない</div>
+        <div class="switch" id="hide-notif-switch"><div class="switch-handle"></div></div>
+      </div>
+      <div class="toggle" id="secure-row" style="display:none;">
+        <div class="toggle-label">画面のセキュリティ（スクショ防止）</div>
+        <div class="switch" id="secure-switch"><div class="switch-handle"></div></div>
+      </div>
+      <div class="row"><div class="row-main"><div class="row-title">ブロック中</div><div class="row-sub" id="blocked-list">なし</div></div></div>
+      <button id="reset-id" class="btn-danger">新しいIDを作る（連絡先と履歴を消去）</button>
+    </div>
+    <div class="section">
+      <div class="section-title">外観</div>
+      <div class="seg" id="theme-seg">
+        <button data-theme="system">システム</button>
+        <button data-theme="light">ライト</button>
+        <button data-theme="dark">ダーク</button>
+      </div>
+    </div>
+    <div class="section">
       <div class="section-title">ダウンロード</div>
       <div class="row-sub">ネイティブ版はtls・tcp・quicのピアにも直接つながり、バックグラウンドでも動きます。</div>
       <a class="dl-btn" href="https://yggchat.surge.sh/dl/yggchat.apk" download>📱 Android (APK)</a>
       <a class="dl-btn" href="https://yggchat.surge.sh/dl/yggchat-windows-amd64.exe" download>🪟 Windows (exe)</a>
       <a class="dl-btn" href="https://yggchat.surge.sh/dl/yggchat-linux-amd64" download>🐧 Linux (amd64)</a>
       <a class="dl-btn" href="https://yggchat.surge.sh/dl/yggchat-android-arm64" download>⌨️ Termux (arm64)</a>
-      <div class="row-sub" id="dl-ver">最新: v0.4.2 ・ SHA256SUMS で検証できます</div>
+      <div class="row-sub" id="dl-ver">最新: v0.5 ・ SHA256SUMS で検証できます</div>
     </div>
     <div class="section">
       <div class="section-title">About</div>
@@ -1151,6 +1249,19 @@ function initials(s){
   return p.slice(0,2).toUpperCase();
 }
 
+function avatarText(c, addr){
+  return (c && c.avatar) ? c.avatar : initials((c && c.nick) || addr || '');
+}
+function ttlLabel(s){
+  s = s|0;
+  if(!s) return 'オフ';
+  if(s < 60) return s + '秒';
+  if(s < 3600) return Math.round(s/60) + '分';
+  if(s < 86400) return Math.round(s/3600) + '時間';
+  if(s < 604800) return Math.round(s/86400) + '日';
+  return Math.round(s/604800) + '週間';
+}
+
 function hashColor(addr){
   if(!addr) return '#2ecc71';
   let h = 0;
@@ -1249,13 +1360,16 @@ function renderList(){
     return;
   }
   empty.style.display = 'none';
-  let html = '';
+  let html = '', reqHdr = false, mainHdr = false;
+  filtered.sort((x,y) => ((state.contacts[y]||{}).req?1:0) - ((state.contacts[x]||{}).req?1:0));
   for(const a of filtered){
     const c = state.contacts[a] || {addr:a, nick:''};
     const msgs = state.messages.filter(m => m.peer === a).sort((x,y) => (y.ts||0)-(x.ts||0));
     const last = msgs[0];
     let lastText = '';
-    if(last){
+    if(last && last.sys){
+      lastText = '⏱ 消えるメッセージ: ' + ttlLabel((last.sys.split(':')[1])|0);
+    }else if(last){
       if(last.out){
         lastText = 'あなた: ' + safeText(last.text);
       }else{
@@ -1264,12 +1378,14 @@ function renderList(){
     }
     const uc = unreadCount(a);
     const t = last ? timeStr(last.ts) : '';
-    const av = initials(c.nick || a);
+    const av = avatarText(c, a);
     const avc = hashColor(a);
+    if(c.req && !reqHdr){ reqHdr = true; html += '<div class="list-sep">メッセージリクエスト</div>'; }
+    if(!c.req && reqHdr && !mainHdr){ mainHdr = true; html += '<div class="list-sep">チャット</div>'; }
     html += '<div class="contact-row" data-addr="' + escapeHtml(a) + '">'
       + '<div class="avatar small" style="background:' + avc + '; border:none; color:#111;">' + escapeHtml(av) + '</div>'
       + '<div class="info">'
-      + '<div class="name">' + escapeHtml(c.nick || addrShort(a)) + '</div>'
+      + '<div class="name">' + escapeHtml(c.nick || addrShort(a)) + (c.req ? '<span class="req-tag">リクエスト</span>' : '') + (c.ttl ? ' <span class="ttl-badge">⏱' + escapeHtml(ttlLabel(c.ttl)) + '</span>' : '') + '</div>'
       + '<div class="last">' + escapeHtml(lastText) + '</div>'
       + '</div>'
       + '<div style="display:flex; flex-direction:column; align-items:flex-end; gap:4px;">'
@@ -1332,6 +1448,11 @@ function renderMessages(){
     }
     const av = initials(m.nick || m.from || curAddr);
     const avc = hashColor(m.from || curAddr);
+    if(m.sys){
+      const t = m.sys.startsWith('ttl:') ? ((m.out ? 'あなたが' : '相手が') + '消えるメッセージを「' + ttlLabel(m.sys.slice(4)|0) + '」にしました') : m.sys;
+      html += '<div class="sys-line">' + escapeHtml(t) + '</div>';
+      continue;
+    }
     html += '<div class="msg ' + (m.out?'out':'in') + (g.same?' same-side':'') + '" data-id="' + escapeHtml(m.id||'') + '">';
     if(!m.out && !g.same){
       html += '<div style="display:flex; gap:6px; align-items:flex-end; margin-bottom:2px;">'
@@ -1343,6 +1464,7 @@ function renderMessages(){
     const st = m.out ? (m.status || 'sent') : null;
     html += '<div class="msg-meta">';
     html += '<span title="' + escapeHtml(fullTimeStr(m.ts)) + '">' + escapeHtml(hmStr(m.ts)) + '</span>';
+    if(m.exp) html += '<span class="msg-status" title="自動で消えます">⏱</span>';
     if(m.out){
       if(st === 'sending'){
         html += '<span class="msg-status">⏱</span>';
@@ -1350,6 +1472,8 @@ function renderMessages(){
         html += '<span class="msg-status">✓</span>';
       }else if(st === 'failed'){
         html += '<span class="msg-status failed">送信失敗・タップで再送</span>';
+      }else if(st === 'stored'){
+        html += '<span class="msg-status queued" title="相手がオフラインのため、暗号化して中継に最大7日間預けました">📮 中継に預け済み</span>';
       }else if(st === 'queued'){
         html += '<span class="msg-status queued" title="相手がオンラインになると自動で送信">🕓 オンライン待ち</span>';
       }
@@ -1406,7 +1530,7 @@ function copyText(t){
 }
 
 async function retrySend(id){
-  const m = state.messages.find(x => x.id === id && x.out && (x.status === 'failed' || x.status === 'queued'));
+  const m = state.messages.find(x => x.id === id && x.out && (x.status === 'failed' || x.status === 'queued' || x.status === 'stored'));
   if(!m) return;
   try{
     m.status = 'sending';
@@ -1427,7 +1551,12 @@ async function retrySend(id){
 
 function updateChatHeader(){
   const c = state.contacts[curAddr] || {addr:curAddr, nick:''};
-  $('chat-avatar').textContent = initials(c.nick || curAddr);
+  $('chat-avatar').textContent = avatarText(c, curAddr);
+  $('chat-ttl').style.display = c.ttl ? '' : 'none';
+  $('chat-ttl').textContent = c.ttl ? ('⏱ 消えるメッセージ: ' + ttlLabel(c.ttl)) : '';
+  const isReq = !!c.req;
+  $('req-bar').style.display = isReq ? '' : 'none';
+  $('composer').style.display = isReq ? 'none' : '';
   $('chat-avatar').style.background = hashColor(curAddr);
   $('chat-avatar').style.border = 'none';
   $('chat-avatar').style.color = '#111';
@@ -1538,7 +1667,11 @@ $('contact-info-back').addEventListener('click', closeContactInfo);
 function openContactInfo(){
   if(!curAddr) return;
   const c = state.contacts[curAddr] || {addr:curAddr, nick:''};
-  $('ci-avatar').textContent = initials(c.nick || curAddr);
+  $('ci-avatar').textContent = avatarText(c, curAddr);
+  $('ci-bio').textContent = c.bio || '';
+  $('ci-keystate').textContent = c.pk ? '🔑 公開鍵を確認済み（中継預かりが使えます）' : '公開鍵は未取得（一度オンラインで通信すると取得）';
+  $('ci-ttl').value = String(c.ttl || 0);
+  if(!$('ci-ttl').value) $('ci-ttl').value = '0';
   $('ci-avatar').style.background = hashColor(curAddr);
   $('ci-avatar').style.border = 'none';
   $('ci-avatar').style.color = '#111';
@@ -1633,7 +1766,10 @@ $('settings-btn').addEventListener('click', openSettings);
 $('settings-back').addEventListener('click', closeSettings);
 
 function openSettings(){
-  $('settings-avatar').textContent = initials(state.nick || state.addr);
+  $('settings-avatar').textContent = state.avatar || initials(state.nick || state.addr);
+  $('settings-bio').value = state.bio || '';
+  $('settings-avatar-emoji').value = state.avatar || '';
+  renderPrivacy();
   $('settings-avatar').style.background = hashColor(state.addr);
   $('settings-avatar').style.border = 'none';
   $('settings-avatar').style.color = '#111';
@@ -1672,6 +1808,8 @@ function renderShareQR(){
 }
 
 $('settings-nick').addEventListener('change', saveSettingsNick);
+$('settings-bio').addEventListener('change', saveSettingsNick);
+$('settings-avatar-emoji').addEventListener('change', saveSettingsNick);
 $('settings-nick').addEventListener('keydown', (e) => {
   if(e.key === 'Enter'){
     $('settings-nick').blur();
@@ -1679,12 +1817,14 @@ $('settings-nick').addEventListener('keydown', (e) => {
 });
 
 async function saveSettingsNick(){
-  const v = $('settings-nick').value.trim();
-  if(v === state.nick) return;
-  if(v.length === 0) return;
+  const v = $('settings-nick').value.trim() || state.nick || 'anon';
+  const bio = $('settings-bio').value.trim();
+  const av = $('settings-avatar-emoji').value.trim();
+  if(v === state.nick && bio === (state.bio||'') && av === (state.avatar||'')) return;
   try{
-    await api('/api/nick', {Nick: v});
-    state.nick = v;
+    await api('/api/profile', {Nick: v, Bio: bio, Avatar: av});
+    state.nick = v; state.bio = bio; state.avatar = av;
+    $('settings-avatar').textContent = av || initials(v);
     renderList();
     toast('更新しました');
   }catch(e){
@@ -2032,6 +2172,12 @@ function setupNotifications(){
 
 function notifyIncoming(m){
   if(!notifEnabled) return;
+  const c = state.contacts[m.peer] || {};
+  if(c.req) return; // no notifications for message requests
+  if(localStorage.getItem('yggchat_hide_notif') === '1'){
+    if(document.hidden || document.visibilityState === 'hidden'){ try{ new Notification('YggChat', {body: '新しいメッセージ', tag: 'yggchat'}); }catch(e){} }
+    return;
+  }
   if(document.hidden || document.visibilityState === 'hidden'){
     try{
       const n = new Notification(m.nick || addrShort(m.from||m.peer), {body: m.text, tag: m.id || ('msg:'+m.peer)});
@@ -2099,7 +2245,7 @@ function connectEvents(){
       }else if(d.type === 'contact'){
         const c = d.data;
         if(c && c.addr){
-          state.contacts[c.addr] = Object.assign(state.contacts[c.addr] || {addr:c.addr}, c);
+          state.contacts[c.addr] = c; // server sends the whole contact (false fields omitted)
           renderList();
           if(curAddr === c.addr) updateChatHeader();
         }
@@ -2114,6 +2260,15 @@ function connectEvents(){
           }
           renderList();
         }
+      }else if(d.type === 'msg_del'){
+        const md = d.data;
+        if(md && md.id){
+          state.messages = state.messages.filter(x => !(x.id === md.id && x.peer === md.peer));
+          if(curAddr === md.peer) renderMessages();
+          renderList();
+        }
+      }else if(d.type === 'locked'){
+        showLock();
       }else if(d.type === 'peers'){
         state.peers = (d.data && d.data.up) != null ? d.data.up : state.peers;
         updateConn();
@@ -2141,6 +2296,9 @@ async function init(){
     return;
   }
   esRetry = 1000;
+  state.messages = state.messages || [];
+  state.contacts = state.contacts || {};
+  if(state.locked){ showLock(); }
   updateConn();
   renderList();
   if(curAddr){
@@ -2155,6 +2313,124 @@ async function init(){
     checkNearBottom();
   });
 }
+
+
+// ===== v0.5: lock, privacy, requests, disappearing, theme =====
+function showLock(){
+  state.contacts = {}; state.messages = []; curAddr = null;
+  document.body.classList.remove('chat-open');
+  ['contact-info-screen','settings-screen','peers-screen','public-peers-screen'].forEach(id => { const e = $(id); if(e) e.classList.remove('active'); });
+  renderList();
+  $('lock-err').textContent = '';
+  $('lock-pass').value = '';
+  $('lock-screen').classList.add('active');
+  setTimeout(() => $('lock-pass').focus(), 100);
+}
+async function doUnlock(){
+  const p = $('lock-pass').value;
+  if(!p) return;
+  $('lock-unlock').disabled = true;
+  try{
+    await api('/api/unlock', {Pass: p});
+    $('lock-screen').classList.remove('active');
+    state = await api('/api/state');
+    state.messages = state.messages || []; state.contacts = state.contacts || {};
+    updateConn(); renderList();
+  }catch(e){
+    $('lock-err').textContent = e.message || 'パスコードが違います';
+  }finally{
+    $('lock-unlock').disabled = false;
+  }
+}
+$('lock-unlock').addEventListener('click', doUnlock);
+$('lock-pass').addEventListener('keydown', e => { if(e.key === 'Enter') doUnlock(); });
+
+function setSwitch(id, on){ const e = $(id); if(e) e.classList.toggle('active', !!on); }
+function renderPrivacy(){
+  const has = !!state.haspass;
+  $('pass-state').textContent = has ? '設定済み（履歴をAES-256-GCMで暗号化して保存）' : '未設定（履歴は平文で保存）';
+  $('pass-remove').style.display = has ? '' : 'none';
+  $('lock-now').style.display = has ? '' : 'none';
+  setSwitch('hide-notif-switch', localStorage.getItem('yggchat_hide_notif') === '1');
+  const andr = window.YggAndroid && typeof window.YggAndroid.setSecure === 'function';
+  $('secure-row').style.display = andr ? '' : 'none';
+  setSwitch('secure-switch', localStorage.getItem('yggchat_secure') === '1');
+  const bl = state.blocked || [];
+  const el = $('blocked-list');
+  el.innerHTML = bl.length ? bl.map(a => '<div style="display:flex;gap:8px;align-items:center;margin-top:4px;"><span style="flex:1;font-family:ui-monospace,monospace;font-size:11px;word-break:break-all;">' + escapeHtml(a) + '</span><button data-unblock="' + escapeHtml(a) + '">解除</button></div>').join('') : 'なし';
+  el.querySelectorAll('button[data-unblock]').forEach(b => b.addEventListener('click', async () => {
+    try{ await api('/api/block', {Addr: b.getAttribute('data-unblock'), Block: false}); state.blocked = (state.blocked||[]).filter(x => x !== b.getAttribute('data-unblock')); renderPrivacy(); toast('解除しました'); }catch(e){ toast(e.message); }
+  }));
+  document.querySelectorAll('#theme-seg button').forEach(b => b.classList.toggle('on', b.getAttribute('data-theme') === (localStorage.getItem('yggchat_theme') || 'system')));
+}
+$('pass-set').addEventListener('click', async () => {
+  let old = '';
+  if(state.haspass){ old = await uiPrompt('現在のパスコード'); if(old === null) return; }
+  const nw = await uiPrompt('新しいパスコード（4文字以上）'); if(!nw) return;
+  const again = await uiPrompt('もう一度入力'); if(again === null) return;
+  if(nw !== again){ toast('一致しません'); return; }
+  try{ await api('/api/passcode', {Old: old, New: nw}); state.haspass = true; renderPrivacy(); toast('パスコードを設定しました'); }catch(e){ toast(e.message); }
+});
+$('pass-remove').addEventListener('click', async () => {
+  const old = await uiPrompt('現在のパスコード'); if(old === null) return;
+  try{ await api('/api/passcode', {Old: old, New: ''}); state.haspass = false; renderPrivacy(); toast('解除しました（履歴は平文に戻りました）'); }catch(e){ toast(e.message); }
+});
+$('lock-now').addEventListener('click', async () => {
+  try{ await api('/api/lock', {}); showLock(); }catch(e){ toast(e.message); }
+});
+$('hide-notif-switch').addEventListener('click', () => {
+  const on = localStorage.getItem('yggchat_hide_notif') !== '1';
+  localStorage.setItem('yggchat_hide_notif', on ? '1' : '0'); renderPrivacy();
+});
+$('secure-switch').addEventListener('click', () => {
+  const on = localStorage.getItem('yggchat_secure') !== '1';
+  localStorage.setItem('yggchat_secure', on ? '1' : '0');
+  try{ window.YggAndroid.setSecure(on); }catch(e){}
+  renderPrivacy();
+});
+try{ if(window.YggAndroid && localStorage.getItem('yggchat_secure') === '1') window.YggAndroid.setSecure(true); }catch(e){}
+$('reset-id').addEventListener('click', async () => {
+  if(!(await uiDialog('新しいIDを作りますか？今のアドレス・連絡先・履歴はすべて消え、元に戻せません。', {okText:'作り直す', danger:true}))) return;
+  const old = state.addr;
+  try{ await api('/api/identity/reset', {Confirm: true}); }catch(e){ toast(e.message); return; }
+  toast('再起動中…');
+  if(state.platform === 'web') return; // the PWA reloads itself
+  for(let i = 0; i < 40; i++){
+    await new Promise(r => setTimeout(r, 500));
+    try{ const s2 = await api('/api/state'); if(s2.addr && s2.addr !== old){ location.reload(); return; } }catch(e){}
+  }
+  location.reload();
+});
+document.querySelectorAll('#theme-seg button').forEach(b => b.addEventListener('click', () => {
+  const t = b.getAttribute('data-theme');
+  localStorage.setItem('yggchat_theme', t);
+  if(t === 'system') document.documentElement.removeAttribute('data-theme'); else document.documentElement.setAttribute('data-theme', t);
+  renderPrivacy();
+}));
+
+// Requests
+$('req-accept').addEventListener('click', async () => {
+  if(!curAddr) return;
+  try{ const c = await api('/api/contact', {Addr: curAddr, Accept: true}); state.contacts[curAddr] = c; updateChatHeader(); renderList(); toast('承認しました'); }catch(e){ toast(e.message); }
+});
+async function blockCur(){
+  if(!curAddr) return;
+  if(!(await uiDialog('このアドレスをブロックしますか？会話は削除され、今後のメッセージは受け取りません。', {okText:'ブロック', danger:true}))) return;
+  const a = curAddr;
+  try{
+    await api('/api/block', {Addr: a, Block: true});
+    delete state.contacts[a]; state.messages = state.messages.filter(m => m.peer !== a);
+    state.blocked = (state.blocked || []).concat([a]);
+    closeContactInfo(); document.body.classList.remove('chat-open'); curAddr = null; renderList(); toast('ブロックしました');
+  }catch(e){ toast(e.message); }
+}
+$('req-block').addEventListener('click', blockCur);
+$('ci-block').addEventListener('click', blockCur);
+$('req-delete').addEventListener('click', () => $('ci-delete').click());
+$('ci-ttl').addEventListener('change', async () => {
+  const v = parseInt($('ci-ttl').value, 10) || 0;
+  try{ const c = await api('/api/contact', {Addr: curAddr, TTL: v}); state.contacts[curAddr] = c; updateChatHeader(); renderList(); toast('消えるメッセージ: ' + ttlLabel(v)); }catch(e){ toast(e.message); }
+});
 
 window.ygBack = () => {
   if(modalClose){ modalClose(); return true; }

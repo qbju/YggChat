@@ -1,4 +1,4 @@
-const CACHE = 'yggchat-v5';
+const CACHE = 'yggchat-v6';
 const INDEX = './index.html';
 
 self.addEventListener('install', e => {
