@@ -891,7 +891,7 @@ input, textarea { font-size:16px !important; }
 .bubble { -webkit-touch-callout:none; -webkit-user-select:none; user-select:none; }
 .modal-bg { position:fixed; inset:0; background:rgba(0,0,0,.55); z-index:60; display:flex; align-items:center; justify-content:center; padding:24px; }
 .modal { background:var(--surface); border:1px solid var(--border); border-radius:14px; width:100%; max-width:340px; padding:18px; display:flex; flex-direction:column; gap:12px; }
-.modal .mt { font-weight:600; }
+.modal .mt { font-weight:600; white-space:pre-line; }
 .modal .mb { display:flex; gap:8px; justify-content:flex-end; }
 .modal .mb .ok { background:var(--accent); color:#111; border-color:var(--accent); }
 .modal .mb .danger { background:var(--error); color:#fff; border-color:var(--error); }
@@ -1119,13 +1119,26 @@ select { font:inherit; font-size:16px; color:var(--fg); background:var(--surface
       </div>
     </div>
     <div class="section">
+      <div class="section-title">置き配（Nostr）<span style="font-size:11px;color:#c0392b;margin-left:6px;">非推奨・実験的</span></div>
+      <div class="row-sub">相手がオフラインで届かなかった文章を、公開Nostrリレーに暗号化して最大7日預けます。中身と送信者は相手しか読めませんが、リレーには宛先タグ・時刻・IPアドレスが見え、保管も保証されません。写真は対象外。</div>
+      <div class="toggle">
+        <div class="toggle-label">Nostrリレーで置き配する</div>
+        <div class="switch" id="nostr-switch"><div class="switch-handle"></div></div>
+      </div>
+      <div class="row"><div class="row-main"><div class="row-title">リレー</div><div class="row-sub" id="nostr-relays" style="font-family:ui-monospace,monospace;font-size:11px;word-break:break-all;"></div></div></div>
+      <div class="row-btns">
+        <button id="nostr-edit">リレーを編集</button>
+        <button id="nostr-reset">既定に戻す</button>
+      </div>
+    </div>
+    <div class="section">
       <div class="section-title">ダウンロード</div>
       <div class="row-sub">ネイティブ版はtls・tcp・quicのピアにも直接つながり、バックグラウンドでも動きます。</div>
       <a class="dl-btn" href="https://yggchat.surge.sh/dl/yggchat.apk" download>📱 Android (APK)</a>
       <a class="dl-btn" href="https://yggchat.surge.sh/dl/yggchat-windows-amd64.exe" download>🪟 Windows (exe)</a>
       <a class="dl-btn" href="https://yggchat.surge.sh/dl/yggchat-linux-amd64" download>🐧 Linux (amd64)</a>
       <a class="dl-btn" href="https://yggchat.surge.sh/dl/yggchat-android-arm64" download>⌨️ Termux (arm64)</a>
-      <div class="row-sub" id="dl-ver">最新: v0.7 ・ SHA256SUMS で検証できます</div>
+      <div class="row-sub" id="dl-ver">最新: v0.8 ・ SHA256SUMS で検証できます</div>
     </div>
     <div class="section">
       <div class="section-title">About</div>
@@ -1488,7 +1501,7 @@ function renderMessages(){
       }else if(st === 'failed'){
         html += '<span class="msg-status failed">送信失敗・タップで再送</span>';
       }else if(st === 'stored'){
-        html += '<span class="msg-status queued" title="相手がオンラインになったら自動で再送します">🕓 送信待ち</span>';
+        html += '<span class="msg-status queued" title="Nostrリレーに暗号化して預けました。相手が受け取るか、オンラインになったら届きます">📮 置き配中</span>';
       }else if(st === 'queued'){
         html += '<span class="msg-status queued" title="相手がオンラインになると自動で送信">🕓 オンライン待ち</span>';
       }
@@ -2149,8 +2162,34 @@ function checkNearBottom(){
   }
 }
 
+const andNotif = !!(window.YggAndroid && typeof window.YggAndroid.notifState === 'function');
+function androidNotifSync(){
+  if(!andNotif) return;
+  try{ window.YggAndroid.setNotif(notifEnabled, localStorage.getItem('yggchat_hide_notif') === '1'); }catch(e){}
+}
 function setupNotifications(){
   const sw = $('notif-switch');
+  if(andNotif){
+    // Android app: the background service posts notifications natively.
+    notifEnabled = localStorage.getItem('yggchat_notif') === '1' && window.YggAndroid.notifState() === 'granted';
+    sw.classList.toggle('active', notifEnabled);
+    androidNotifSync();
+    const enable = st => {
+      if(st === 'granted'){ notifEnabled = true; sw.classList.add('active'); localStorage.setItem('yggchat_notif','1'); androidNotifSync(); toast('通知をオンにしました'); }
+      else toast('通知が許可されていません。Androidの設定で「通知」をオンにしてください');
+    };
+    window.ygNotifResult = enable;
+    sw.addEventListener('click', () => {
+      if(notifEnabled){ notifEnabled = false; sw.classList.remove('active'); localStorage.setItem('yggchat_notif','0'); androidNotifSync(); return; }
+      const st = window.YggAndroid.notifState();
+      if(st === 'granted') enable(st); else { localStorage.setItem('yggchat_notif_pending','1'); window.YggAndroid.requestNotif(); }
+    });
+    // Coming back from the system settings screen.
+    document.addEventListener('visibilitychange', () => {
+      if(!document.hidden && !notifEnabled && localStorage.getItem('yggchat_notif_pending') === '1' && window.YggAndroid.notifState() === 'granted'){ localStorage.removeItem('yggchat_notif_pending'); enable('granted'); }
+    });
+    return;
+  }
   try{
     const v = localStorage.getItem('yggchat_notif');
     notifEnabled = v === '1';
@@ -2186,7 +2225,7 @@ function setupNotifications(){
 }
 
 function notifyIncoming(m){
-  if(!notifEnabled) return;
+  if(!notifEnabled || andNotif) return;
   const c = state.contacts[m.peer] || {};
   if(c.req) return; // no notifications for message requests
   if(localStorage.getItem('yggchat_hide_notif') === '1'){
@@ -2376,6 +2415,9 @@ function renderPrivacy(){
   el.querySelectorAll('button[data-unblock]').forEach(b => b.addEventListener('click', async () => {
     try{ await api('/api/block', {Addr: b.getAttribute('data-unblock'), Block: false}); state.blocked = (state.blocked||[]).filter(x => x !== b.getAttribute('data-unblock')); renderPrivacy(); toast('解除しました'); }catch(e){ toast(e.message); }
   }));
+  const ns = state.nostr || {on:false, relays:[]};
+  setSwitch('nostr-switch', ns.on);
+  $('nostr-relays').innerHTML = (ns.relays || []).map(escapeHtml).join('<br>') || 'なし';
   document.querySelectorAll('#theme-seg button').forEach(b => b.classList.toggle('on', b.getAttribute('data-theme') === (localStorage.getItem('yggchat_theme') || 'system')));
 }
 $('pass-set').addEventListener('click', async () => {
@@ -2393,9 +2435,24 @@ $('pass-remove').addEventListener('click', async () => {
 $('lock-now').addEventListener('click', async () => {
   try{ await api('/api/lock', {}); showLock(); }catch(e){ toast(e.message); }
 });
+async function nostrSet(body){
+  try{ state.nostr = await api('/api/nostr', body); renderPrivacy(); return true; }catch(e){ toast(e.message); return false; }
+}
+$('nostr-switch').addEventListener('click', async () => {
+  const on = !(state.nostr && state.nostr.on);
+  if(on && !(await uiDialog('Nostr置き配をオンにしますか？\n\n届かなかった文章を暗号化して公開リレーに最大7日預けます。中身と送信者は相手しか読めませんが、リレー運営者には宛先タグ・時刻・IPアドレスが見えます。リレーが消さない・預かってくれないこともあります。相手側もオンにしている必要があります。', {okText:'オンにする'}))) return;
+  if(await nostrSet({On: on})) toast(on ? '置き配をオンにしました' : '置き配をオフにしました');
+});
+$('nostr-edit').addEventListener('click', async () => {
+  const cur = ((state.nostr && state.nostr.relays) || []).join(' ');
+  const v = await uiPrompt('wss:// のリレーURL（スペース区切り、最大8つ）', cur); if(v === null) return;
+  const list = v.split(/[\s,]+/).filter(Boolean);
+  if(await nostrSet({Relays: list})) toast('リレーを保存しました');
+});
+$('nostr-reset').addEventListener('click', async () => { if(await nostrSet({Reset: true})) toast('既定のリレーに戻しました'); });
 $('hide-notif-switch').addEventListener('click', () => {
   const on = localStorage.getItem('yggchat_hide_notif') !== '1';
-  localStorage.setItem('yggchat_hide_notif', on ? '1' : '0'); renderPrivacy();
+  localStorage.setItem('yggchat_hide_notif', on ? '1' : '0'); androidNotifSync(); renderPrivacy();
 });
 $('secure-switch').addEventListener('click', () => {
   const on = localStorage.getItem('yggchat_secure') !== '1';

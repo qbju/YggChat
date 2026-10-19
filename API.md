@@ -52,3 +52,12 @@ Mailbox: removed in v0.7 (no server-side store-and-forward; offline messages sta
 ## v0.6 images
 POST /api/send {To, Text?, Img: "data:image/(jpeg|png|webp|gif);base64,..."} (decoded ≤ 600 KB; UI compresses to ≤ ~400 KB JPEG). Message.img holds the data URL.
 Wire: {t:"fh", id, nick, text?, ts, ttl?, mime, size, n, sha} then {t:"fc", id, i, d} (864-byte raw chunks so every datagram fits the 1280-byte IPv6 MTU unfragmented — the PWA can't do IPv6 fragments; caption ≤800 UTF-8 bytes so the header fits too; image ≤600 KB) acked by {t:"fca", id, i}; after all chunks + SHA-256 match the receiver stores it and sends {t:"ack", id}. Sender rounds: header + unacked chunks every 2.5 s; gives up after `tries` rounds without progress → queued (no mailbox for images).
+
+
+## POST /api/nostr  (v0.8, optional / deprecated)
+Body: `{"On": bool?, "Relays": ["wss://..."]?, "Reset": bool?}` → `{"on", "relays", "defaults"}`. Also returned as `nostr` in `/api/state`.
+When on, an outgoing text message that is not acked becomes status `stored` after it is parked on the relays:
+sealed box (mbox.Seal of `{"w": wire, "nk": throwaway-secp256k1-key}`) as the content of a kind-1059 event signed by the throw-away key,
+tags `["p", sha256("yggchat-nostr:"+hex(ed25519 pk))]`, `["expiration", now+7d]`. The recipient polls `#p` every 3 min,
+opens, acks directly over Ygg and publishes the NIP-09 deletion signed with `nk`. Images are never parked. Direct resend continues.
+Defaults: wss://nos.lol, wss://relay.primal.net, wss://nostr.mom (relay.damus.io accepts but does not return kind 1059 to unauthenticated readers).

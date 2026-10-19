@@ -26,7 +26,7 @@
   const idbPut = (k, v) => idb.then(db => new Promise((res, rej) => { const t = db.transaction('kv', 'readwrite'); t.objectStore('kv').put(v, k); t.oncomplete = res; t.onerror = () => rej(t.error); }));
   let raw = {};
   const outer = { key: '', peers: null, enc: null };
-  const blank = () => ({ nick: 'anon', bio: '', avatar: '', contacts: {}, messages: [], blocked: {} });
+  const blank = () => ({ nick: 'anon', bio: '', avatar: '', contacts: {}, messages: [], blocked: {}, nostrOn: false, nostrRelays: [] });
   let st = blank();
   let locked = false;
   let aesKey = null; // CryptoKey while unlocked with a passcode
@@ -41,7 +41,7 @@
     if (outer.peers && outer.peers.some(p => /workers\.dev|instabox\.tech/.test(p))) outer.peers = null; // old Cloudflare relay / removed entry peer -> defaults
     if (!outer.peers) outer.peers = RECOMMENDED.slice();
     locked = !!outer.enc;
-    if (!locked) { Object.assign(st, { nick: raw.nick || 'anon', bio: raw.bio || '', avatar: raw.avatar || '', contacts: raw.contacts || {}, messages: raw.messages || [], blocked: raw.blocked || {} }); migrate(); }
+    if (!locked) { Object.assign(st, { nick: raw.nick || 'anon', bio: raw.bio || '', avatar: raw.avatar || '', contacts: raw.contacts || {}, messages: raw.messages || [], blocked: raw.blocked || {}, nostrOn: !!raw.nostrOn, nostrRelays: raw.nostrRelays || [] }); migrate(); }
   }
 
   const b64 = u8 => btoa(String.fromCharCode(...new Uint8Array(u8)));
@@ -228,10 +228,68 @@
         if (got) { setStatus(m.peer, m.id, 'sent'); return true; }
       }
       acks.delete(m.id);
-      setStatus(m.peer, m.id, 'queued');
+      setStatus(m.peer, m.id, m.nostr ? 'stored' : 'queued');
+      if (!m.nostr) nostrPark(m);
       return false;
     } finally { inflight.delete(m.id); }
   }
+
+  // ---- optional offline delivery over public Nostr relays (deprecated, opt-in) ----
+  // Undeliverable text is sealed to the peer's key (only they can open it; the
+  // sender is inside the box) and posted as a Nostr event signed by a
+  // throw-away key, tagged with a hash of the peer's key and a 7-day NIP-40
+  // expiry. The recipient pulls it, opens it, acks directly and publishes the
+  // NIP-09 deletion. Relays still see the tag, timing and IP addresses.
+  const nDefaults = () => { try { return JSON.parse(yggNostrDefaults()); } catch { return []; } };
+  const nRelays = () => (!locked && st.nostrOn) ? (st.nostrRelays && st.nostrRelays.length ? st.nostrRelays.slice() : nDefaults()) : null;
+  const nostrState = () => ({ on: !!st.nostrOn, relays: st.nostrRelays && st.nostrRelays.length ? st.nostrRelays : nDefaults(), defaults: nDefaults() });
+  function relayTalk(url, first, onMsg, ms) {
+    return new Promise(res => {
+      let ws, done = false;
+      const fin = v => { if (done) return; done = true; clearTimeout(t); try { ws && ws.close(); } catch {} res(v); };
+      const t = setTimeout(() => fin(undefined), ms);
+      try { ws = new WebSocket(url); } catch { return fin(undefined); }
+      ws.onopen = () => ws.send(first);
+      ws.onmessage = e => { let m; try { m = JSON.parse(e.data); } catch { return; } const v = onMsg(m); if (v !== undefined) fin(v); };
+      ws.onerror = () => fin(undefined);
+      ws.onclose = () => fin(undefined);
+    });
+  }
+  const relayPublish = (url, ev) => { const id = JSON.parse(ev).id; return relayTalk(url, '["EVENT",' + ev + ']', m => (m[0] === 'OK' && m[1] === id) ? m[2] === true : undefined, 15000).then(v => !!v); };
+  const nostrPublish = (rs, ev) => Promise.all(rs.map(r => relayPublish(r, ev))).then(a => a.some(Boolean));
+  function relayFetch(url, tag) {
+    const out = [];
+    const req = JSON.stringify(['REQ', 'yc', { kinds: [1059], '#p': [tag], since: now() - 7 * 86400, limit: 200 }]);
+    return relayTalk(url, req, m => { if (m[0] === 'EVENT' && m[2]) out.push(m[2]); else if (m[0] === 'EOSE' || m[0] === 'CLOSED') return true; }, 20000).then(() => out);
+  }
+  const nSeen = new Set();
+  let nBusy = false;
+  async function nostrFetch() {
+    const rs = nRelays(); if (!rs || nBusy) return;
+    nBusy = true;
+    try {
+      const tag = yggNostrTag();
+      const evs = new Map();
+      for (const l of await Promise.all(rs.map(r => relayFetch(r, tag)))) for (const e of l) if (e && e.id) evs.set(e.id, e);
+      for (const [id, e] of evs) {
+        if (nSeen.has(id)) continue;
+        const r = yggNostrOpen(JSON.stringify(e)); if (r.error) continue;
+        let w; try { w = JSON.parse(r.w); } catch { continue; }
+        if (w.t !== 'msg') continue;
+        learnPK(r.from, r.pk);
+        if (handleMsg(r.from, w)) { nSeen.add(id); send(r.from, { t: 'ack', id: w.id }); if (r.del) nostrPublish(rs, r.del); }
+      }
+    } finally { nBusy = false; }
+  }
+  async function nostrPark(m) {
+    const rs = nRelays(); if (!rs || m.img || m.nostr) return;
+    const c = st.contacts[m.peer]; if (!c || !c.pk) return;
+    const ev = yggNostrWrap(c.pk, JSON.stringify({ t: 'msg', id: m.id, nick: m.nick, text: m.text, ts: m.ts, ttl: m.ttl || undefined }));
+    if (!ev || !(await nostrPublish(rs, ev))) return;
+    const x = st.messages.find(y => y.peer === m.peer && y.id === m.id);
+    if (x && x.status === 'queued') { x.nostr = true; setStatus(m.peer, m.id, 'stored'); }
+  }
+  const cleanRelays = l => [...new Set((Array.isArray(l) ? l : []).map(r => String(r).trim()).filter(r => { try { const u = new URL(r); return u.protocol === 'wss:' && !!u.host && r.length <= 200; } catch { return false; } }))].slice(0, 8);
 
   // ---- disappearing sweep ----
   setInterval(() => {
@@ -260,8 +318,10 @@
     // Probe peers we still owe messages to, plus everyone now and then so they can flush to us.
     setInterval(() => { if (yggPeers() > 0 && !locked) for (const p of new Set(st.messages.filter(m => m.out && (m.status === 'queued' || m.status === 'stored')).map(m => m.peer))) hello(p); }, 20000);
     setInterval(() => { if (yggPeers() > 0) helloAll(); }, 120000);
-    addEventListener('online', () => setTimeout(() => { helloAll(); }, 3000));
-    document.addEventListener('visibilitychange', () => { if (!document.hidden) { if (yggPeers() > 0) helloAll(); } });
+    addEventListener('online', () => setTimeout(() => { helloAll(); nostrFetch(); }, 3000));
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) { if (yggPeers() > 0) helloAll(); nostrFetch(); } });
+    setTimeout(nostrFetch, 5000);
+    setInterval(nostrFetch, 180000);
   })();
 
   const norm = a => { try { return new URL('http://[' + a.trim() + ']/').hostname.slice(1, -1) } catch { return null } };
@@ -283,7 +343,7 @@
     switch (ep) {
       case 'state':
         if (locked) return ok({ locked: true, addr, peers: yggPeers(), platform: 'web' });
-        return ok({ addr, pubkey: myPK(), nick: st.nick, bio: st.bio, avatar: st.avatar, contacts: st.contacts, messages: st.messages, peers: yggPeers(), platform: 'web', locked: false, haspass: !!aesKey, blocked: Object.keys(st.blocked) });
+        return ok({ addr, pubkey: myPK(), nick: st.nick, bio: st.bio, avatar: st.avatar, contacts: st.contacts, messages: st.messages, peers: yggPeers(), platform: 'web', locked: false, haspass: !!aesKey, blocked: Object.keys(st.blocked), nostr: nostrState() });
       case 'unlock': {
         if (!locked) return ok({});
         try {
@@ -291,7 +351,7 @@
           const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: unb64(outer.enc.iv) }, k, unb64(outer.enc.ct));
           st = Object.assign(blank(), JSON.parse(new TextDecoder().decode(plain)));
           aesKey = k; locked = false; migrate();
-          setTimeout(() => { helloAll(); }, 500);
+          setTimeout(() => { helloAll(); nostrFetch(); }, 500);
           return ok({});
         } catch { await new Promise(r => setTimeout(r, 700)); return bad('パスコードが違います', 403); }
       }
@@ -379,6 +439,15 @@
         } else if (body.Remove) { yggRemovePeer(body.Remove); outer.peers = outer.peers.filter(p => p !== body.Remove); }
         saveOuter();
         return ok({ peers: peerList(), recommended: RECOMMENDED, up: yggPeers() });
+      }
+      case 'nostr': {
+        const was = !!st.nostrOn;
+        if (body.On != null) st.nostrOn = !!body.On;
+        if (body.Reset) st.nostrRelays = [];
+        else if (body.Relays) st.nostrRelays = cleanRelays(body.Relays);
+        save();
+        if (st.nostrOn && !was) { nostrFetch(); for (const m of st.messages.filter(x => x.out && x.status === 'queued' && !x.nostr)) nostrPark(m); }
+        return ok(nostrState());
       }
       case 'peers/public':
         return ok({ peers: RECOMMENDED.map(u => ({ uri: u, label: LABELS[u] || u, region: '', continent: '', asia: false })) });

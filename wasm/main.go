@@ -9,6 +9,7 @@ import (
 	"crypto/ed25519"
 	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
 	"net"
 	"net/url"
 	"os"
@@ -245,6 +246,34 @@ func tag(this js.Value, args []js.Value) any {
 	return mbox.Tag(pk)
 }
 
+// yggNostrWrap(toPkHex, wireJSON) -> event JSON | "", yggNostrOpen(evJSON) -> {from, pk, w, del} | {error},
+// yggNostrTag() -> our recipient tag, yggNostrDefaults() -> default relays (JSON).
+func nostrWrap(this js.Value, args []js.Value) any {
+	pk, err := hex.DecodeString(args[0].String())
+	if err != nil || len(pk) != ed25519.PublicKeySize {
+		return ""
+	}
+	ev, err := mbox.NostrWrap(pk, priv, []byte(args[1].String()))
+	if err != nil {
+		return ""
+	}
+	return ev
+}
+func nostrOpen(this js.Value, args []js.Value) any {
+	from, pk, w, del, err := mbox.NostrOpen(args[0].String(), priv)
+	if err != nil {
+		return js.ValueOf(map[string]any{"error": err.Error()})
+	}
+	return js.ValueOf(map[string]any{"from": from, "pk": hex.EncodeToString(pk), "w": string(w), "del": del})
+}
+func nostrTag(this js.Value, args []js.Value) any {
+	return mbox.NostrTag(priv.Public().(ed25519.PublicKey))
+}
+func nostrDefaults(this js.Value, args []js.Value) any {
+	b, _ := json.Marshal(mbox.DefaultRelays)
+	return string(b)
+}
+
 func main() {
 	js.Global().Set("yggPub", js.FuncOf(pub))
 	js.Global().Set("yggSign", js.FuncOf(sign))
@@ -252,6 +281,10 @@ func main() {
 	js.Global().Set("yggOpen", js.FuncOf(openBox))
 	js.Global().Set("yggAddrOK", js.FuncOf(addrOK))
 	js.Global().Set("yggTag", js.FuncOf(tag))
+	js.Global().Set("yggNostrWrap", js.FuncOf(nostrWrap))
+	js.Global().Set("yggNostrOpen", js.FuncOf(nostrOpen))
+	js.Global().Set("yggNostrTag", js.FuncOf(nostrTag))
+	js.Global().Set("yggNostrDefaults", js.FuncOf(nostrDefaults))
 	js.Global().Set("yggAddPeer", js.FuncOf(addPeer))
 	js.Global().Set("yggRemovePeer", js.FuncOf(removePeer))
 	js.Global().Set("yggPeerList", js.FuncOf(peerList))

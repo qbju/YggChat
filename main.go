@@ -61,6 +61,7 @@ type Message struct {
 	Exp    int64  `json:"exp,omitempty"` // unix time when this message is deleted
 	Sys    string `json:"sys,omitempty"` // system line, e.g. "ttl:300"
 	Img    string `json:"img,omitempty"` // data:image/...;base64,... (compressed by the UI)
+	Nostr  bool   `json:"nostr,omitempty"` // also parked on Nostr relays (opt-in offline delivery)
 }
 
 type Contact struct {
@@ -89,6 +90,9 @@ type Store struct {
 	Contacts map[string]Contact `json:"contacts"`
 	Messages []Message          `json:"messages"`
 	Blocked  map[string]bool    `json:"blocked,omitempty"`
+	// Optional, deprecated: park undeliverable messages on public Nostr relays.
+	NostrOn     bool     `json:"nostr_on,omitempty"`
+	NostrRelays []string `json:"nostr_relays,omitempty"`
 }
 
 func (s *Store) save() {
@@ -498,8 +502,33 @@ func (a *App) deliverN(m Message, tries int) bool {
 		case <-time.After(2500 * time.Millisecond):
 		}
 	}
-	a.setStatus(m.Peer, m.ID, "queued")
+	if m.Nostr {
+		a.setStatus(m.Peer, m.ID, "stored")
+	} else {
+		a.setStatus(m.Peer, m.ID, "queued")
+		go a.nostrPark(m)
+	}
 	return false
+}
+
+// nostrPark parks a message the peer did not ack on Nostr relays (if enabled).
+func (a *App) nostrPark(m Message) {
+	if !a.nostrPut(m) {
+		return
+	}
+	a.store.mu.Lock()
+	st := ""
+	for i := range a.store.Messages {
+		x := &a.store.Messages[i]
+		if x.Peer == m.Peer && x.ID == m.ID && x.Status == "queued" {
+			x.Nostr, x.Status, st = true, "stored", "stored"
+			a.store.save()
+		}
+	}
+	a.store.mu.Unlock()
+	if st != "" {
+		a.broadcast("status", map[string]string{"id": m.ID, "peer": m.Peer, "status": st})
+	}
 }
 
 func (a *App) queued(peer string) []Message {
@@ -727,6 +756,7 @@ func (a *App) httpHandlers(mux *http.ServeMux) {
 			"nick": a.store.Nick, "bio": a.store.Bio, "avatar": a.store.Avatar,
 			"contacts": a.store.Contacts, "messages": a.store.Messages, "peers": peers, "platform": "native",
 			"locked": false, "haspass": a.store.key != nil, "blocked": blocked,
+			"nostr": a.nostrStateLocked(),
 		})
 	})
 	mux.HandleFunc("/api/send", func(w http.ResponseWriter, r *http.Request) {
@@ -1002,6 +1032,7 @@ func main() {
 	}()
 	go a.serveChat()
 	go a.sweep()
+	go a.nostrLoop()
 	// Offline queue: probe peers we owe messages to every 20 s, and greet every
 	// contact every 2 min so they can flush messages queued for us.
 	go func() {
@@ -1028,6 +1059,7 @@ func main() {
 	mux := http.NewServeMux()
 	a.httpHandlers(mux)
 	a.featureHandlers(mux)
+	a.nostrHandlers(mux)
 	fmt.Printf("YggChat\n  your address: %s\n  open UI:      http://%s/\n", a.addr, *uiAddr)
 	ln, err := listenRetry(*uiAddr)
 	if err != nil {

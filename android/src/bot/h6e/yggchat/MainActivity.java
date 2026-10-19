@@ -9,10 +9,20 @@ import android.webkit.*;
 
 public class MainActivity extends Activity {
     private WebView web;
+    static volatile boolean visible;
+
+    @Override protected void onResume() { super.onResume(); visible = true; }
+    @Override protected void onPause() { visible = false; super.onPause(); }
+
+    String notifState() {
+        android.app.NotificationManager nm = (android.app.NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+        if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission("android.permission.POST_NOTIFICATIONS") != android.content.pm.PackageManager.PERMISSION_GRANTED)
+            return getSharedPreferences("ygg", 0).getBoolean("asked", false) && !shouldShowRequestPermissionRationale("android.permission.POST_NOTIFICATIONS") ? "denied" : "default";
+        return (Build.VERSION.SDK_INT < 24 || nm.areNotificationsEnabled()) ? "granted" : "denied";
+    }
 
     @Override protected void onCreate(Bundle s) {
         super.onCreate(s);
-        if (Build.VERSION.SDK_INT >= 33) requestPermissions(new String[]{"android.permission.POST_NOTIFICATIONS"}, 1);
         Intent svc = new Intent(this, YggService.class);
         if (Build.VERSION.SDK_INT >= 26) startForegroundService(svc); else startService(svc);
         web = new WebView(this);
@@ -28,6 +38,24 @@ public class MainActivity extends Activity {
                     else getWindow().clearFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE);
                 }});
             }
+            // Notifications: WebView has no Web Notification API, so the service posts them natively.
+            @JavascriptInterface public String notifState() { return MainActivity.this.notifState(); }
+            @JavascriptInterface public void requestNotif() {
+                runOnUiThread(new Runnable() { public void run() {
+                    String st = notifState();
+                    if ("default".equals(st) && Build.VERSION.SDK_INT >= 33) {
+                        getSharedPreferences("ygg", 0).edit().putBoolean("asked", true).apply();
+                        requestPermissions(new String[]{"android.permission.POST_NOTIFICATIONS"}, 1);
+                    } else if (!"granted".equals(st)) {
+                        Intent i = new Intent("android.settings.APP_NOTIFICATION_SETTINGS");
+                        i.putExtra("android.provider.extra.APP_PACKAGE", getPackageName());
+                        try { startActivity(i); } catch (Exception e) {}
+                    }
+                }});
+            }
+            @JavascriptInterface public void setNotif(boolean on, boolean hide) {
+                getSharedPreferences("ygg", 0).edit().putBoolean("notif", on).putBoolean("hide", hide).apply();
+            }
         }, "YggAndroid");
         web.setWebViewClient(new WebViewClient() {
             @Override public void onReceivedError(WebView v, WebResourceRequest r, WebResourceError e) {
@@ -36,6 +64,10 @@ public class MainActivity extends Activity {
         });
         setContentView(web);
         new Handler().postDelayed(new Runnable(){ public void run(){ web.loadUrl("http://127.0.0.1:7780/"); }}, 800);
+    }
+
+    @Override public void onRequestPermissionsResult(int code, String[] p, int[] r) {
+        if (web != null) web.evaluateJavascript("window.ygNotifResult && window.ygNotifResult('" + notifState() + "')", null);
     }
 
     @Override public void onBackPressed() {

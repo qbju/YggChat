@@ -1,4 +1,4 @@
-YggChat v0.7 - NAT越え不要のP2Pチャット (Yggdrasil内蔵)
+YggChat v0.8 - NAT越え不要のP2Pチャット (Yggdrasil内蔵)
 
 ■ 使い方
 PWA(インストール不要): https://yggchat.surge.sh/
@@ -31,6 +31,7 @@ Linux:   ./yggchat-linux-amd64
 SHA256SUMS で各ファイルのハッシュを確認できます。バイナリは未署名のため、WindowsではSmartScreenの警告が出ます。
 
 ■ 履歴
+v0.8:   設定に「置き配（Nostr）」を追加（非推奨・既定オフ）。届かなかった文章を相手の鍵で暗号化し、使い捨て鍵で署名したNostrイベントとして公開リレーに最大7日預ける。受信側は読んだら削除イベントを出す。リレーには宛先タグ・時刻・IPが見える。写真は対象外。
 v0.7.1: PWAの自前入口ピアを撤去し、公開ピアygg.being.petのみに。
 v0.7:   Cloudflare中継と中継メールボックス(置き配)を廃止。PWAはOrigin許可済みピアにwssで直接接続。
         旧メールボックスのデータはサーバー側で削除済み。
