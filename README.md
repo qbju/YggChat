@@ -1,6 +1,6 @@
 # YggChat
 
-NAT越え不要のP2Pチャット（Yggdrasil内蔵）。現在のバージョン: **v0.12.2**
+NAT越え不要のP2Pチャット（Yggdrasil内蔵）。現在のバージョン: **v0.12.3**
 
 [![build](https://github.com/qbju/YggChat/actions/workflows/build.yml/badge.svg)](https://github.com/qbju/YggChat/actions/workflows/build.yml)
 
@@ -112,6 +112,7 @@ Android APK（Gradle不使用）: `libyggchat.so`（`GOOS=android GOARCH=arm64` 
 
 | バージョン | 内容 |
 | --- | --- |
+| v0.12.3 | 速い回線で送信直後に配達通知が先に届くと、送ったメッセージが「送信中」のまま表示される不具合を修正。 |
 | v0.12.2 | ローカルUI/APIに鍵を導入。データフォルダの `ui-key`（所有者のみ読める）の鍵がないと使えず、同じ端末の他アプリ・他ユーザーからの操作を防ぎます。ブラウザでは起動時に表示される `?k=` 付きURLで開きます。 |
 | v0.12.1 | ローカルAPIが接続元アドレスもループバックか検証し、`-ui` をループバック以外にすると起動を拒否。AndroidのWebViewはアプリ自身の画面以外を開かず外部URLはブラウザへ渡し、JavaScriptブリッジはアプリの画面からしか動かないように。 |
 | v0.12 | Windows版がWebView2のアプリウィンドウで開くように（ブラウザ不要、ダブルクリック起動時は黒いコンソールも閉じる）。 |

@@ -1194,7 +1194,7 @@ img.emoji { height:1.2em; width:1.2em; margin:0 .05em 0 .1em; vertical-align:-0.
       <a class="dl-btn" href="https://yggchat.surge.sh/dl/yggchat-windows-amd64.exe" download>🪟 Windows (exe)</a>
       <a class="dl-btn" href="https://yggchat.surge.sh/dl/yggchat-linux-amd64" download>🐧 Linux (amd64)</a>
       <a class="dl-btn" href="https://yggchat.surge.sh/dl/yggchat-android-arm64" download>⌨️ Termux (arm64)</a>
-      <div class="row-sub" id="dl-ver">最新: v0.12.2 ・ SHA256SUMS で検証できます</div>
+      <div class="row-sub" id="dl-ver">最新: v0.12.3 ・ SHA256SUMS で検証できます</div>
     </div>
     <div class="section">
       <div class="section-title">About</div>
@@ -1632,10 +1632,7 @@ async function retrySend(id){
     m.status = 'sending';
     renderMessages();
     const res = await api('/api/send', {To: m.peer, Retry: id});
-    if(res && res.id){
-      const idx = state.messages.findIndex(x => x.id === id);
-      if(idx >= 0) state.messages[idx] = res;
-    }
+    putSent(res);
     renderMessages();
     renderList();
   }catch(e){
@@ -2185,21 +2182,27 @@ $('msg-text').addEventListener('keydown', (e) => {
 
 $('send-btn').addEventListener('click', sendMsg);
 
+// Delivery events can arrive before the /api/send reply (fast links): never let
+// the reply's "sending" overwrite a later status, and keep statuses for
+// messages we have not seen yet.
+const lateStatus = {};
+function putSent(m){
+  if(!m || !m.id) return;
+  if(lateStatus[m.id]){ m.status = lateStatus[m.id]; delete lateStatus[m.id]; }
+  const idx = state.messages.findIndex(x => x.id === m.id);
+  if(idx < 0){ state.messages.push(m); return; }
+  const old = state.messages[idx];
+  const st = (m.status === 'sending' && old.status && old.status !== 'sending') ? old.status : m.status;
+  state.messages[idx] = Object.assign(old, m, {status: st});
+}
+
 async function sendMsg(){
   const ta = $('msg-text');
   const text = ta.value.trim();
   if(!curAddr || text === '') return;
   $('send-btn').disabled = true;
   try{
-    const m = await api('/api/send', {To: curAddr, Text: text});
-    if(m && m.id){
-      if(!state.messages.some(x => x.id === m.id)){
-        state.messages.push(m);
-      }else{
-        const idx = state.messages.findIndex(x => x.id === m.id);
-        if(idx >= 0) state.messages[idx] = m;
-      }
-    }
+    putSent(await api('/api/send', {To: curAddr, Text: text}));
     ta.value = '';
     ta.style.height = 'auto';
     renderMessages();
@@ -2347,6 +2350,7 @@ function connectEvents(){
           if(ex >= 0){
             state.messages[ex] = Object.assign(state.messages[ex], msg);
           }else{
+            if(lateStatus[msg.id]){ msg.status = lateStatus[msg.id]; delete lateStatus[msg.id]; }
             state.messages.push(msg);
             if(msg.peer && !msg.out){
               notifyIncoming(msg);
@@ -2375,6 +2379,8 @@ function connectEvents(){
               renderMessages();
             }
             renderList();
+          }else{
+            lateStatus[st.id] = st.status;
           }
         }
       }else if(d.type === 'contact'){
@@ -2891,7 +2897,7 @@ $('img-input').addEventListener('change', async () => {
   if(!okd) return;
   try{
     const m = await api('/api/send', {To: curAddr, Text: cap, Img: url});
-    if(m && m.id && !state.messages.some(x => x.id === m.id)) state.messages.push(m);
+    putSent(m);
     $('msg-text').value = ''; $('msg-text').style.height = 'auto'; $('send-btn').disabled = true;
     renderMessages(); renderList();
   }catch(e){ toast(e.message); }
