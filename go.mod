@@ -1,6 +1,6 @@
 module github.com/h6e/yggchat
 
-go 1.27.1
+go 1.27.2
 
 require (
 	github.com/btcsuite/btcd/btcec/v2 v2.5.0
@@ -22,6 +22,7 @@ require (
 	github.com/google/btree v1.1.3 // indirect
 	github.com/hjson/hjson-go/v4 v4.6.0 // indirect
 	github.com/quic-go/quic-go v0.60.0 // indirect
+	github.com/wlynxg/anet v0.0.5 // indirect
 	golang.org/x/net v0.56.0 // indirect
 	golang.org/x/sys v0.46.0 // indirect
 	golang.org/x/text v0.38.0 // indirect

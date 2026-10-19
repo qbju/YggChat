@@ -31,10 +31,49 @@ public class YggService extends Service {
         running = true;
         startNode();
         startWatcher();
+        startLanWatch();
         return START_STICKY;
     }
 
-    private static Thread watcher;
+    private static Thread watcher, lanWatch;
+    private android.net.wifi.WifiManager.MulticastLock mlock;
+
+    // LAN chat needs Wi-Fi multicast, which Android filters unless a
+    // MulticastLock is held: hold it only while LAN chat is switched on.
+    private synchronized void startLanWatch() {
+        if (lanWatch != null && lanWatch.isAlive()) return;
+        lanWatch = new Thread(new Runnable() { public void run() {
+            while (running) {
+                boolean on = false;
+                try {
+                    HttpURLConnection c = (HttpURLConnection) new URL("http://127.0.0.1:7780/api/lan").openConnection();
+                    c.setConnectTimeout(3000); c.setReadTimeout(5000);
+                    BufferedReader r = new BufferedReader(new InputStreamReader(c.getInputStream(), "UTF-8"));
+                    StringBuilder sb = new StringBuilder(); String line;
+                    while ((line = r.readLine()) != null) sb.append(line);
+                    c.disconnect();
+                    on = new JSONObject(sb.toString()).optBoolean("on");
+                } catch (Exception e) { on = mlock != null && mlock.isHeld(); }
+                setMulticast(on);
+                try { Thread.sleep(5000); } catch (InterruptedException e) { return; }
+            }
+            setMulticast(false);
+        }});
+        lanWatch.setDaemon(true);
+        lanWatch.start();
+    }
+
+    private synchronized void setMulticast(boolean on) {
+        try {
+            if (mlock == null) {
+                android.net.wifi.WifiManager wm = (android.net.wifi.WifiManager) getApplicationContext().getSystemService(WIFI_SERVICE);
+                mlock = wm.createMulticastLock("yggchat-lan");
+                mlock.setReferenceCounted(false);
+            }
+            if (on && !mlock.isHeld()) mlock.acquire();
+            if (!on && mlock.isHeld()) mlock.release();
+        } catch (Exception e) { }
+    }
     private int notifId = 100;
 
     // Follows the node's event stream and posts a notification for each incoming
@@ -114,6 +153,7 @@ public class YggService extends Service {
 
     @Override public void onDestroy() {
         running = false;
+        setMulticast(false);
         if (proc != null) proc.destroy();
         proc = null;
         super.onDestroy();

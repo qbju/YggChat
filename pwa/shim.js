@@ -133,8 +133,28 @@
     return true;
   }
 
+  // finger (opt-in): answer {t:"fq"} with nick + .plan; collect {t:"fr"} replies.
+  let finger = { on: false, plan: '' };
+  idbGet('finger').then(v => { if (v) finger = { on: !!v.on, plan: String(v.plan || '') }; }).catch(() => {});
+  const fingerWait = new Map();
+  const cleanPlan = (t, max) => { let x = String(t || '').replace(/\r\n/g, '\n').replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, ''); while (new TextEncoder().encode(x).length > max) x = x.slice(0, -1); return x; };
+  function fingerQuery(peer) {
+    return new Promise((res, rej) => {
+      let n = 0;
+      const iv = setInterval(() => { if (++n > 6) { clearInterval(iv); fingerWait.delete(peer); rej(new Error('応答がなかったよ（相手のfingerがオフか、いまつながっていない）')); return; } send(peer, { t: 'fq' }); }, 2000);
+      fingerWait.set(peer, w => { clearInterval(iv); fingerWait.delete(peer); res(w); });
+      send(peer, { t: 'fq' });
+    });
+  }
+
   function onPacket(src, json) {
     let w; try { w = JSON.parse(json) } catch { return }
+    if (w.t === 'fq' || w.t === 'fr') {
+      if (st.blocked && st.blocked[src]) return;
+      if (w.t === 'fr') { const f = fingerWait.get(src); if (f) f(w); return; }
+      if (finger.on) send(src, { t: 'fr', nick: locked ? 'anon' : (st.nick || 'anon'), text: cleanPlan(finger.plan, 700) });
+      return;
+    }
     if (w.t === 'fca') { const g = chunkAcks.get(w.id); if (g) g.add(w.i | 0); return; }
     if (w.t === 'ack') { const f = acks.get(w.id); if (f) { acks.delete(w.id); f(); } askPK(src); return; }
     if (locked || st.blocked[src]) return; // stay silent: the sender keeps it queued
@@ -450,6 +470,18 @@
         save();
         if (st.nostrOn && !was) { nostrFetch(); for (const m of st.messages.filter(x => x.out && x.status === 'queued' && !x.nostr)) nostrPark(m); }
         return ok(nostrState());
+      }
+      case 'lan':
+        return ok({ supported: false, on: false, nearby: [] });
+      case 'finger':
+        if (body) { finger = { on: !!body.On, plan: cleanPlan(body.Plan, 1500) }; await idbPut('finger', finger); }
+        return ok({ on: finger.on, plan: finger.plan, tcp: 'web', addr });
+      case 'finger/query': {
+        const a = String(body.Addr || '').trim().replace(/^\[|\]$/g, '');
+        if (!/^[0-9a-f:]+$/i.test(a) || !/^[23][0-9a-f]{2}:/i.test(a)) return bad('not a Yggdrasil address (200::/7)', 400);
+        if (body.User) return bad('ブラウザ版はTCPのfingerができないので、YggChat同士の問い合わせだけです', 400);
+        try { const w = await fingerQuery(a); return ok({ addr: a, via: 'yggchat', nick: cleanNick(w.nick), plan: cleanPlan(w.text, 700) }); }
+        catch (e) { return bad(e.message, 504); }
       }
       case 'peers/public':
         return ok({ peers: RECOMMENDED.map(u => ({ uri: u, label: LABELS[u] || u, region: '', continent: '', asia: false })) });

@@ -74,3 +74,14 @@ POST {"On":bool} → writes/removes <data>/vpn-mode and restarts (Android only; 
 In VPN mode the node runs core + ipv6rwc without netstack, listens for a TUN fd on abstract unix socket
 @yggchat-tun (SCM_RIGHTS, same uid only, replies 1 byte), pumps TUN<->core, and chats over the OS UDP stack.
 The Java VpnService (YggVpn) polls /api/vpn every 3 s, establishes addr/7 + route 200::/7, and re-sends the fd when tun=false.
+
+## /api/lan (v0.10, native with embedded node)
+- GET -> {supported, on, pass, err, ifaces:[name], nearby:[{addr, nick?, up, iface?, ms?, contact?}]}
+- POST {On: bool, Pass?: string} -> same. Starts/stops Yggdrasil multicast (all up+running+multicast, non-p2p interfaces; Beacon+Listen; optional password) live, no restart.
+- Wire (UDP 7777, only between direct link-local peers): {t:"nq"} -> {t:"nr", nick}. Event {type:"lan", data:{nearby}}.
+- PWA: GET returns {supported:false}.
+
+## /api/finger (v0.10)
+- GET -> {on, plan, tcp: "listening"|error|"web", addr}; POST {On, Plan(<=1500 bytes)} -> same. Stored in data/finger.json (outside the passcode envelope: it is public).
+- When on: TCP 79 on our Ygg address (netstack / OS; Android VPN mode maps 79<->7979 in the TUN pump), and UDP {t:"fq"} -> {t:"fr", nick, text(<=700 bytes)}.
+- POST /api/finger/query {Addr, User?} -> {addr, via:"yggchat"|"finger", nick?, plan?, raw?}; 504 when nobody answers. UDP fq and TCP finger race; User set = TCP only.

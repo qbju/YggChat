@@ -84,6 +84,7 @@ func (v *vpnState) toCore(f *os.File) {
 			v.mu.Lock()
 			v.in++
 			v.mu.Unlock()
+			portMap(buf[:n], 8, 40, fingerAltPort, fingerPort) // reply from our finger listener
 			if _, err := v.rwc.Write(buf[:n]); err != nil {
 				v.mu.Lock()
 				v.werr++
@@ -104,6 +105,7 @@ func (v *vpnState) fromCore() {
 			continue
 		}
 		if f := v.cur(); f != nil {
+			portMap(buf[:n], 24, 42, fingerPort, fingerAltPort) // finger to us -> OS port 7979
 			_, _ = f.Write(buf[:n])
 			v.mu.Lock()
 			v.out++
@@ -151,4 +153,29 @@ func (a *App) vpnHandlers(mux *http.ServeMux, dataDir string) {
 		}
 		json.NewEncoder(w).Encode(res)
 	})
+}
+
+// portMap rewrites a TCP port in an IPv6 packet (no extension headers) when it
+// equals from, fixing the checksum incrementally (RFC 1624). Android apps can't
+// bind port 79, so the finger listener sits on 7979 and the pump maps it.
+// addrOff selects which address must be ours (8 = src, 24 = dst); portOff is
+// the byte offset of the TCP port (40 = src, 42 = dst).
+func portMap(p []byte, addrOff, portOff int, from, to uint16) {
+	if len(p) < 60 || p[0]>>4 != 6 || p[6] != 6 {
+		return
+	}
+	if uint16(p[portOff])<<8|uint16(p[portOff+1]) != from {
+		return
+	}
+	if (p[addrOff] & 0xfe) != 0x02 {
+		return
+	}
+	p[portOff], p[portOff+1] = byte(to>>8), byte(to)
+	sum := uint32(^(uint16(p[56])<<8 | uint16(p[57])))
+	sum += uint32(^from) + uint32(to)
+	for sum>>16 != 0 {
+		sum = sum&0xffff + sum>>16
+	}
+	c := ^uint16(sum)
+	p[56], p[57] = byte(c>>8), byte(c)
 }

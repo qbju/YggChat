@@ -1,4 +1,4 @@
-YggChat v0.9 - NAT越え不要のP2Pチャット (Yggdrasil内蔵)
+YggChat v0.10 - NAT越え不要のP2Pチャット (Yggdrasil内蔵)
 
 ■ 使い方
 PWA(インストール不要): https://yggchat.surge.sh/
@@ -20,6 +20,21 @@ Linux:   ./yggchat-linux-amd64
   200::/7宛てだけをVPN(TUN)で受け持ち、ブラウザやSSHなど他のアプリもYggdrasilに接続できます。
   アドレス・鍵はYggChatのまま。通常のネット通信はVPNを通りません(allowBypass/IPv4は素通し)。
   TUNのfdは同じアプリ(同じUID)からだけ受け取ります。公式アプリのVPNとは同時に使えません。
+
+■ LANチャット (アプリ版のみ・既定オフ)
+  設定→LANチャットをオンにすると、Yggdrasilのマルチキャスト探索で同じWi-Fi・有線LAN・テザリング上の
+  ノードを見つけ、リンクローカルで直接ピアになります。インターネットや公開ピアがなくても同じLAN内で会話できます。
+  「近くのノード」に表示名(互いにLANで直接つながっている相手とだけ交換)とアドレスが出て、「話す」で開けます。
+  LANパスワードを設定すると、同じパスワードのノードとだけピアになります(Yggdrasil公式のmulticast Password)。
+  オンの間、同じLANの人にはあなたのアドレスと表示名が見えます。Androidでは有効中だけMulticastLockを取ります。
+  システムYggdrasilモードでは端末側Yggdrasilの設定に従います。PWAはLANを使えません。
+
+■ finger (.plan公開・既定オフ)
+  設定→fingerをオンにすると、Yggdrasil上の誰でも finger @[あなたのアドレス] (TCP 79番, RFC 1288)で
+  表示名と.planを見られます。オンライン状態・連絡先・鍵などは返しません。転送(user@host@host)は拒否します。
+  アプリ内の「fingerで調べる」や連絡先の「finger」ボタンで、他のYggChat(UDPの{t:"fq"})や
+  一般のfingerサーバー(TCP 79)を問い合わせられます。AndroidのVPNモードではOSが79番を開けないため、
+  TUNの中継で79番⇔7979番を付け替えます。PWAはTCPを使えないので、YggChat同士の問い合わせだけ対応です。
 
 ■ 端末チャット (CLI)
   ./yggchat-linux-amd64 -cli        (Termux: ./yggchat-android-arm64 -cli)

@@ -1037,6 +1037,7 @@ select { font:inherit; font-size:16px; color:var(--fg); background:var(--surface
     <div id="ci-qr-wrap" style="align-self:center; width:200px; padding:10px; background:#fff; border-radius:10px;"></div>
     <div style="display:flex; gap:8px; flex-wrap:wrap; justify-content:center;">
       <button id="ci-copy-addr">アドレスをコピー</button>
+      <button id="ci-finger">finger</button>
       <button id="ci-rename">名前を変更</button>
       <button id="ci-delete" style="color:var(--error);">会話を削除</button>
       <button id="ci-block" style="color:var(--error);">ブロック</button>
@@ -1095,6 +1096,35 @@ select { font:inherit; font-size:16px; color:var(--fg); background:var(--surface
         <div class="row-sub" id="sys-note">Yggdrasil公式アプリ（Android）や常駐のyggdrasilサービスが動いていれば、内蔵ノードの代わりにそれで通信します。アドレスは端末側Yggdrasilのものに変わり、相手からは別人として見えます。Nostr置き配は使えません。</div>
       </div>
     </div>
+    <div class="section" id="lan-sec">
+      <div class="section-title">LANチャット</div>
+      <div class="row-sub">同じWi-Fi・有線LAN・テザリングにいるYggdrasilノードを自動で見つけて直接つながります。インターネットが落ちていても、同じネットワーク内ならそのまま話せます。</div>
+      <div id="lan-box">
+        <div class="toggle">
+          <div class="toggle-label">LANで近くのノードを探す</div>
+          <div class="switch" id="lan-switch"><div class="switch-handle"></div></div>
+        </div>
+        <div class="row"><div class="row-main"><div class="row-title">LANパスワード</div><div class="row-sub" id="lan-pass-state">なし（同じLANの誰とでもつながる）</div></div><button id="lan-pass" class="row-action">変更</button></div>
+        <div class="row-sub" id="lan-ifaces"></div>
+        <div id="lan-nearby"></div>
+        <div class="row-sub">オンの間、同じLANの人にはあなたのYggdrasilアドレスと表示名が見えます。寮や学校のWi-Fiでは、パスワードを決めて仲間内だけにするのがおすすめ。</div>
+      </div>
+      <div class="row-sub" id="lan-unsupported" style="display:none;"></div>
+    </div>
+    <div class="section">
+      <div class="section-title">finger（.plan）</div>
+      <div class="row-sub">オンにすると、Yggdrasil上の誰でも <span style="font-family:ui-monospace,monospace;">finger @[あなたのアドレス]</span> で表示名と.planを見られます。オンラインかどうか・連絡先などは出しません。</div>
+      <div class="toggle">
+        <div class="toggle-label">fingerで公開する</div>
+        <div class="switch" id="finger-switch"><div class="switch-handle"></div></div>
+      </div>
+      <textarea id="finger-plan" rows="4" maxlength="1500" placeholder=".plan（いまやってること、好きなもの、Gopher/GeminiのURLなど）" style="width:100%;box-sizing:border-box;font-family:ui-monospace,monospace;"></textarea>
+      <div class="row-btns">
+        <button id="finger-save">.planを保存</button>
+        <button id="finger-lookup">fingerで調べる</button>
+      </div>
+      <div class="row-sub" id="finger-note"></div>
+    </div>
     <div class="section">
       <div class="section-title">通知</div>
       <div class="toggle">
@@ -1152,7 +1182,7 @@ select { font:inherit; font-size:16px; color:var(--fg); background:var(--surface
       <a class="dl-btn" href="https://yggchat.surge.sh/dl/yggchat-windows-amd64.exe" download>🪟 Windows (exe)</a>
       <a class="dl-btn" href="https://yggchat.surge.sh/dl/yggchat-linux-amd64" download>🐧 Linux (amd64)</a>
       <a class="dl-btn" href="https://yggchat.surge.sh/dl/yggchat-android-arm64" download>⌨️ Termux (arm64)</a>
-      <div class="row-sub" id="dl-ver">最新: v0.8 ・ SHA256SUMS で検証できます</div>
+      <div class="row-sub" id="dl-ver">最新: v0.10 ・ SHA256SUMS で検証できます</div>
     </div>
     <div class="section">
       <div class="section-title">About</div>
@@ -1831,6 +1861,7 @@ function openSettings(){
   if(state.system) $('platform-info').textContent = 'ネイティブ版（端末のYggdrasilを使用中）: 通信は端末のYggdrasil（VPN/TUN）経由です。' + (state.addr ? '' : ' いまは見つかりません。Yggdrasilアプリを起動してください。');
   $('settings-screen').classList.add('active');
   renderShareQR();
+  loadLan(); loadFinger();
 }
 
 function closeSettings(){
@@ -2345,6 +2376,8 @@ function connectEvents(){
         }
       }else if(d.type === 'locked'){
         showLock();
+      }else if(d.type === 'lan'){
+        if(state.lan){ state.lan.nearby = (d.data && d.data.nearby) || []; renderLan(); }
       }else if(d.type === 'peers'){
         state.peers = (d.data && d.data.up) != null ? d.data.up : state.peers;
         updateConn();
@@ -2526,6 +2559,110 @@ $('vpn-switch').addEventListener('click', async () => {
     waitRestart(s2 => !s2.vpn);
   }
 });
+// ---------- LAN chat ----------
+async function loadLan(){
+  try{ state.lan = await api('/api/lan'); }catch(e){ state.lan = {supported:false, err: state.platform === 'web' ? 'web' : e.message}; }
+  renderLan();
+}
+function renderLan(){
+  const l = state.lan || {};
+  const ok = !!l.supported;
+  $('lan-box').style.display = ok ? '' : 'none';
+  $('lan-unsupported').style.display = ok ? 'none' : '';
+  if(!ok){
+    $('lan-unsupported').textContent = state.platform === 'web'
+      ? 'ブラウザ版（PWA）はLANを直接さわれないので使えません。アプリ版（Android / Windows / Linux）で使えます。'
+      : (state.system ? '端末のYggdrasilを使用中です。LAN探索は端末側Yggdrasilの設定（マルチキャスト）で行われます。' : 'いまは使えません');
+    return;
+  }
+  setSwitch('lan-switch', !!l.on);
+  $('lan-pass-state').textContent = l.pass ? '設定済み（同じパスワードの人とだけつながる）' : 'なし（同じLANの誰とでもつながる）';
+  $('lan-ifaces').textContent = l.on ? (l.err ? 'エラー: ' + l.err : ((l.ifaces && l.ifaces.length) ? '探索中: ' + l.ifaces.join(', ') : 'LANが見つかりません（Wi-Fiにつながっていますか？）')) : '';
+  const box = $('lan-nearby'); box.innerHTML = '';
+  if(!l.on) return;
+  const list = l.nearby || [];
+  if(!list.length){ const d = document.createElement('div'); d.className = 'row-sub'; d.textContent = '近くのノード: まだ見つかっていません'; box.appendChild(d); return; }
+  list.forEach(n => {
+    const row = document.createElement('div'); row.className = 'row';
+    const main = document.createElement('div'); main.className = 'row-main';
+    const t = document.createElement('div'); t.className = 'row-title'; t.textContent = (n.up ? '📶 ' : '… ') + (n.nick || addrShort(n.addr));
+    const sub = document.createElement('div'); sub.className = 'row-sub'; sub.style.fontFamily = 'ui-monospace,monospace'; sub.style.fontSize = '11px'; sub.style.wordBreak = 'break-all';
+    sub.textContent = n.addr + (n.iface ? ' ・ ' + n.iface : '') + (n.ms ? ' ・ ' + n.ms + 'ms' : '');
+    main.append(t, sub);
+    const b = document.createElement('button'); b.className = 'row-action'; b.textContent = '話す';
+    b.onclick = async () => {
+      try{
+        if(!state.contacts[n.addr]){ const c = await api('/api/contact', {Addr: n.addr, Nick: n.nick || ''}); if(c && c.addr) state.contacts[c.addr] = c; }
+        closeSettings(); renderList(); openChat(n.addr);
+      }catch(e){ toast(e.message); }
+    };
+    row.append(main, b); box.appendChild(row);
+  });
+}
+async function lanSet(body){
+  try{ state.lan = await api('/api/lan', body); renderLan(); return true; }catch(e){ toast(e.message); return false; }
+}
+$('lan-switch').addEventListener('click', async () => {
+  const on = !(state.lan && state.lan.on);
+  if(on && !(await uiDialog('LANチャットをオンにしますか？\n\n同じネットワークにいるYggdrasilノードと直接つながります。そのLANの人にはあなたのアドレスと表示名が見えます。', {okText:'オンにする'}))) return;
+  if(await lanSet({On: on})) toast(on ? 'LANで探しています…' : 'LANチャットをオフにしました');
+});
+$('lan-pass').addEventListener('click', async () => {
+  const v = await uiPrompt('LANパスワード（空にすると誰とでもつながる）\n同じパスワードの人とだけピアになります', ''); if(v === null) return;
+  if(await lanSet({On: !!(state.lan && state.lan.on), Pass: v})) toast(v ? 'パスワードを設定しました' : 'パスワードを外しました');
+});
+setInterval(() => { if($('settings-screen').classList.contains('active') && state.lan && state.lan.on) loadLan(); }, 5000);
+
+// ---------- finger ----------
+async function loadFinger(){
+  try{ state.finger = await api('/api/finger'); }catch(e){ state.finger = null; }
+  const f = state.finger || {};
+  setSwitch('finger-switch', !!f.on);
+  if(document.activeElement !== $('finger-plan')) $('finger-plan').value = f.plan || '';
+  let note = '';
+  if(f.on){
+    note = state.platform === 'web' ? 'PWA版はTCPの79番を開けないので、YggChat同士の「finger」ボタンからだけ見えます。'
+      : (f.tcp === 'listening' ? '公開中: finger @[' + (f.addr || state.addr) + ']' : 'アプリ内からは見えますが、TCP 79番は開けませんでした（' + (f.tcp || '不明') + '）');
+  }
+  $('finger-note').textContent = note;
+}
+async function fingerSet(on){
+  try{ state.finger = await api('/api/finger', {On: on, Plan: $('finger-plan').value}); await loadFinger(); return true; }catch(e){ toast(e.message); return false; }
+}
+$('finger-switch').addEventListener('click', async () => {
+  const on = !(state.finger && state.finger.on);
+  if(on && !(await uiDialog('fingerで公開しますか？\n\nYggdrasil上の誰でも、あなたの表示名と.planを見られるようになります。', {okText:'公開する'}))) return;
+  if(await fingerSet(on)) toast(on ? 'fingerで公開しました' : 'finger公開をやめました');
+});
+$('finger-save').addEventListener('click', async () => { if(await fingerSet(!!(state.finger && state.finger.on))) toast('.planを保存しました'); });
+$('finger-lookup').addEventListener('click', async () => {
+  const v = await uiPrompt('調べるアドレス（user@[200:…] も可）', ''); if(!v) return;
+  let user = '', addr = v.trim();
+  const m = addr.match(/^([^@\s]*)@\[?([0-9a-fA-F:]+)\]?$/);
+  if(m){ user = m[1]; addr = m[2]; }
+  addr = addr.replace(/^\[|\]$/g, '');
+  if(!isYggAddr(addr)){ toast('Yggdrasilアドレス（200::/7）を入れてね'); return; }
+  fingerShow(addr, user);
+});
+$('ci-finger').addEventListener('click', () => { if(curAddr) fingerShow(curAddr, ''); });
+async function fingerShow(addr, user){
+  const bg = document.createElement('div'); bg.className = 'modal-bg';
+  const m = document.createElement('div'); m.className = 'modal';
+  const t = document.createElement('div'); t.className = 'mt'; t.textContent = 'finger ' + (user || '') + '@[' + addr + ']';
+  const pre = document.createElement('pre');
+  pre.style.cssText = 'white-space:pre-wrap;word-break:break-word;font-family:ui-monospace,monospace;font-size:12px;max-height:50vh;overflow:auto;margin:8px 0;';
+  pre.textContent = '問い合わせ中…';
+  const b = document.createElement('div'); b.className = 'mb';
+  const ok = document.createElement('button'); ok.className = 'ok'; ok.textContent = '閉じる';
+  b.appendChild(ok); m.append(t, pre, b); bg.appendChild(m); document.body.appendChild(bg);
+  const done = () => { bg.remove(); modalClose = null; };
+  modalClose = done; ok.onclick = done; bg.onclick = e => { if(e.target === bg) done(); };
+  try{
+    const r = await api('/api/finger/query', {Addr: addr, User: user});
+    if(r.via === 'yggchat') pre.textContent = 'Login: ' + (r.nick || 'anon') + '\t(YggChat)\nAddress: ' + r.addr + '\n' + (r.plan ? 'Plan:\n' + r.plan : 'No Plan.');
+    else pre.textContent = r.raw || '(空)';
+  }catch(e){ pre.textContent = e.message; }
+}
 $('reset-id').addEventListener('click', async () => {
   if(!(await uiDialog('新しいIDを作りますか？今のアドレス・連絡先・履歴はすべて消え、元に戻せません。', {okText:'作り直す', danger:true}))) return;
   const old = state.addr;

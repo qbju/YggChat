@@ -205,6 +205,8 @@ type App struct {
 	profAt   map[string]time.Time
 	cfg      *config.NodeConfig
 	cfgPath  string
+	fing     *fingerState
+	lan      *lanState
 }
 
 func (a *App) broadcast(kind string, v any) {
@@ -304,8 +306,19 @@ func (a *App) serveChat() {
 		a.store.mu.Lock()
 		locked, blocked := a.store.locked, a.store.Blocked[from]
 		a.store.mu.Unlock()
+		if blocked {
+			continue
+		}
+		switch w.T {
+		case "fq", "fr":
+			a.onFingerUDP(from, w)
+			continue
+		case "nq", "nr":
+			a.onLANUDP(from, w)
+			continue
+		}
 		// While locked we can't store anything: stay silent so the sender keeps it queued.
-		if locked || blocked {
+		if locked {
 			continue
 		}
 		if w.PK != "" {
@@ -1097,6 +1110,8 @@ func main() {
 			a.startVPN()
 		}
 	}
+	a.fingerInit(*dataDir)
+	a.lanInit(*dataDir, logger)
 	go a.serveChat()
 	go a.sweep()
 	go a.nostrLoop()
@@ -1129,6 +1144,8 @@ func main() {
 	a.nostrHandlers(mux)
 	a.systemHandlers(mux, *dataDir)
 	a.vpnHandlers(mux, *dataDir)
+	a.fingerHandlers(mux)
+	a.lanHandlers(mux)
 	if !*cliMode {
 		fmt.Printf("YggChat\n  your address: %s\n  open UI:      http://%s/\n", a.addr, *uiAddr)
 	}
