@@ -85,3 +85,10 @@ The Java VpnService (YggVpn) polls /api/vpn every 3 s, establishes addr/7 + rout
 - GET -> {on, plan, tcp: "listening"|error|"web", addr}; POST {On, Plan(<=1500 bytes)} -> same. Stored in data/finger.json (outside the passcode envelope: it is public).
 - When on: TCP 79 on our Ygg address (netstack / OS; Android VPN mode maps 79<->7979 in the TUN pump), and UDP {t:"fq"} -> {t:"fr", nick, text(<=700 bytes)}.
 - POST /api/finger/query {Addr, User?} -> {addr, via:"yggchat"|"finger", nick?, plan?, raw?}; 504 when nobody answers. UDP fq and TCP finger race; User set = TCP only.
+
+## v0.11
+- POST /api/message/edit {Peer, ID, Text} -> Message (own text messages). Event {type:"msg_upd", data: Message}. Message.edited.
+- POST /api/message/delete {Peer, ID, Everyone} -> {}. Event msg_del. Everyone only for own messages.
+- Wire: {t:"edit", id:<ctl id>, ref:<msg id>, text} / {t:"del", id, ref} -> {t:"ack", id}. Receiver applies only if the message came from the same address. Pending ctl kept in store (Ctl) and flushed with the offline queue.
+- GET/POST /api/vpn/in {Mode: closed|list|all, Ports:[int]} -> {mode, ports, vpn, dropped}. Android VPN mode inbound filter (data/vpn-in.json); chat UDP 7777, finger (when on) and replies to outbound flows always pass.
+- GET /twemoji/<code>.svg — bundled Twemoji (jdecked v17.0.3, CC-BY 4.0).

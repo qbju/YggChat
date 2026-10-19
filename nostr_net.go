@@ -7,10 +7,10 @@ package main
 import (
 	"context"
 	"crypto/ed25519"
-	"net/http"
-	"net/url"
 	"encoding/hex"
 	"encoding/json"
+	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"

@@ -60,11 +60,12 @@ type Message struct {
 	Out  bool   `json:"out"`
 	// Status of outgoing messages: sending | sent | queued (auto-resent when the peer is reachable) | stored (legacy v0.5/v0.6 mailbox; treated as queued) | failed.
 	Status string `json:"status,omitempty"`
-	TTL    int    `json:"ttl,omitempty"` // disappearing timer (seconds)
-	Exp    int64  `json:"exp,omitempty"` // unix time when this message is deleted
-	Sys    string `json:"sys,omitempty"` // system line, e.g. "ttl:300"
-	Img    string `json:"img,omitempty"` // data:image/...;base64,... (compressed by the UI)
+	TTL    int    `json:"ttl,omitempty"`   // disappearing timer (seconds)
+	Exp    int64  `json:"exp,omitempty"`   // unix time when this message is deleted
+	Sys    string `json:"sys,omitempty"`   // system line, e.g. "ttl:300"
+	Img    string `json:"img,omitempty"`   // data:image/...;base64,... (compressed by the UI)
 	Nostr  bool   `json:"nostr,omitempty"` // also parked on Nostr relays (opt-in offline delivery)
+	Edited bool   `json:"edited,omitempty"`
 }
 
 type Contact struct {
@@ -96,6 +97,8 @@ type Store struct {
 	// Optional, deprecated: park undeliverable messages on public Nostr relays.
 	NostrOn     bool     `json:"nostr_on,omitempty"`
 	NostrRelays []string `json:"nostr_relays,omitempty"`
+	// Edits / unsends of our messages not yet acked by the peer.
+	Ctl []ctlItem `json:"ctl,omitempty"`
 }
 
 func (s *Store) save() {
@@ -260,8 +263,9 @@ type wire struct {
 	Size int    `json:"size,omitempty"`
 	N    int    `json:"n,omitempty"`
 	Sha  string `json:"sha,omitempty"`
-	I    int    `json:"i,omitempty"` // chunk index (fc/fca)
-	D    string `json:"d,omitempty"` // chunk data, base64
+	I    int    `json:"i,omitempty"`   // chunk index (fc/fca)
+	D    string `json:"d,omitempty"`   // chunk data, base64
+	Ref  string `json:"ref,omitempty"` // edit/del: id of the message it changes
 }
 
 func (a *App) serveChat() {
@@ -340,6 +344,10 @@ func (a *App) serveChat() {
 			a.onFileChunk(from, w)
 		case "prof", "ttl":
 			a.handleCtl(from, w)
+		case "edit", "del":
+			if a.onCtl(from, w) {
+				a.sendWire(from, wire{T: "ack", ID: w.ID})
+			}
 		case "msg":
 			if a.handleMsg(from, w) {
 				a.sendWire(from, wire{T: "ack", ID: w.ID})
@@ -581,6 +589,7 @@ func (a *App) flush(peer string) {
 			return
 		}
 	}
+	a.flushCtl(peer)
 }
 
 func (a *App) hello(peer string) {
@@ -784,6 +793,7 @@ func publicPeers() ([]map[string]any, error) {
 func (a *App) httpHandlers(mux *http.ServeMux) {
 	sub, _ := fs.Sub(webFS, "web")
 	mux.Handle("/", http.FileServer(http.FS(sub)))
+	mux.HandleFunc("/twemoji/", twemojiHandler)
 	mux.HandleFunc("/api/state", func(w http.ResponseWriter, r *http.Request) {
 		a.store.mu.Lock()
 		defer a.store.mu.Unlock()
@@ -1119,6 +1129,7 @@ func main() {
 	} else {
 		a.addr = c.Address().String()
 		if vpn {
+			a.vpnFW(*dataDir)
 			a.startVPN()
 		}
 	}
@@ -1147,6 +1158,18 @@ func main() {
 					a.hello(m.Peer)
 				}
 			}
+			a.store.mu.Lock()
+			var cp []string
+			for _, c := range a.store.Ctl {
+				cp = append(cp, c.Peer)
+			}
+			a.store.mu.Unlock()
+			for _, p := range cp {
+				if !seen[p] {
+					seen[p] = true
+					a.hello(p)
+				}
+			}
 		}
 	}()
 
@@ -1157,6 +1180,8 @@ func main() {
 	a.systemHandlers(mux, *dataDir)
 	a.vpnHandlers(mux, *dataDir)
 	a.fingerHandlers(mux)
+	a.msgEditHandlers(mux)
+	a.vpnFWHandlers(mux, *dataDir)
 	a.lanHandlers(mux)
 	if !*cliMode {
 		fmt.Printf("YggChat\n  your address: %s\n  open UI:      http://%s/\n", a.addr, *uiAddr)

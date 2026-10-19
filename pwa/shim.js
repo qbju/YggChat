@@ -28,7 +28,7 @@
   const idbPut = (k, v) => idb.then(db => new Promise((res, rej) => { const t = db.transaction('kv', 'readwrite'); t.objectStore('kv').put(v, k); t.oncomplete = res; t.onerror = () => rej(t.error); }));
   let raw = {};
   const outer = { key: '', peers: null, enc: null };
-  const blank = () => ({ nick: 'anon', bio: '', avatar: '', contacts: {}, messages: [], blocked: {}, nostrOn: false, nostrRelays: [] });
+  const blank = () => ({ nick: 'anon', bio: '', avatar: '', contacts: {}, messages: [], blocked: {}, nostrOn: false, nostrRelays: [], ctl: [] });
   let st = blank();
   let locked = false;
   let aesKey = null; // CryptoKey while unlocked with a passcode
@@ -43,7 +43,7 @@
     if (outer.peers && outer.peers.some(p => /workers\.dev|instabox\.tech/.test(p))) outer.peers = null; // old Cloudflare relay / removed entry peer -> defaults
     if (!outer.peers) outer.peers = RECOMMENDED.slice();
     locked = !!outer.enc;
-    if (!locked) { Object.assign(st, { nick: raw.nick || 'anon', bio: raw.bio || '', avatar: raw.avatar || '', contacts: raw.contacts || {}, messages: raw.messages || [], blocked: raw.blocked || {}, nostrOn: !!raw.nostrOn, nostrRelays: raw.nostrRelays || [] }); migrate(); }
+    if (!locked) { Object.assign(st, { nick: raw.nick || 'anon', bio: raw.bio || '', avatar: raw.avatar || '', contacts: raw.contacts || {}, messages: raw.messages || [], blocked: raw.blocked || {}, nostrOn: !!raw.nostrOn, nostrRelays: raw.nostrRelays || [], ctl: raw.ctl || [] }); migrate(); }
   }
 
   const b64 = u8 => btoa(String.fromCharCode(...new Uint8Array(u8)));
@@ -117,7 +117,41 @@
   // ---- offline queue ----
   const inflight = new Set();
   const queuedFor = p => st.messages.filter(m => m.out && m.peer === p && (m.status === 'queued' || m.status === 'stored'));
-  async function flush(p) { for (const m of queuedFor(p)) { if (!(await deliver(m, 4))) break; } }
+  async function flush(p) { for (const m of queuedFor(p)) { if (!(await deliver(m, 4))) return; } await flushCtl(p); }
+
+  // ---- edit / unsend (only our own messages; receiver checks the sender address) ----
+  const ctlID = () => 'c' + Date.now().toString(16) + Math.random().toString(16).slice(2, 6);
+  const isSent = m => m.status === 'sent' || m.status === 'sending' || !!m.nostr;
+  function queueCtl(peer, w) {
+    st.ctl = (st.ctl || []).filter(c => !(c.peer === peer && c.w.ref === w.ref));
+    st.ctl.push({ peer, w }); save(); flushCtl(peer);
+  }
+  const ctlBusy = new Set();
+  async function flushCtl(p) {
+    if (ctlBusy.has(p)) return; ctlBusy.add(p);
+    try {
+      for (const c of (st.ctl || []).filter(x => x.peer === p)) {
+        const acked = new Promise(r => acks.set(c.w.id, r));
+        let ok = false;
+        for (let i = 0; i < 6 && !ok; i++) { send(p, c.w); ok = await Promise.race([acked.then(() => true), new Promise(r => setTimeout(() => r(false), 2500))]); }
+        acks.delete(c.w.id);
+        if (!ok) return;
+        st.ctl = st.ctl.filter(x => !(x.peer === p && x.w.id === c.w.id)); save();
+      }
+    } finally { ctlBusy.delete(p); }
+  }
+  function onCtl(src, w) {
+    const okID = x => /^[0-9A-Za-z_-]{1,40}$/.test(String(x || ''));
+    if (!okID(w.id) || !okID(w.ref)) return false;
+    const i = st.messages.findIndex(m => m.peer === src && m.id === w.ref && !m.out && m.from === src);
+    if (i >= 0) {
+      if (w.t === 'edit') {
+        const t = String(w.text || '');
+        if (t.trim() && t.length <= 8000) { st.messages[i].text = t; st.messages[i].edited = true; save(); emit('msg_upd', st.messages[i]); }
+      } else { st.messages.splice(i, 1); save(); emit('msg_del', { peer: src, id: w.ref }); }
+    }
+    return true;
+  }
   const hello = p => send(p, { t: 'hi', pk: myPK() });
   function helloAll() { if (!locked) for (const p of Object.keys(st.contacts)) hello(p); }
 
@@ -170,6 +204,7 @@
     if (w.t === 'ttl') { setTTL(src, w.ttl | 0, false); return; }
     if (w.t === 'fh') { onFileHeader(src, w); return; }
     if (w.t === 'fc') { onFileChunk(src, w); return; }
+    if ((w.t === 'edit' || w.t === 'del') && onCtl(src, w)) { send(src, { t: 'ack', id: w.id }); return; }
     if (w.t === 'msg' && handleMsg(src, w)) { send(src, { t: 'ack', id: w.id }); askPK(src); if (queuedFor(src).length) flush(src); }
   }
 
@@ -340,7 +375,7 @@
       if (n !== last) { if (n > 0 && last <= 0) setTimeout(helloAll, 1500); last = n; emit('peers', { up: n }); }
     }, 3000);
     // Probe peers we still owe messages to, plus everyone now and then so they can flush to us.
-    setInterval(() => { if (yggPeers() > 0 && !locked) for (const p of new Set(st.messages.filter(m => m.out && (m.status === 'queued' || m.status === 'stored')).map(m => m.peer))) hello(p); }, 20000);
+    setInterval(() => { if (yggPeers() > 0 && !locked) for (const p of new Set([...st.messages.filter(m => m.out && (m.status === 'queued' || m.status === 'stored')).map(m => m.peer), ...(st.ctl || []).map(c => c.peer)])) hello(p); }, 20000);
     setInterval(() => { if (yggPeers() > 0) helloAll(); }, 120000);
     addEventListener('online', () => setTimeout(() => { helloAll(); nostrFetch(); }, 3000));
     document.addEventListener('visibilitychange', () => { if (!document.hidden) { if (yggPeers() > 0) helloAll(); nostrFetch(); } });
@@ -472,6 +507,28 @@
         save();
         if (st.nostrOn && !was) { nostrFetch(); for (const m of st.messages.filter(x => x.out && x.status === 'queued' && !x.nostr)) nostrPark(m); }
         return ok(nostrState());
+      }
+      case 'message/edit': {
+        const m = st.messages.find(x => x.peer === body.Peer && x.id === body.ID && x.out && !x.sys);
+        const t = String(body.Text || '');
+        if (!m || m.img) return bad('編集できるのは自分の文章メッセージだけです', 400);
+        if (!t.trim() || t.length > 8000) return bad('bad request', 400);
+        m.text = t; const remote = isSent(m); if (remote) m.edited = true; save();
+        if (remote) queueCtl(m.peer, { t: 'edit', id: ctlID(), ref: m.id, text: t });
+        emit('msg_upd', m);
+        return ok(m);
+      }
+      case 'message/delete': {
+        const i = st.messages.findIndex(x => x.peer === body.Peer && x.id === body.ID);
+        if (i < 0) return bad('not found', 404);
+        const m = st.messages[i];
+        if (body.Everyone && !m.out) return bad('相手のメッセージは自分の端末からだけ削除できます', 400);
+        st.messages.splice(i, 1);
+        st.ctl = (st.ctl || []).filter(c => !(c.peer === m.peer && c.w.ref === m.id));
+        save();
+        if (body.Everyone && isSent(m)) queueCtl(m.peer, { t: 'del', id: ctlID(), ref: m.id });
+        emit('msg_del', { peer: m.peer, id: m.id });
+        return ok({});
       }
       case 'lan':
         return ok({ supported: false, on: false, nearby: [] });

@@ -21,7 +21,6 @@ import (
 	"golang.org/x/crypto/nacl/box"
 )
 
-
 var p25519, _ = new(big.Int).SetString("7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffed", 16)
 
 // edPubToX converts an Ed25519 public key to its X25519 (Montgomery u) form:
@@ -117,7 +116,6 @@ func Open(b64 string, priv ed25519.PrivateKey) (from string, pk ed25519.PublicKe
 	}
 	return net.IP(address.AddrForKey(pkb)[:]).String(), pkb, in.W, nil
 }
-
 
 // AddrOK reports whether pk is the key behind Yggdrasil address addr.
 func AddrOK(addr string, pk []byte) bool {

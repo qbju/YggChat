@@ -35,16 +35,18 @@ func vpnModeOn(dataDir string) bool {
 }
 
 type vpnState struct {
-	mu  sync.Mutex
-	rwc *ipv6rwc.ReadWriteCloser
-	tun *os.File
-	at  time.Time
+	mu            sync.Mutex
+	rwc           *ipv6rwc.ReadWriteCloser
+	tun           *os.File
+	at            time.Time
 	in, out, werr int64 // packets tun→core, core→tun, write errors
 	lastErr       string
+	drop          int64 // inbound packets blocked by the firewall
+	fw            *vpnFW
 }
 
 func (a *App) startVPN() {
-	a.vpnS = &vpnState{rwc: ipv6rwc.NewReadWriteCloser(a.core)}
+	a.vpnS = &vpnState{rwc: ipv6rwc.NewReadWriteCloser(a.core), fw: fwInst}
 	a.vpnS.rwc.SetMTU(vpnMTU)
 	go a.vpnS.fromCore()
 	ln, err := net.ListenUnix("unix", &net.UnixAddr{Name: "@yggchat-tun", Net: "unix"})
@@ -88,6 +90,9 @@ func (v *vpnState) toCore(f *os.File) {
 			v.in++
 			v.mu.Unlock()
 			portMap(buf[:n], 8, 40, fingerAltPort, fingerPort) // reply from our finger listener
+			if v.fw != nil {
+				v.fw.outbound(buf[:n])
+			}
 			if _, err := v.rwc.Write(buf[:n]); err != nil {
 				v.mu.Lock()
 				v.werr++
@@ -109,6 +114,12 @@ func (v *vpnState) fromCore() {
 		}
 		if f := v.cur(); f != nil {
 			portMap(buf[:n], 24, 42, fingerPort, fingerAltPort) // finger to us -> OS port 7979
+			if v.fw != nil && !v.fw.inbound(buf[:n]) {
+				v.mu.Lock()
+				v.drop++
+				v.mu.Unlock()
+				continue
+			}
 			_, _ = f.Write(buf[:n])
 			v.mu.Lock()
 			v.out++

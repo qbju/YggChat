@@ -498,11 +498,20 @@ body.screen-open .fab { display:none; }
   flex:1;
   overflow-y:auto;
   overflow-x:hidden;
-  padding:10px 12px calc(70px + env(safe-area-inset-bottom));
+  padding:10px 12px 0;
   display:flex;
   flex-direction:column;
   gap:6px;
-  scroll-behavior:smooth;
+  min-height:0;
+  overscroll-behavior:contain;
+  -webkit-overflow-scrolling:touch;
+}
+/* Room for the fixed composer. A real flex item instead of padding-bottom,
+   which WebKit and older Android WebViews ignore on flex scroll containers
+   (the last message then hid under the composer and could not be scrolled to). */
+#messages::after {
+  content:'';
+  flex:0 0 var(--composer-h, calc(70px + env(safe-area-inset-bottom)));
 }
 
 .day-sep {
@@ -921,6 +930,8 @@ select { font:inherit; font-size:16px; color:var(--fg); background:var(--surface
 .img-viewer.active { display:flex; }
 .img-viewer img { max-width:100%; max-height:calc(100% - 64px); object-fit:contain; -webkit-touch-callout:default; }
 .iv-bar { display:flex; gap:10px; margin-top:12px; }
+img.emoji { height:1.2em; width:1.2em; margin:0 .05em 0 .1em; vertical-align:-0.2em; display:inline-block; }
+.avatar img.emoji { height:1.1em; width:1.1em; margin:0; vertical-align:-0.15em; }
 </style>
 </head>
 <body class="two-pane">
@@ -1091,6 +1102,7 @@ select { font:inherit; font-size:16px; color:var(--fg); background:var(--surface
             <div class="toggle-label">YggChatを端末のYggdrasilにする（VPN）</div>
             <div class="switch" id="vpn-switch"><div class="switch-handle"></div></div>
           </div>
+          <div class="row"><div class="row-main"><div class="row-title">外からの接続</div><div class="row-sub" id="vpn-in-state">すべて閉じる</div></div><button id="vpn-in-btn" class="row-action">変更</button></div>
           <div class="row-sub">公式アプリの代わりになります。ブラウザ・SSHなど他のアプリからも200::/7（Yggdrasil）につながり、アドレスはYggChatのまま。通常のネット通信はVPNを通りません。公式アプリのVPNとは同時に使えません。</div>
         </div>
         <div class="row-sub" id="sys-note">Yggdrasil公式アプリ（Android）や常駐のyggdrasilサービスが動いていれば、内蔵ノードの代わりにそれで通信します。アドレスは端末側Yggdrasilのものに変わり、相手からは別人として見えます。Nostr置き配は使えません。</div>
@@ -1182,7 +1194,7 @@ select { font:inherit; font-size:16px; color:var(--fg); background:var(--surface
       <a class="dl-btn" href="https://yggchat.surge.sh/dl/yggchat-windows-amd64.exe" download>🪟 Windows (exe)</a>
       <a class="dl-btn" href="https://yggchat.surge.sh/dl/yggchat-linux-amd64" download>🐧 Linux (amd64)</a>
       <a class="dl-btn" href="https://yggchat.surge.sh/dl/yggchat-android-arm64" download>⌨️ Termux (arm64)</a>
-      <div class="row-sub" id="dl-ver">最新: v0.10.2 ・ SHA256SUMS で検証できます</div>
+      <div class="row-sub" id="dl-ver">最新: v0.11 ・ SHA256SUMS で検証できます</div>
     </div>
     <div class="section">
       <div class="section-title">About</div>
@@ -1194,7 +1206,7 @@ select { font:inherit; font-size:16px; color:var(--fg); background:var(--surface
         </div>
       </div>
       <div class="row-sub">YggChatはフリーソフトウェアです（GPL-3.0-or-later）。© 2026 h6e and YggChat contributors</div>
-      <div class="row-sub">Yggdrasil Network（yggdrasil-go・yggstack・ironwood）、gVisor、Go、quic-go、coder/websocket、qrcode-generator（Kazuhiko Arase）ほか多くのオープンソースに支えられています。「QRコード」はデンソーウェーブの登録商標です。</div>
+      <div class="row-sub">Yggdrasil Network（yggdrasil-go・yggstack・ironwood）、gVisor、Go、quic-go、coder/websocket、qrcode-generator（Kazuhiko Arase）、Twemoji（© Twitter, Inc. and other contributors, CC-BY 4.0）ほか多くのオープンソースに支えられています。「QRコード」はデンソーウェーブの登録商標です。</div>
       <div class="row-btns">
         <button id="about-credits">クレジットと第三者ライセンス</button>
         <button id="about-license">ライセンス（GPL-3.0）</button>
@@ -1247,6 +1259,7 @@ select { font:inherit; font-size:16px; color:var(--fg); background:var(--surface
 
 <div id="toast"></div>
 
+<script src="twemoji.min.js"></script>
 <script src="qrcode.js"></script>
 <script>
 'use strict';
@@ -1543,6 +1556,7 @@ function renderMessages(){
     html += '<div class="msg-meta">';
     html += '<span title="' + escapeHtml(fullTimeStr(m.ts)) + '">' + escapeHtml(hmStr(m.ts)) + '</span>';
     if(m.exp) html += '<span class="msg-status" title="自動で消えます">⏱</span>';
+    if(m.edited) html += '<span class="msg-status">編集済み</span>';
     if(m.out){
       if(st === 'sending'){
         html += '<span class="msg-status">⏱</span>';
@@ -1567,13 +1581,14 @@ function renderMessages(){
     });
   });
   box.querySelectorAll('.bubble').forEach(el => {
+    const mid = el.closest('.msg').getAttribute('data-id');
     el.addEventListener('contextmenu', (e) => {
       e.preventDefault();
-      copyText(el.textContent);
+      openMsgMenu(mid);
     });
     // iOS Safari never fires contextmenu: emulate long-press with touch timers.
     let lp = null;
-    el.addEventListener('touchstart', () => { lp = setTimeout(() => { lp = null; copyText(el.textContent); }, 550); }, {passive:true});
+    el.addEventListener('touchstart', () => { lp = setTimeout(() => { lp = null; openMsgMenu(mid); }, 550); }, {passive:true});
     const cancelLp = () => { if(lp){ clearTimeout(lp); lp = null; } };
     el.addEventListener('touchend', cancelLp);
     el.addEventListener('touchmove', cancelLp, {passive:true});
@@ -1865,7 +1880,7 @@ function openSettings(){
   if(state.system) $('platform-info').textContent = 'ネイティブ版（端末のYggdrasilを使用中）: 通信は端末のYggdrasil（VPN/TUN）経由です。' + (state.addr ? '' : ' いまは見つかりません。Yggdrasilアプリを起動してください。');
   $('settings-screen').classList.add('active');
   renderShareQR();
-  loadLan(); loadFinger();
+  loadLan(); loadFinger(); loadVpnIn();
 }
 
 function closeSettings(){
@@ -2371,6 +2386,14 @@ function connectEvents(){
           }
           renderList();
         }
+      }else if(d.type === 'msg_upd'){
+        const mu = d.data;
+        if(mu && mu.id){
+          const ex = state.messages.findIndex(x => x.id === mu.id && x.peer === mu.peer);
+          if(ex >= 0) state.messages[ex] = Object.assign(state.messages[ex], mu);
+          if(curAddr === mu.peer) renderMessages();
+          renderList();
+        }
       }else if(d.type === 'msg_del'){
         const md = d.data;
         if(md && md.id){
@@ -2684,6 +2707,104 @@ async function showText(title, url){
 }
 $('about-credits').addEventListener('click', () => showText('クレジットと第三者ライセンス', 'THIRD_PARTY_NOTICES.txt'));
 $('about-license').addEventListener('click', () => showText('GNU General Public License v3', 'LICENSE.txt'));
+// Keep the spacer under the messages equal to the composer's real height.
+(function(){
+  const c = $('composer'); if(!c) return;
+  const set = () => {
+    const box = $('messages');
+    const near = box.scrollHeight - box.scrollTop - box.clientHeight < 80;
+    document.documentElement.style.setProperty('--composer-h', (c.offsetHeight + 8) + 'px');
+    if(near) box.scrollTop = box.scrollHeight;
+  };
+  if(window.ResizeObserver) new ResizeObserver(set).observe(c);
+  window.addEventListener('resize', set);
+  set();
+})();
+// ---------- message menu: copy / edit / delete ----------
+function actionSheet(title, items){
+  return new Promise(res => {
+    const bg = document.createElement('div'); bg.className = 'modal-bg';
+    const m = document.createElement('div'); m.className = 'modal';
+    if(title){ const t = document.createElement('div'); t.className = 'mt'; t.textContent = title; t.style.cssText = 'font-weight:400;font-size:13px;color:var(--dim);max-height:4.5em;overflow:hidden;'; m.appendChild(t); }
+    const done = v => { bg.remove(); modalClose = null; res(v); };
+    items.forEach(it => {
+      const b = document.createElement('button'); b.textContent = it.label;
+      b.style.cssText = 'width:100%;text-align:left;' + (it.danger ? 'color:var(--error);' : '');
+      b.onclick = () => done(it.key); m.appendChild(b);
+    });
+    const c = document.createElement('button'); c.textContent = 'キャンセル'; c.style.width = '100%'; c.onclick = () => done(null); m.appendChild(c);
+    bg.appendChild(m); document.body.appendChild(bg);
+    modalClose = () => done(null);
+    bg.onclick = e => { if(e.target === bg) done(null); };
+  });
+}
+async function openMsgMenu(id){
+  const m = state.messages.find(x => x.id === id && x.peer === curAddr);
+  if(!m || m.sys) return;
+  const sent = m.out && (m.status === 'sent' || m.status === 'sending' || m.nostr);
+  const items = [];
+  if(m.text) items.push({key:'copy', label:'コピー'});
+  if(m.out && !m.img) items.push({key:'edit', label:'編集'});
+  items.push({key:'delme', label:'自分の画面から削除', danger:true});
+  if(m.out) items.push({key:'delall', label: sent ? '相手の画面からも削除（送信取り消し）' : '削除（まだ届いていないので送られません）', danger:true});
+  const k = await actionSheet((m.text || (m.img ? '📷 写真' : '')).slice(0, 120), items);
+  if(!k) return;
+  if(k === 'copy'){ copyText(m.text); return; }
+  if(k === 'edit'){
+    const v = await uiPrompt('メッセージを編集', m.text); if(v === null) return;
+    if(!v.trim() || v === m.text) return;
+    try{
+      const r = await api('/api/message/edit', {Peer: m.peer, ID: m.id, Text: v});
+      Object.assign(m, r); renderMessages(); renderList();
+      if(sent) toast('編集しました（相手がオフラインなら、つながったときに反映）');
+    }catch(e){ toast(e.message); }
+    return;
+  }
+  const everyone = k === 'delall';
+  const msg = everyone && sent
+    ? '相手の画面からも削除しますか？\n\n相手のYggChatに取り消しを送ります。すでに読まれていたり、改造クライアントや置き配(Nostr)に残っていたりする可能性はあります。'
+    : 'このメッセージを削除しますか？' + (m.out ? '' : '\n（相手の画面には残ります）');
+  if(!(await uiDialog(msg, {okText:'削除', danger:true}))) return;
+  try{
+    await api('/api/message/delete', {Peer: m.peer, ID: m.id, Everyone: everyone});
+    state.messages = state.messages.filter(x => !(x.id === m.id && x.peer === m.peer));
+    renderMessages(); renderList();
+  }catch(e){ toast(e.message); }
+}
+// ---------- Twemoji: every emoji drawn from the bundled images (no CDN) ----------
+(function(){
+  if(!window.twemoji) return;
+  const opts = { callback: icon => 'twemoji/' + icon + '.svg', className: 'emoji' };
+  let pending = false;
+  const run = () => { pending = false; try{ twemoji.parse(document.body, opts); }catch(e){} };
+  const kick = () => { if(!pending){ pending = true; requestAnimationFrame(run); } };
+  new MutationObserver(muts => { for(const m of muts){ if(m.type === 'characterData' || [...m.addedNodes].some(n => n.nodeType === 3 || (n.nodeType === 1 && n.tagName !== 'IMG'))){ kick(); return; } } })
+    .observe(document.body, {childList:true, subtree:true, characterData:true});
+  kick();
+})();
+// ---------- VPN mode: inbound firewall ----------
+async function loadVpnIn(){
+  if($('vpn-box').style.display === 'none') return;
+  try{ state.vpnIn = await api('/api/vpn/in'); }catch(e){ return; }
+  const v = state.vpnIn;
+  const label = v.mode === 'all' ? 'すべて開ける（公式アプリと同じ）' : v.mode === 'list' ? ('指定ポートだけ開ける: ' + ((v.ports || []).join(', ') || 'なし')) : 'すべて閉じる（チャット以外は外から届かない）';
+  $('vpn-in-state').textContent = label + (v.dropped ? ' ・ 遮断 ' + v.dropped + '件' : '');
+}
+$('vpn-in-btn').addEventListener('click', async () => {
+  const k = await actionSheet('VPNモードで、Yggdrasil上の他人からこの端末への接続をどうする？（自分から開いた接続の返事とYggChatのチャットはいつも通ります）', [
+    {key:'closed', label:'すべて閉じる（おすすめ）'},
+    {key:'list', label:'指定したポートだけ開ける'},
+    {key:'all', label:'すべて開ける（Termuxのsshdなども外から見える）', danger:true},
+  ]);
+  if(!k) return;
+  let ports = (state.vpnIn && state.vpnIn.ports) || [];
+  if(k === 'list'){
+    const v = await uiPrompt('開けるポート番号（カンマ区切り、TCP/UDP共通）\n例: 22, 8080', ports.join(', ')); if(v === null) return;
+    ports = v.split(/[\s,]+/).map(x => parseInt(x, 10)).filter(x => x > 0 && x < 65536);
+  }
+  if(k === 'all' && !(await uiDialog('すべて開けますか？\n\nこの端末で待ち受けているアプリ（sshd・開発サーバーなど）に、Yggdrasil上の誰でも接続を試せるようになります。', {okText:'開ける', danger:true}))) return;
+  try{ await api('/api/vpn/in', {Mode: k, Ports: ports}); await loadVpnIn(); toast('保存しました'); }catch(e){ toast(e.message); }
+});
 $('reset-id').addEventListener('click', async () => {
   if(!(await uiDialog('新しいIDを作りますか？今のアドレス・連絡先・履歴はすべて消え、元に戻せません。', {okText:'作り直す', danger:true}))) return;
   const old = state.addr;

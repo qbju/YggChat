@@ -6,3 +6,4 @@ pwa/dl/
 android/out/
 android/libyggchat.so
 *.tmp
+pwa/twemoji/

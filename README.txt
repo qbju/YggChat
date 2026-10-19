@@ -1,4 +1,4 @@
-YggChat v0.10.2 - NAT越え不要のP2Pチャット (Yggdrasil内蔵)
+YggChat v0.11 - NAT越え不要のP2Pチャット (Yggdrasil内蔵)
 
 ■ 使い方
 PWA(インストール不要): https://yggchat.surge.sh/
@@ -20,6 +20,9 @@ Linux:   ./yggchat-linux-amd64
   200::/7宛てだけをVPN(TUN)で受け持ち、ブラウザやSSHなど他のアプリもYggdrasilに接続できます。
   アドレス・鍵はYggChatのまま。通常のネット通信はVPNを通りません(allowBypass/IPv4は素通し)。
   TUNのfdは同じアプリ(同じUID)からだけ受け取ります。公式アプリのVPNとは同時に使えません。
+  「外からの接続」で、Yggdrasil上の他人からこの端末への接続を選べます: すべて閉じる(既定)/指定ポートだけ開ける/
+  すべて開ける。閉じている間も、自分から開いた接続の返事・YggChatのチャット(UDP 7777)・オン時のfingerは通り、
+  それ以外は黙って捨てる(pingにも答えない)ので、外からは空のホストに見えます。
 
 ■ LANチャット (アプリ版のみ・既定オフ)
   設定→LANチャットをオンにすると、Yggdrasilのマルチキャスト探索で同じWi-Fi・有線LAN・テザリング上の
@@ -37,6 +40,11 @@ Linux:   ./yggchat-linux-amd64
   アプリ内の「fingerで調べる」や連絡先の「finger」ボタンで、他のYggChat(UDPの{t:"fq"})や
   一般のfingerサーバー(TCP 79)を問い合わせられます。AndroidのVPNモードではOSが79番を開けないため、
   TUNの中継で79番⇔7979番を付け替えます。PWAはTCPを使えないので、YggChat同士の問い合わせだけ対応です。
+
+■ メッセージの編集・削除
+  吹き出しを長押し(PCは右クリック)→ コピー / 編集 / 自分の画面から削除 / 相手の画面からも削除。
+  編集と送信取り消しは自分のメッセージだけで、相手は元の送信者のアドレスからの指示しか受け付けません。
+  相手がオフラインなら、つながったときに反映されます。すでに読まれた内容やNostr置き配に預けた分は消せません。
 
 ■ 端末チャット (CLI)
   ./yggchat-linux-amd64 -cli        (Termux: ./yggchat-android-arm64 -cli)
@@ -95,4 +103,5 @@ v0.2以降はUDP/7777。v0.1とは非互換。
   qrcode-generator(MIT, Kazuhiko Arase)などの一覧と全文は THIRD_PARTY_NOTICES.txt にあります
   (アプリの設定→About、または yggchat -licenses でも表示)。
   yggdrasil-go は WebAssembly 対応のため一部ファイルを改変しています(該当ファイルに改変の注記あり)。
+  絵文字はTwemoji(© Twitter, Inc. and other contributors, CC-BY 4.0, jdecked/twemoji)の画像を同梱して表示します(CDN不使用)。
   「QRコード」は株式会社デンソーウェーブの登録商標です。

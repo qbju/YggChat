@@ -51,4 +51,3 @@ func (v *vpnState) accept(c *net.UnixConn) {
 	_, _ = c.Write([]byte{1})
 	go v.toCore(f)
 }
-
