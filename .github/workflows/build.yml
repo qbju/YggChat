@@ -15,8 +15,6 @@ jobs:
     runs-on: ubuntu-latest
     env:
       KS_KEY: ${{ secrets.KEYSTORE_KEY }}
-      SURGE_LOGIN: ${{ secrets.SURGE_LOGIN }}
-      SURGE_TOKEN: ${{ secrets.SURGE_TOKEN }}
     steps:
       - uses: actions/checkout@v4
 
@@ -52,10 +50,6 @@ jobs:
         with:
           name: yggchat-${{ github.sha }}
           path: pwa/dl/
-
-      - name: Deploy PWA to yggchat.surge.sh
-        if: github.ref == 'refs/heads/main' && github.event_name == 'push' && env.SURGE_TOKEN != '' && env.SIGNED == '1'
-        run: npx --yes surge ./pwa yggchat.surge.sh
 
       - name: GitHub Release
         if: startsWith(github.ref, 'refs/tags/v') && env.SIGNED == '1'

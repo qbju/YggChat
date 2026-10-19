@@ -101,7 +101,7 @@ GOOS=js GOARCH=wasm go build -trimpath -ldflags="-s -w" -o pwa/ygg.wasm ./wasm
 ```
 
 Android APK（Gradle不使用）: `libyggchat.so`（`GOOS=android GOARCH=arm64` のバイナリ）を `android/` に置いて `android/build.sh`。
-`ANDROID_HOME`、`YGG_KEYSTORE`、`YGG_KS_PASS` で SDK と署名鍵を指定できます。GitHub Actions（`.github/workflows/build.yml`）が push ごとにAPKと各バイナリを作り、mainへのpushでPWAを yggchat.surge.sh に公開、`v*` タグでReleaseに載せます。署名鍵は `android/yggchat.jks.enc`（AES-256で暗号化）で、復号キーはリポジトリのSecret `KEYSTORE_KEY` にだけあります。Surgeへの公開には Secret `SURGE_LOGIN` / `SURGE_TOKEN` が必要です。
+`ANDROID_HOME`、`YGG_KEYSTORE`、`YGG_KS_PASS` で SDK と署名鍵を指定できます。GitHub Actions（`.github/workflows/build.yml`）が push ごとにAPKと各バイナリを作り、`v*` タグでReleaseに載せます。署名鍵は `android/yggchat.jks.enc`（AES-256で暗号化）で、復号キーはリポジトリのSecret `KEYSTORE_KEY` にだけあります。Secretがない場合のAPKは使い捨て鍵で署名され、インストール済みのYggChatを上書きできません。PWA（yggchat.surge.sh）の公開はActionsとは別に行っています。
 
 ## 検証
 
