@@ -8,10 +8,24 @@ import android.content.Intent;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
+import android.net.Uri;
 import android.webkit.*;
 
 public class MainActivity extends Activity {
+    static final String HOME = "http://127.0.0.1:7780/";
     private WebView web;
+    // True only while the main frame shows the app's own UI; the YggAndroid
+    // bridge refuses to act for any other page.
+    private volatile boolean onHome;
+
+    static boolean isHome(String u) { return u != null && u.startsWith(HOME); }
+
+    // Anything that is not the app's own UI goes to the user's browser.
+    void openOutside(Uri u) {
+        String sc = u.getScheme();
+        if (!"https".equalsIgnoreCase(sc) && !"http".equalsIgnoreCase(sc)) return;
+        try { startActivity(new Intent(Intent.ACTION_VIEW, u).addCategory(Intent.CATEGORY_BROWSABLE)); } catch (Exception e) {}
+    }
     static volatile boolean visible;
 
     @Override protected void onResume() { super.onResume(); visible = true; }
@@ -35,17 +49,24 @@ public class MainActivity extends Activity {
         WebSettings ws = web.getSettings();
         ws.setJavaScriptEnabled(true);
         ws.setDomStorageEnabled(true);
+        ws.setAllowFileAccess(false);
+        ws.setAllowContentAccess(false);
+        ws.setSupportMultipleWindows(false);
+        ws.setJavaScriptCanOpenWindowsAutomatically(false);
+        ws.setGeolocationEnabled(false);
         web.addJavascriptInterface(new Object() {
             // Screen security (FLAG_SECURE): blocks screenshots and hides the app in recents.
             @JavascriptInterface public void setSecure(final boolean on) {
+                if (!onHome) return;
                 runOnUiThread(new Runnable() { public void run() {
                     if (on) getWindow().addFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE);
                     else getWindow().clearFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE);
                 }});
             }
             // Notifications: WebView has no Web Notification API, so the service posts them natively.
-            @JavascriptInterface public String notifState() { return MainActivity.this.notifState(); }
+            @JavascriptInterface public String notifState() { return onHome ? MainActivity.this.notifState() : "denied"; }
             @JavascriptInterface public void requestNotif() {
+                if (!onHome) return;
                 runOnUiThread(new Runnable() { public void run() {
                     String st = notifState();
                     if ("default".equals(st) && Build.VERSION.SDK_INT >= 33) {
@@ -59,8 +80,9 @@ public class MainActivity extends Activity {
                 }});
             }
             // VPN mode: YggChat becomes the device's Yggdrasil for every app.
-            @JavascriptInterface public boolean vpnSupported() { return true; }
+            @JavascriptInterface public boolean vpnSupported() { return onHome; }
             @JavascriptInterface public void setVpn(final boolean on) {
+                if (!onHome) return;
                 runOnUiThread(new Runnable() { public void run() {
                     getSharedPreferences("ygg", 0).edit().putBoolean("vpn", on).apply();
                     if (!on) { startService(new Intent(MainActivity.this, YggVpn.class).setAction(YggVpn.STOP)); vpnResult(true); return; }
@@ -70,16 +92,41 @@ public class MainActivity extends Activity {
                 }});
             }
             @JavascriptInterface public void setNotif(boolean on, boolean hide) {
+                if (!onHome) return;
                 getSharedPreferences("ygg", 0).edit().putBoolean("notif", on).putBoolean("hide", hide).apply();
             }
         }, "YggAndroid");
         web.setWebViewClient(new WebViewClient() {
+            // Only the local UI is ever shown in this WebView; links, downloads
+            // and redirects elsewhere open in the browser.
+            @Override public boolean shouldOverrideUrlLoading(WebView v, WebResourceRequest r) {
+                Uri u = r.getUrl();
+                if (isHome(u.toString())) return false;
+                if (r.isForMainFrame()) openOutside(u);
+                return true;
+            }
+            @SuppressWarnings("deprecation")
+            @Override public boolean shouldOverrideUrlLoading(WebView v, String url) {
+                if (isHome(url)) return false;
+                openOutside(Uri.parse(url));
+                return true;
+            }
+            @Override public void onPageStarted(WebView v, String url, android.graphics.Bitmap f) {
+                onHome = isHome(url);
+                if (!onHome) { v.stopLoading(); openOutside(Uri.parse(url)); v.loadUrl(HOME); }
+            }
+            @Override public void doUpdateVisitedHistory(WebView v, String url, boolean reload) {
+                onHome = isHome(url);
+            }
             @Override public void onReceivedError(WebView v, WebResourceRequest r, WebResourceError e) {
-                if (r.isForMainFrame()) { final WebView vv = v; new Handler().postDelayed(new Runnable(){ public void run(){ vv.loadUrl("http://127.0.0.1:7780/"); }}, 700); }
+                if (r.isForMainFrame()) { final WebView vv = v; new Handler().postDelayed(new Runnable(){ public void run(){ vv.loadUrl(HOME); }}, 700); }
             }
         });
+        web.setDownloadListener(new DownloadListener() {
+            public void onDownloadStart(String url, String ua, String cd, String mime, long len) { openOutside(Uri.parse(url)); }
+        });
         setContentView(web);
-        new Handler().postDelayed(new Runnable(){ public void run(){ web.loadUrl("http://127.0.0.1:7780/"); }}, 800);
+        new Handler().postDelayed(new Runnable(){ public void run(){ web.loadUrl(HOME); }}, 800);
     }
 
     void vpnResult(boolean ok) {

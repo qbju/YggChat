@@ -152,8 +152,36 @@ func cleanNick(n string) string {
 // localOnly rejects requests that could come from other web pages or DNS
 // rebinding: Host must be loopback, a present Origin must match it, and
 // POST bodies must be application/json (which forces a CORS preflight).
+func isLoopbackHost(h string) bool {
+	if h == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(strings.Trim(h, "[]"))
+	return ip != nil && ip.IsLoopback()
+}
+
+// checkUIAddr refuses to serve the local API anywhere but loopback: it has no
+// authentication, so exposing it (e.g. -ui 0.0.0.0:7780) would hand the node,
+// keys and history to anyone who can reach the port.
+func checkUIAddr(addr string) error {
+	h, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Errorf("-ui %q: %v", addr, err)
+	}
+	if !isLoopbackHost(h) {
+		return fmt.Errorf("-ui %q: the UI/API has no authentication and may only listen on loopback (127.0.0.1, [::1], localhost)", addr)
+	}
+	return nil
+}
+
 func localOnly(uiAddr string, h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The peer address is what really proves the request is local; the
+		// Host header alone can be forged by anyone who can reach the port.
+		if rh, _, err := net.SplitHostPort(r.RemoteAddr); err != nil || !isLoopbackHost(rh) {
+			http.Error(w, "forbidden", 403)
+			return
+		}
 		host, _, err := net.SplitHostPort(r.Host)
 		if err != nil {
 			host = r.Host
@@ -1037,6 +1065,9 @@ func main() {
 			fmt.Println()
 		}
 		return
+	}
+	if err := checkUIAddr(*uiAddr); err != nil {
+		log.Fatal(err)
 	}
 	if *cliMode && apiUp(*uiAddr) {
 		runCLI(*uiAddr)
