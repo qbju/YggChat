@@ -14,7 +14,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     env:
-      KS_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+      KS_KEY: ${{ secrets.KEYSTORE_KEY }}
       SURGE_LOGIN: ${{ secrets.SURGE_LOGIN }}
       SURGE_TOKEN: ${{ secrets.SURGE_TOKEN }}
     steps:
@@ -35,11 +35,11 @@ jobs:
 
       - name: Signing key
         run: |
-          if [ -n "$KS_B64" ]; then
-            echo "$KS_B64" | base64 -d > "$RUNNER_TEMP/yggchat.jks"
+          if [ -n "$KS_KEY" ]; then
+            openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -pass env:KS_KEY -in android/yggchat.jks.enc -out "$RUNNER_TEMP/yggchat.jks"
             echo "SIGNED=1" >> "$GITHUB_ENV"
           else
-            echo "::warning::ANDROID_KEYSTORE_B64 is not set: the APK is signed with a throwaway key and cannot update an installed YggChat."
+            echo "::warning::KEYSTORE_KEY is not set: the APK is signed with a throwaway key and cannot update an installed YggChat."
           fi
           echo "YGG_KEYSTORE=$RUNNER_TEMP/yggchat.jks" >> "$GITHUB_ENV"
 
