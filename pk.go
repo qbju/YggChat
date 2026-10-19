@@ -7,7 +7,7 @@ import (
 )
 
 // learnPK records a peer's full public key after checking it matches the address.
-// (Kept for a future self-hosted mailbox node; the Cloudflare mailbox was removed in v0.7.)
+// (Used to seal optional Nostr offline boxes.)
 func (a *App) learnPK(from, pkHex string) {
 	pk, err := hex.DecodeString(pkHex)
 	if err != nil || !mbox.AddrOK(from, pk) {
@@ -19,5 +19,16 @@ func (a *App) learnPK(from, pkHex string) {
 		c.PK = pkHex
 		a.store.Contacts[from] = c
 		a.store.save()
+	}
+}
+
+// askPK greets a contact whose full key we don't know yet; the hi/hiack carry
+// both keys (needed for sealing Nostr offline boxes).
+func (a *App) askPK(peer string) {
+	a.store.mu.Lock()
+	c, ok := a.store.Contacts[peer]
+	a.store.mu.Unlock()
+	if ok && c.PK == "" {
+		go a.hello(peer)
 	}
 }

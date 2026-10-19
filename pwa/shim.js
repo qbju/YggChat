@@ -110,6 +110,8 @@
     if (c && pk && c.pk !== pk && /^[0-9a-f]{64}$/.test(pk) && yggAddrOK(from, pk)) { c.pk = pk; save(); }
   }
 
+  // Greet a contact whose full key we lack: hi/hiack carry both keys (needed for Nostr boxes).
+  const askPK = p => { const c = st.contacts[p]; if (c && !c.pk && !locked) hello(p); };
   // ---- offline queue ----
   const inflight = new Set();
   const queuedFor = p => st.messages.filter(m => m.out && m.peer === p && (m.status === 'queued' || m.status === 'stored'));
@@ -134,7 +136,7 @@
   function onPacket(src, json) {
     let w; try { w = JSON.parse(json) } catch { return }
     if (w.t === 'fca') { const g = chunkAcks.get(w.id); if (g) g.add(w.i | 0); return; }
-    if (w.t === 'ack') { const f = acks.get(w.id); if (f) { acks.delete(w.id); f(); } return; }
+    if (w.t === 'ack') { const f = acks.get(w.id); if (f) { acks.delete(w.id); f(); } askPK(src); return; }
     if (locked || st.blocked[src]) return; // stay silent: the sender keeps it queued
     if (w.pk) learnPK(src, String(w.pk));
     if (w.t === 'hi' || w.t === 'hiack') { if (w.t === 'hi') send(src, { t: 'hiack', pk: myPK() }); maybeProf(src); flush(src); return; }
@@ -146,7 +148,7 @@
     if (w.t === 'ttl') { setTTL(src, w.ttl | 0, false); return; }
     if (w.t === 'fh') { onFileHeader(src, w); return; }
     if (w.t === 'fc') { onFileChunk(src, w); return; }
-    if (w.t === 'msg' && handleMsg(src, w)) { send(src, { t: 'ack', id: w.id }); if (queuedFor(src).length) flush(src); }
+    if (w.t === 'msg' && handleMsg(src, w)) { send(src, { t: 'ack', id: w.id }); askPK(src); if (queuedFor(src).length) flush(src); }
   }
 
   // ---- images: header + 12 KiB chunks, per-chunk acks, SHA-256 check ----

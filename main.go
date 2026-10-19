@@ -285,6 +285,7 @@ func (a *App) serveChat() {
 				delete(a.acks, w.ID)
 			}
 			a.ackMu.Unlock()
+			a.askPK(from)
 			continue
 		}
 		a.store.mu.Lock()
@@ -313,6 +314,7 @@ func (a *App) serveChat() {
 		case "msg":
 			if a.handleMsg(from, w) {
 				a.sendWire(from, wire{T: "ack", ID: w.ID})
+				a.askPK(from)
 				go a.flush(from)
 			}
 		}
@@ -969,7 +971,12 @@ func main() {
 	uiAddr := flag.String("ui", "127.0.0.1:7780", "local web UI address")
 	peers := flag.String("peers", "", "comma-separated Yggdrasil peer URIs (overrides config)")
 	listen := flag.String("listen", "", "comma-separated Yggdrasil listen URIs, e.g. tls://0.0.0.0:12345")
+	cliMode := flag.Bool("cli", false, "terminal chat (attaches to a node already running on -ui, or starts one)")
 	flag.Parse()
+	if *cliMode && apiUp(*uiAddr) {
+		runCLI(*uiAddr)
+		return
+	}
 	_ = os.MkdirAll(*dataDir, 0700)
 	_ = os.Chmod(*dataDir, 0700)
 	for _, f := range []string{"node.json", "chat.json"} {
@@ -984,7 +991,22 @@ func main() {
 		cfg.Listen = strings.Split(*listen, ",")
 	}
 
-	logger := gologme.New(os.Stderr, "[ygg] ", gologme.LstdFlags)
+	var logOut io.Writer = os.Stderr
+	if *cliMode {
+		// Keep the terminal for the chat; node logs go to a file.
+		if f, err := os.OpenFile(filepath.Join(*dataDir, "node.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600); err == nil {
+			logOut = f
+			log.SetOutput(f)
+		}
+		go func() {
+			for !apiUp(*uiAddr) {
+				time.Sleep(300 * time.Millisecond)
+			}
+			runCLI(*uiAddr)
+			os.Exit(0)
+		}()
+	}
+	logger := gologme.New(logOut, "[ygg] ", gologme.LstdFlags)
 	logger.EnableLevel("error")
 	logger.EnableLevel("warn")
 	opts := []core.SetupOption{}
@@ -1060,7 +1082,9 @@ func main() {
 	a.httpHandlers(mux)
 	a.featureHandlers(mux)
 	a.nostrHandlers(mux)
-	fmt.Printf("YggChat\n  your address: %s\n  open UI:      http://%s/\n", a.addr, *uiAddr)
+	if !*cliMode {
+		fmt.Printf("YggChat\n  your address: %s\n  open UI:      http://%s/\n", a.addr, *uiAddr)
+	}
 	ln, err := listenRetry(*uiAddr)
 	if err != nil {
 		log.Fatal(err)
