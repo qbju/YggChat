@@ -1,17 +1,15 @@
 // YggChat PWA shim: runs a Yggdrasil node in WASM and emulates the native
 // daemon's /api/* (see API.md) so the same UI works in the browser.
 // The node, keys and history live only in this browser; the relay only
-// forwards encrypted Yggdrasil link traffic and sealed mailbox boxes.
+// forwards encrypted Yggdrasil link traffic.
 (() => {
-  const RELAY = 'https://yggws.i2p.workers.dev';
-  const MB = RELAY + '/mb/';
-  const r = u => 'wss://yggws.i2p.workers.dev/r?u=' + encodeURIComponent(u);
-  // Recommended: Hong Kong + Germany + Armenia peers from the official public-peers list, via relay.
+  // No third-party relay: browsers connect straight to Yggdrasil peers whose
+  // WebSocket listener allows this page's Origin (yggdrasil-go "?origin=").
   const RECOMMENDED = [
-    r('ws://ygg5.mk16.de:1340?key=0000009611ae5391dc0aceea9f3fa6a0dc1279f4306059339e84bfb8b74d2f9b'),
-    r('wss://ygg-evn-1.wgos.org:443'),
-    r('ws://ygg1.mk16.de:1340?key=0000000087ee9949eeab56bd430ee8f324cad55abf3993ed9b9be63ce693e18a'),
+    'wss://8097-agquq2sivri3jtxt3l2lgdk4ri.instabox.tech/', // YggChat entry peer (self-hosted, origin=https://yggchat.surge.sh)
+    'wss://ygg.being.pet/ygg',                              // public peer that accepts browser Origins
   ];
+  const LABELS = { [RECOMMENDED[0]]: 'YggChat入口ピア（自前）', [RECOMMENDED[1]]: 'ygg.being.pet（公開・ブラウザ可）' };
   const LS = 'yggchat_pwa_v1';
   const MAXTTL = 4 * 7 * 86400;
   const now = () => Math.floor(Date.now() / 1000);
@@ -42,7 +40,7 @@
       if (Object.keys(raw).length) { await idbPut('state', raw); localStorage.removeItem(LS); }
     }
     Object.assign(outer, { key: raw.key || '', peers: raw.peers || null, enc: raw.enc || null });
-    if (outer.peers && outer.peers.some(p => /workers\.dev\/(evn|dnct)$/.test(p))) outer.peers = null;
+    if (outer.peers && outer.peers.some(p => /workers\.dev/.test(p))) outer.peers = null; // v0.7: old Cloudflare relay peers -> direct defaults
     if (!outer.peers) outer.peers = RECOMMENDED.slice();
     locked = !!outer.enc;
     if (!locked) { Object.assign(st, { nick: raw.nick || 'anon', bio: raw.bio || '', avatar: raw.avatar || '', contacts: raw.contacts || {}, messages: raw.messages || [], blocked: raw.blocked || {} }); migrate(); }
@@ -218,37 +216,6 @@
     if (acceptMsg(src, f.hdr, 'data:' + f.hdr.mime + ';base64,' + btoa(s))) send(src, { t: 'ack', id: w.id });
   }
 
-  // ---- mailbox ----
-  async function mbPost(op, body) {
-    const res = await fetch(MB + op, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
-    if (!res.ok) throw new Error('mailbox ' + op + ' ' + res.status);
-    return res.json();
-  }
-  function mbAuth(op) { const pk = myPK(), tag = yggTag(pk), ts = now(); return { pk, ts, sig: yggSign('yggchat-mb-' + op + ':' + tag + ':' + ts) }; }
-  async function mbPut(m) {
-    const c = st.contacts[m.peer]; if (!c || !c.pk) return false;
-    const box = yggSeal(c.pk, JSON.stringify({ t: 'msg', id: m.id, nick: m.nick, text: m.text, ts: m.ts, ttl: m.ttl || undefined }));
-    if (!box) return false;
-    try { await mbPost('put', { to: yggTag(c.pk), box }); return true; } catch { return false; }
-  }
-  let fetching = false;
-  async function mbFetch() {
-    if (locked || fetching || !addr) return; fetching = true;
-    try {
-      const res = await mbPost('get', mbAuth('get'));
-      const keys = [];
-      for (const bx of res.boxes || []) {
-        keys.push(bx.k);
-        const o = yggOpen(bx.box); if (o.error) continue;
-        let w; try { w = JSON.parse(o.w) } catch { continue }
-        if (w.t !== 'msg') continue;
-        learnPK(o.from, o.pk);
-        if (handleMsg(o.from, w)) send(o.from, { t: 'ack', id: w.id });
-      }
-      if (keys.length) await mbPost('del', { ...mbAuth('del'), keys });
-    } catch (e) { console.warn(e) } finally { fetching = false; }
-  }
-
   async function deliver(m, tries = 12) {
     if (inflight.has(m.id)) return false;
     inflight.add(m.id);
@@ -256,7 +223,6 @@
     if (m.img) { try { return await deliverImg(m, tries); } finally { inflight.delete(m.id); } }
     const pkt = JSON.stringify({ t: 'msg', id: m.id, nick: m.nick, text: m.text, ts: m.ts, ttl: m.ttl || undefined });
     const acked = new Promise(r => acks.set(m.id, r));
-    const wasStored = m.status === 'stored';
     try {
       for (let i = 0; i < tries; i++) {
         yggSend(m.peer, pkt);
@@ -264,7 +230,7 @@
         if (got) { setStatus(m.peer, m.id, 'sent'); return true; }
       }
       acks.delete(m.id);
-      setStatus(m.peer, m.id, (wasStored || await mbPut(m)) ? 'stored' : 'queued');
+      setStatus(m.peer, m.id, 'queued');
       return false;
     } finally { inflight.delete(m.id); }
   }
@@ -296,10 +262,8 @@
     // Probe peers we still owe messages to, plus everyone now and then so they can flush to us.
     setInterval(() => { if (yggPeers() > 0 && !locked) for (const p of new Set(st.messages.filter(m => m.out && (m.status === 'queued' || m.status === 'stored')).map(m => m.peer))) hello(p); }, 20000);
     setInterval(() => { if (yggPeers() > 0) helloAll(); }, 120000);
-    setInterval(mbFetch, 300000);
-    setTimeout(mbFetch, 2000);
-    addEventListener('online', () => setTimeout(() => { helloAll(); mbFetch(); }, 3000));
-    document.addEventListener('visibilitychange', () => { if (!document.hidden) { if (yggPeers() > 0) helloAll(); mbFetch(); } });
+    addEventListener('online', () => setTimeout(() => { helloAll(); }, 3000));
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) { if (yggPeers() > 0) helloAll(); } });
   })();
 
   const norm = a => { try { return new URL('http://[' + a.trim() + ']/').hostname.slice(1, -1) } catch { return null } };
@@ -329,7 +293,7 @@
           const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: unb64(outer.enc.iv) }, k, unb64(outer.enc.ct));
           st = Object.assign(blank(), JSON.parse(new TextDecoder().decode(plain)));
           aesKey = k; locked = false; migrate();
-          setTimeout(() => { helloAll(); mbFetch(); }, 500);
+          setTimeout(() => { helloAll(); }, 500);
           return ok({});
         } catch { await new Promise(r => setTimeout(r, 700)); return bad('パスコードが違います', 403); }
       }
@@ -412,17 +376,14 @@
         if (body.Reset) { for (const p of outer.peers) if (!RECOMMENDED.includes(p)) yggRemovePeer(p); for (const p of RECOMMENDED) if (!outer.peers.includes(p)) yggAddPeer(p); outer.peers = RECOMMENDED.slice(); }
         else if (body.Add) {
           let u = body.Add.trim();
-          if (/^wss?:\/\//.test(u) && !u.startsWith('wss://yggws.')) u = r(u); // browsers need the relay
-          if (!/^wss:\/\//.test(u)) return bad('browsers can only use ws/wss peers');
+          if (!/^wss:\/\//.test(u)) return bad('ブラウザ版はwss://のピアだけ使えます（ピア側でこのページのOriginを許可している必要があります）');
           if (!outer.peers.includes(u)) { const e = yggAddPeer(u); if (e) return bad(e); outer.peers.push(u); }
         } else if (body.Remove) { yggRemovePeer(body.Remove); outer.peers = outer.peers.filter(p => p !== body.Remove); }
         saveOuter();
         return ok({ peers: peerList(), recommended: RECOMMENDED, up: yggPeers() });
       }
-      case 'peers/public': {
-        const x = await fetch(RELAY + '/list').then(r => r.json());
-        return ok({ peers: x.peers.map(p => ({ uri: p.relay, label: p.uri, region: p.region, continent: p.continent, asia: p.continent === 'asia' })) });
-      }
+      case 'peers/public':
+        return ok({ peers: RECOMMENDED.map(u => ({ uri: u, label: LABELS[u] || u, region: '', continent: '', asia: false })) });
     }
     return bad('not found', 404);
   }

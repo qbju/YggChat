@@ -55,7 +55,7 @@ type Message struct {
 	Text string `json:"text"`
 	TS   int64  `json:"ts"`
 	Out  bool   `json:"out"`
-	// Status of outgoing messages: sending | sent | queued (auto-resent when the peer is reachable) | stored (also parked in the relay mailbox) | failed.
+	// Status of outgoing messages: sending | sent | queued (auto-resent when the peer is reachable) | stored (legacy v0.5/v0.6 mailbox; treated as queued) | failed.
 	Status string `json:"status,omitempty"`
 	TTL    int    `json:"ttl,omitempty"` // disappearing timer (seconds)
 	Exp    int64  `json:"exp,omitempty"` // unix time when this message is deleted
@@ -498,13 +498,7 @@ func (a *App) deliverN(m Message, tries int) bool {
 		case <-time.After(2500 * time.Millisecond):
 		}
 	}
-	if m.Status == "stored" {
-		a.setStatus(m.Peer, m.ID, "stored")
-	} else if a.mbPut(m) {
-		a.setStatus(m.Peer, m.ID, "stored")
-	} else {
-		a.setStatus(m.Peer, m.ID, "queued")
-	}
+	a.setStatus(m.Peer, m.ID, "queued")
 	return false
 }
 
@@ -1008,7 +1002,6 @@ func main() {
 	}()
 	go a.serveChat()
 	go a.sweep()
-	go a.mbLoop()
 	// Offline queue: probe peers we owe messages to every 20 s, and greet every
 	// contact every 2 min so they can flush messages queued for us.
 	go func() {

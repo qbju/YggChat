@@ -39,7 +39,7 @@ Nodes greet all contacts when their first peer comes up and every 2 min, and pro
 
 ## v0.5
 State adds: bio, avatar, locked, haspass, blocked[]. When locked, state is {locked:true, addr, peers, platform} and other endpoints return 423 except unlock/events/peers.
-Message adds: ttl, exp (unix delete time), sys ("ttl:<sec>" system line), status "stored" (parked in relay mailbox).
+Message adds: ttl, exp (unix delete time), sys ("ttl:<sec>" system line), status "stored" (legacy, removed in v0.7; treated as queued).
 Contact adds: bio, avatar, hasprof, ttl, req (message request), shared (we sent our profile), renamed, pk (verified Ed25519 key hex).
 POST /api/profile {Nick,Bio,Avatar} -> shares with contacts where shared.
 POST /api/contact {Addr, Nick?, TTL?, Accept?}  (merge; Accept shares profile; TTL syncs to peer)

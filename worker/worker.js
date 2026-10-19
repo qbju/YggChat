@@ -74,75 +74,11 @@ function relay(req, peerUri) {
 
 const cors = { 'access-control-allow-origin': '*', 'content-type': 'application/json' };
 
-// ---------- Mailbox: store-and-forward for offline peers ----------
-// Boxes are NaCl sealed boxes encrypted to the recipient's key by the sender's
-// node; the relay never sees plaintext or the sender. Boxes are addressed by
-// tag = hex(sha256("yggchat-mb:" + recipientPubHex))[:32] and expire after 7 days.
-// Fetch/delete require an Ed25519 signature by the recipient key.
-const MB_TTL = 7 * 86400 * 1000, MB_MAX = 200, MB_BOX = 24000;
-const hex = b => [...new Uint8Array(b)].map(x => x.toString(16).padStart(2, '0')).join('');
-const unhex = s => new Uint8Array((s.match(/../g) || []).map(h => parseInt(h, 16)));
-async function mbTag(pkHex) { return hex(await crypto.subtle.digest('SHA-256', new TextEncoder().encode('yggchat-mb:' + pkHex))).slice(0, 32); }
-async function mbVerify(pkHex, msg, sigHex) {
-  try {
-    const k = await crypto.subtle.importKey('raw', unhex(pkHex), { name: 'Ed25519' }, false, ['verify']);
-    return await crypto.subtle.verify({ name: 'Ed25519' }, k, unhex(sigHex), new TextEncoder().encode(msg));
-  } catch { return false; }
-}
-export class Mailbox {
-  constructor(state) { this.s = state.storage; }
-  async fetch(req) {
-    const u = new URL(req.url), op = u.pathname.split('/').pop();
-    const now = Date.now();
-    const all = await this.s.list({ prefix: 'm:' });
-    const dead = [...all.keys()].filter(k => now - parseInt(k.split(':')[1], 36) > MB_TTL);
-    if (dead.length) await this.s.delete(dead);
-    if (op === 'put') {
-      const box = await req.text();
-      if (all.size - dead.length >= MB_MAX) return new Response('mailbox full', { status: 507 });
-      const key = 'm:' + now.toString(36) + ':' + hex(crypto.getRandomValues(new Uint8Array(6)));
-      await this.s.put(key, box);
-      return new Response(JSON.stringify({ ok: true }));
-    }
-    if (op === 'get') {
-      const out = [];
-      for (const [k, v] of all) if (!dead.includes(k)) out.push({ k, box: v });
-      return new Response(JSON.stringify({ boxes: out }));
-    }
-    if (op === 'del') {
-      const { keys } = await req.json();
-      if (Array.isArray(keys) && keys.length) await this.s.delete(keys.filter(k => typeof k === 'string' && k.startsWith('m:')).slice(0, 128));
-      return new Response(JSON.stringify({ ok: true }));
-    }
-    return new Response('bad op', { status: 400 });
-  }
-}
-async function mailbox(req, env, op) {
-  if (req.method === 'OPTIONS') return new Response(null, { headers: { ...cors, 'access-control-allow-methods': 'POST', 'access-control-allow-headers': 'content-type' } });
-  if (req.method !== 'POST') return new Response('POST only', { status: 405, headers: cors });
-  let body; try { body = await req.json(); } catch { return new Response('bad json', { status: 400, headers: cors }); }
-  let tag;
-  if (op === 'put') {
-    tag = String(body.to || '');
-    if (!/^[0-9a-f]{32}$/.test(tag) || typeof body.box !== 'string' || body.box.length > MB_BOX) return new Response('bad box', { status: 400, headers: cors });
-  } else {
-    const pk = String(body.pk || ''), ts = Number(body.ts || 0);
-    if (!/^[0-9a-f]{64}$/.test(pk) || Math.abs(Date.now() / 1000 - ts) > 300) return new Response('bad auth', { status: 401, headers: cors });
-    tag = await mbTag(pk);
-    if (!(await mbVerify(pk, 'yggchat-mb-' + op + ':' + tag + ':' + ts, String(body.sig || '')))) return new Response('bad signature', { status: 401, headers: cors });
-  }
-  const stub = env.MB.get(env.MB.idFromName(tag));
-  const r = await stub.fetch('https://mb/' + op, { method: 'POST', body: op === 'put' ? body.box : JSON.stringify({ keys: body.keys || [] }) });
-  return new Response(await r.text(), { status: r.status, headers: cors });
-}
-
-
 export default {
   async fetch(req, env, ctx) {
     const url = new URL(req.url);
     const path = url.pathname.replace(/^\/+|\/+$/g, '');
     const ws = req.headers.get('Upgrade') === 'websocket';
-    if (path === 'mb/put' || path === 'mb/get' || path === 'mb/del') return mailbox(req, env, path.slice(3));
     if (path === 'list') {
       const l = await peerList(ctx);
       const base = url.origin + '/r?u=';
@@ -155,6 +91,6 @@ export default {
       if (!l.peers.some(p => p.uri === target)) return new Response('peer not on the official public list', { status: 403 });
       return relay(req, target);
     }
-    return new Response('YggChat Yggdrasil WebSocket relay.\nGET /list, WS /r?u=<peer uri from github.com/yggdrasil-network/public-peers>\nPOST /mb/put|get|del: encrypted store-and-forward mailbox (7 days)\n', { headers: { 'content-type': 'text/plain' } });
+    return new Response('YggChat Yggdrasil WebSocket relay.\nGET /list, WS /r?u=<peer uri from github.com/yggdrasil-network/public-peers>\n', { headers: { 'content-type': 'text/plain' } });
   },
 };

@@ -1125,7 +1125,7 @@ select { font:inherit; font-size:16px; color:var(--fg); background:var(--surface
       <a class="dl-btn" href="https://yggchat.surge.sh/dl/yggchat-windows-amd64.exe" download>🪟 Windows (exe)</a>
       <a class="dl-btn" href="https://yggchat.surge.sh/dl/yggchat-linux-amd64" download>🐧 Linux (amd64)</a>
       <a class="dl-btn" href="https://yggchat.surge.sh/dl/yggchat-android-arm64" download>⌨️ Termux (arm64)</a>
-      <div class="row-sub" id="dl-ver">最新: v0.6 ・ SHA256SUMS で検証できます</div>
+      <div class="row-sub" id="dl-ver">最新: v0.7 ・ SHA256SUMS で検証できます</div>
     </div>
     <div class="section">
       <div class="section-title">About</div>
@@ -1490,7 +1490,7 @@ function renderMessages(){
       }else if(st === 'failed'){
         html += '<span class="msg-status failed">送信失敗・タップで再送</span>';
       }else if(st === 'stored'){
-        html += '<span class="msg-status queued" title="相手がオフラインのため、暗号化して中継に最大7日間預けました">📮 中継に預け済み</span>';
+        html += '<span class="msg-status queued" title="相手がオンラインになったら自動で再送します">🕓 送信待ち</span>';
       }else if(st === 'queued'){
         html += '<span class="msg-status queued" title="相手がオンラインになると自動で送信">🕓 オンライン待ち</span>';
       }
@@ -1686,7 +1686,7 @@ function openContactInfo(){
   const c = state.contacts[curAddr] || {addr:curAddr, nick:''};
   $('ci-avatar').textContent = avatarText(c, curAddr);
   $('ci-bio').textContent = c.bio || '';
-  $('ci-keystate').textContent = c.pk ? '🔑 公開鍵を確認済み（中継預かりが使えます）' : '公開鍵は未取得（一度オンラインで通信すると取得）';
+  $('ci-keystate').textContent = c.pk ? '🔑 公開鍵を確認済み' : '公開鍵は未取得（一度オンラインで通信すると取得）';
   $('ci-ttl').value = String(c.ttl || 0);
   if(!$('ci-ttl').value) $('ci-ttl').value = '0';
   $('ci-avatar').style.background = hashColor(curAddr);
@@ -1793,7 +1793,7 @@ function openSettings(){
   $('settings-nick').value = state.nick || '';
   $('settings-own-addr').textContent = state.addr;
   $('platform-info').textContent = state.platform === 'web'
-    ? 'PWA版: ノードはこのブラウザ内(WebAssembly)で動作し、鍵と履歴はこの端末にだけ保存されます。中継は暗号化済みの通信を転送するだけです。'
+    ? 'PWA版: ノードはこのブラウザ内(WebAssembly)で動作し、鍵と履歴はこの端末にだけ保存されます。ブラウザは自前の入口ピア(InstaBox)などのYggdrasilピアにwssで直接つながり、Cloudflareなどの第三者中継は使いません。'
     : 'ネイティブ版: ノードはこの端末内で動作しています。';
   $('peers-count').textContent = '接続中 ' + (state.peers||0);
   $('settings-screen').classList.add('active');

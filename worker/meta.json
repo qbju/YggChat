@@ -1,1 +1,1 @@
-{"main_module":"worker.js","compatibility_date":"2026-10-01","bindings":[{"type":"durable_object_namespace","name":"MB","class_name":"Mailbox"}],"migrations":{"new_tag":"v1","new_sqlite_classes":["Mailbox"]}}
+{"main_module":"worker.js","compatibility_date":"2026-10-01","migrations":{"old_tag":"v1","new_tag":"v2","deleted_classes":["Mailbox"]}}

@@ -412,7 +412,7 @@ func (a *App) featureHandlers(mux *http.ServeMux) {
 			http.Error(w, err.Error(), 403)
 			return
 		}
-		go func() { time.Sleep(500 * time.Millisecond); a.helloAll(); a.mbFetch() }()
+		go func() { time.Sleep(500 * time.Millisecond); a.helloAll() }()
 		w.Write([]byte("{}"))
 	})
 	mux.HandleFunc("/api/passcode", func(w http.ResponseWriter, r *http.Request) {

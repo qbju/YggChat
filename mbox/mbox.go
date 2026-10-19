@@ -18,7 +18,6 @@ import (
 	"golang.org/x/crypto/nacl/box"
 )
 
-const Base = "https://yggws.i2p.workers.dev/mb/"
 
 var p25519, _ = new(big.Int).SetString("7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffed", 16)
 
