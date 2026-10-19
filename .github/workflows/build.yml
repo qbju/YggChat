@@ -1,0 +1,64 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      KS_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+      SURGE_LOGIN: ${{ secrets.SURGE_LOGIN }}
+      SURGE_TOKEN: ${{ secrets.SURGE_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: 'platforms;android-34 build-tools;36.0.0'
+
+      - name: Signing key
+        run: |
+          if [ -n "$KS_B64" ]; then
+            echo "$KS_B64" | base64 -d > "$RUNNER_TEMP/yggchat.jks"
+            echo "SIGNED=1" >> "$GITHUB_ENV"
+          else
+            echo "::warning::ANDROID_KEYSTORE_B64 is not set: the APK is signed with a throwaway key and cannot update an installed YggChat."
+          fi
+          echo "YGG_KEYSTORE=$RUNNER_TEMP/yggchat.jks" >> "$GITHUB_ENV"
+
+      - name: Build (wasm, Linux, Windows, Android, APK)
+        env:
+          YGG_KS_PASS: ${{ secrets.ANDROID_KEYSTORE_PASS || 'yggchat' }}
+        run: ./rel.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: yggchat-${{ github.sha }}
+          path: pwa/dl/
+
+      - name: Deploy PWA to yggchat.surge.sh
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push' && env.SURGE_TOKEN != '' && env.SIGNED == '1'
+        run: npx --yes surge ./pwa yggchat.surge.sh
+
+      - name: GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v') && env.SIGNED == '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" pwa/dl/* --title "YggChat $GITHUB_REF_NAME" --generate-notes

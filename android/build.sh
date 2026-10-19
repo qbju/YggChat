@@ -1,6 +1,7 @@
 #!/bin/bash
 set -e
-SDK=$HOME/android/sdk; BT=$SDK/build-tools/36.0.0; JAR=$SDK/platforms/android-34/android.jar
+SDK=${ANDROID_HOME:-$HOME/android/sdk}; BT=$SDK/build-tools/${BUILD_TOOLS:-36.0.0}; JAR=$SDK/platforms/android-34/android.jar
+KS=${YGG_KEYSTORE:-$HOME/android/yggchat.jks}; export KP=${YGG_KS_PASS:-yggchat}
 cd "$(dirname "$0")"; rm -rf out; mkdir -p out/classes out/apk/lib/arm64-v8a
 $BT/aapt2 compile --dir res -o out/res.zip
 $BT/aapt2 link -o out/base.apk -I $JAR --manifest AndroidManifest.xml out/res.zip --java out/gen
@@ -10,6 +11,6 @@ cp out/base.apk out/unsigned.apk
 cp libyggchat.so out/apk/lib/arm64-v8a/
 (cd out && zip -q unsigned.apk classes.dex && cd apk && zip -q -0 ../unsigned.apk lib/arm64-v8a/libyggchat.so)
 $BT/zipalign -f -p 4 out/unsigned.apk out/aligned.apk
-[ -f ~/android/yggchat.jks ] || keytool -genkeypair -keystore ~/android/yggchat.jks -alias ygg -keyalg RSA -keysize 2048 -validity 10000 -storepass yggchat -keypass yggchat -dname "CN=YggChat"
-$BT/apksigner sign --ks ~/android/yggchat.jks --ks-pass pass:yggchat --out out/yggchat.apk out/aligned.apk
+[ -f "$KS" ] || { mkdir -p "$(dirname "$KS")"; keytool -genkeypair -keystore "$KS" -alias ygg -keyalg RSA -keysize 2048 -validity 10000 -storepass "$KP" -keypass "$KP" -dname "CN=YggChat"; }
+$BT/apksigner sign --ks "$KS" --ks-pass env:KP --out out/yggchat.apk out/aligned.apk
 $BT/apksigner verify out/yggchat.apk && ls -la out/yggchat.apk
