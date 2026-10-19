@@ -3,7 +3,7 @@ set -e
 cd ~/jobs/yggchat
 export PATH=$PATH:/usr/local/go/bin
 F="-trimpath -ldflags=-s -ldflags=-w"
-GOOS=js GOARCH=wasm go build -trimpath -ldflags="-s -w" -o pwa/ygg.wasm ./wasm
+GOOS=js GOARCH=wasm go build -buildvcs=false -trimpath -ldflags="-s -w" -o pwa/ygg.wasm ./wasm
 mkdir -p pwa/dl
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o pwa/dl/yggchat-linux-amd64 .
 CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o pwa/dl/yggchat-windows-amd64.exe .
