@@ -1448,7 +1448,7 @@ function renderMessages(){
     if(showDay){
       html += '<div class="day-sep">' + escapeHtml(dayLabel(m.ts)) + '</div>';
     }
-    const av = initials(m.nick || m.from || curAddr);
+    const av = m.out ? (state.avatar || initials(state.nick || state.addr)) : avatarText(Object.assign({}, state.contacts[curAddr], {nick: (state.contacts[curAddr]||{}).nick || m.nick}), m.from || curAddr);
     const avc = hashColor(m.from || curAddr);
     if(m.sys){
       const t = m.sys.startsWith('ttl:') ? ((m.out ? 'あなたが' : '相手が') + '消えるメッセージを「' + ttlLabel(m.sys.slice(4)|0) + '」にしました') : m.sys;
