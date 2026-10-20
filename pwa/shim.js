@@ -412,6 +412,7 @@
       }
       acks.delete(m.id);
       setStatus(m.peer, m.id, 'queued'); // images don't go through the mailbox
+      probeSoon(m.peer);
       return false;
     } finally { chunkAcks.delete(m.id); }
   }
@@ -443,6 +444,20 @@
     if (acceptMsg(src, f.hdr, 'data:' + f.hdr.mime + ';base64,' + btoa(s))) send(src, { t: 'ack', id: w.id });
   }
 
+  // After a miss, greet the peer at 3, 5 and 10 s so the message goes out as
+  // soon as a route exists instead of waiting for the 20 s queue loop.
+  const probing = new Set();
+  async function probeSoon(peer) {
+    if (probing.has(peer)) return;
+    probing.add(peer);
+    try {
+      for (const d of [3000, 5000, 10000]) {
+        await new Promise(r => setTimeout(r, d));
+        if (!queuedFor(peer).length) return;
+        hello(peer);
+      }
+    } finally { probing.delete(peer); }
+  }
   async function deliver(m, tries = 12) {
     if (inflight.has(m.id)) return false;
     inflight.add(m.id);
@@ -459,6 +474,7 @@
       acks.delete(m.id);
       setStatus(m.peer, m.id, m.nostr ? 'stored' : 'queued');
       if (!m.nostr) nostrPark(m);
+      probeSoon(m.peer);
       return false;
     } finally { inflight.delete(m.id); }
   }

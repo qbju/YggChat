@@ -245,6 +245,7 @@ type App struct {
 	acks     map[string]chan struct{}
 	flMu     sync.Mutex
 	inflight map[string]bool
+	probing  map[string]bool // peers with a quick re-probe running (flMu)
 	fsOnce   sync.Once
 	fs       *fileState
 	seenMu   sync.Mutex
@@ -594,7 +595,11 @@ func (a *App) deliverN(m Message, tries int) bool {
 		a.setStatus(m.Peer, m.ID, "sending")
 	}
 	if m.Img != "" {
-		return a.deliverImg(m, tries)
+		ok := a.deliverImg(m, tries)
+		if !ok {
+			go a.probeSoon(m.Peer)
+		}
+		return ok
 	}
 	b, _ := json.Marshal(a.msgWire(m))
 	ch := make(chan struct{})
@@ -622,7 +627,32 @@ func (a *App) deliverN(m Message, tries int) bool {
 		a.setStatus(m.Peer, m.ID, "queued")
 		go a.nostrPark(m)
 	}
+	go a.probeSoon(m.Peer)
 	return false
+}
+
+// probeSoon greets a peer we just failed to reach a few times in quick
+// succession (3, 5, 10 s), so a message gets through as soon as the route
+// is found instead of waiting for the 20 s queue loop. Its hiack flushes.
+func (a *App) probeSoon(peer string) {
+	a.flMu.Lock()
+	if a.probing == nil {
+		a.probing = map[string]bool{}
+	}
+	if a.probing[peer] {
+		a.flMu.Unlock()
+		return
+	}
+	a.probing[peer] = true
+	a.flMu.Unlock()
+	defer func() { a.flMu.Lock(); delete(a.probing, peer); a.flMu.Unlock() }()
+	for _, d := range []time.Duration{3, 5, 10} {
+		time.Sleep(d * time.Second)
+		if len(a.queued(peer)) == 0 {
+			return
+		}
+		a.hello(peer)
+	}
 }
 
 // nostrPark parks a message the peer did not ack on Nostr relays (if enabled).
