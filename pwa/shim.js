@@ -637,6 +637,17 @@
         saveOuter();
         return ok({ peers: peerList(), recommended: RECOMMENDED, up: yggPeers() });
       }
+      case 'resolve': {
+        const name = String(body.Name || '').trim().toLowerCase().replace(/\.$/, '');
+        if (!/^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9-]{2,63}$/.test(name) || name.length > 253) return bad('ドメイン名ではありません');
+        for (const s of ['https://cloudflare-dns.com/dns-query', 'https://dns.google/resolve']) {
+          let j; try { const r = await fetch(s + '?type=AAAA&name=' + encodeURIComponent(name), { headers: { accept: 'application/dns-json' }, referrerPolicy: 'no-referrer', credentials: 'omit' }); j = await r.json(); } catch { continue; }
+          const a = (j.Answer || []).find(x => x.type === 28 && /^[23][0-9a-f]{2}:/i.test(x.data || ''));
+          if (a && norm(a.data)) return ok({ addr: norm(a.data), name });
+          return bad(name + ' にはYggdrasilアドレス（200::/7）のAAAAレコードがありません', 404);
+        }
+        return bad('DNSに問い合わせできませんでした', 502);
+      }
       case 'nostr': {
         const was = !!st.nostrOn;
         if (body.On != null) st.nostrOn = !!body.On;

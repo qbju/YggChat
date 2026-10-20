@@ -66,6 +66,9 @@ Wire: {t:"fh", id, nick, text?, ts, ttl?, mime, size, n, sha} then {t:"fc", id, 
 ## POST /api/nostr: Legacy (v0.13.7)
 - {Legacy: bool} toggles store.nostr_legacy (default off): also publish a pre-v0.13 box (static tag, no back-dating) and fetch the static tag. Response gains "legacy". Removed in v0.20.
 
+## POST /api/resolve (v0.13.8)
+- {Name} -> {addr, name}: first 200::/7 AAAA of a domain via DoH (cloudflare, then google) over netDial (SOCKS-aware); system resolver fallback only when SOCKS is off. 404 when no Yggdrasil AAAA.
+
 ## POST /api/site (v0.13.6, native, beta)
 - {} -> {on, html, url, listening, error}; {On?, HTML?} saves data/site.json + data/site.html (≤256KB) and opens/closes TCP 80 on the Yggdrasil address (8080 + port map in Android VPN mode). Only GET/HEAD / and /index.html.
 - POST /api/site/view {Addr} -> {addr, html}: fetches http://[addr]/ through our own node (≤256KB, no redirects). The UI shows it in a sandboxed iframe (no scripts) with a restrictive CSP.

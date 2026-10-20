@@ -1310,6 +1310,7 @@ func main() {
 	a.groupHandlers(mux)
 	a.socksHandlers(mux)
 	a.siteHandlers(mux)
+	a.resolveHandlers(mux)
 	a.systemHandlers(mux, *dataDir)
 	a.vpnHandlers(mux, *dataDir)
 	a.fingerHandlers(mux)

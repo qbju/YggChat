@@ -1022,7 +1022,7 @@ img.emoji { height:1.2em; width:1.2em; margin:0 .05em 0 .1em; vertical-align:-0.
     <div class="sheet-content">
       <div style="font-weight:600; font-size:15px;">新しいチャット</div>
       <div class="section">
-        <input id="newchat-addr" type="text" placeholder="Yggdrasil アドレス (例: 200:...)" autocomplete="off" spellcheck="false">
+        <input id="newchat-addr" type="text" placeholder="Yggdrasilアドレス（200:…）かドメイン名" autocomplete="off" spellcheck="false">
         <div style="color:var(--error); font-size:12px; min-height:16px;" id="newchat-err"></div>
         <input id="newchat-nick" type="text" placeholder="名前（任意）" autocomplete="off">
         <div style="display:flex; gap:8px; flex-wrap:wrap;">
@@ -1291,7 +1291,7 @@ img.emoji { height:1.2em; width:1.2em; margin:0 .05em 0 .1em; vertical-align:-0.
       <a class="dl-btn" href="https://yggchat.surge.sh/dl/yggchat-windows-amd64.exe" download>🪟 Windows (exe)</a>
       <a class="dl-btn" href="https://yggchat.surge.sh/dl/yggchat-linux-amd64" download>🐧 Linux (amd64)</a>
       <a class="dl-btn" href="https://yggchat.surge.sh/dl/yggchat-android-arm64" download>⌨️ Termux (arm64)</a>
-      <div class="row-sub" id="dl-ver">最新: v0.13.7 ・ SHA256SUMS で検証できます</div>
+      <div class="row-sub" id="dl-ver">最新: v0.13.8 ・ SHA256SUMS で検証できます</div>
     </div>
     <div class="section">
       <div class="section-title">About</div>
@@ -1809,12 +1809,23 @@ function isYggAddr(a){
 }
 
 $('start-chat-btn').addEventListener('click', async () => {
-  const addr = $('newchat-addr').value.trim();
-  const nick = $('newchat-nick').value.trim();
+  let addr = $('newchat-addr').value.trim().replace(/^\[|\]$/g, '');
+  let nick = $('newchat-nick').value.trim();
   $('newchat-err').textContent = '';
   if(!isYggAddr(addr)){
-    $('newchat-err').textContent = '有効なYggdrasilアドレスではありません';
-    return;
+    // A domain whose AAAA record is a Yggdrasil address (v0.13.8).
+    if(!/^[a-z0-9.-]+\.[a-z0-9-]{2,}\.?$/i.test(addr)){
+      $('newchat-err').textContent = 'Yggdrasilアドレスかドメイン名を入れてね';
+      return;
+    }
+    $('newchat-err').textContent = addr + ' を調べています…';
+    try{
+      const r = await api('/api/resolve', {Name: addr});
+      if(!nick) nick = r.name;
+      addr = r.addr;
+      $('newchat-err').textContent = '';
+      toast(r.name + ' → ' + addr);
+    }catch(e){ $('newchat-err').textContent = e.message; return; }
   }
   try{
     const c = await api('/api/contact', {Addr: addr, Nick: nick});
