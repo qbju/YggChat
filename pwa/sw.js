@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 h6e and YggChat contributors
-const CACHE = 'yggchat-pwa-v30';
+const CACHE = 'yggchat-pwa-v31';
 const INDEX = './index.html';
 
 self.addEventListener('install', e => {
-  e.waitUntil(caches.open(CACHE).then(c => c.addAll([INDEX, './manifest.webmanifest', './wasm_exec.js', './shim.js', './qrcode.js', './twemoji.min.js', './ygg.wasm', './THIRD_PARTY_NOTICES.txt', './LICENSE.txt'])).then(() => self.skipWaiting()));
+  e.waitUntil(caches.open(CACHE).then(c => c.addAll([INDEX, './manifest.webmanifest', './wasm_exec.js', './shim.js', './qrcode.js', './twemoji.min.js', './ygg.wasm', './THIRD_PARTY_NOTICES.txt', './LICENSE.txt'].map(u => new Request(u, { cache: 'reload' })))).then(() => self.skipWaiting()));
 });
 
 self.addEventListener('activate', e => {
@@ -25,7 +25,7 @@ self.addEventListener('fetch', e => {
     return;
   }
   e.respondWith(
-    caches.match(e.request, { ignoreSearch: true }).then(hit =>
+    caches.open(CACHE).then(c => c.match(e.request, { ignoreSearch: true })).then(hit =>
       hit ||
       fetch(e.request).then(res => {
         const copy = res.clone();

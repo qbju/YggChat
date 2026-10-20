@@ -2579,7 +2579,16 @@ async function init(){
   }
   connectEvents();
   if('serviceWorker' in navigator){
-    navigator.serviceWorker.register('sw.js').catch(()=>{});
+    // After an update the page can be new while shim.js/ygg.wasm still come
+    // from the old worker's cache; reload once the new worker takes over.
+    const hadCtl = !!navigator.serviceWorker.controller;
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      if(!hadCtl || sessionStorage.getItem('yc_swreload')) return;
+      sessionStorage.setItem('yc_swreload', '1');
+      location.reload();
+    });
+    setTimeout(() => sessionStorage.removeItem('yc_swreload'), 30000);
+    navigator.serviceWorker.register('sw.js', {updateViaCache: 'none'}).then(r => r.update()).catch(()=>{});
   }
   window.addEventListener('resize', () => {
     checkNearBottom();
