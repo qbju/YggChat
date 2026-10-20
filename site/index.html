@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>YggChat — NAT越え不要のP2Pチャット</title>
+<meta name="description" content="サーバーなし・NAT越え不要。Yggdrasilを内蔵した、端末どうしで直接つながるエンドツーエンド暗号化チャット。Android・Windows・Linux・ブラウザ。">
+<meta name="theme-color" content="#0b0f0c">
+<meta property="og:title" content="YggChat">
+<meta property="og:description" content="サーバーなし・NAT越え不要のP2Pチャット（Yggdrasil内蔵）">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://yggchat.pages.dev/">
+<meta property="og:image" content="https://yggchat.pages.dev/icon.png">
+<meta name="twitter:card" content="summary">
+<link rel="icon" href="icon.png">
+<style>
+:root{--bg:#0b0f0c;--bg2:#111712;--card:#151c17;--line:#243027;--fg:#e8efe9;--dim:#9aa89d;--ac:#2ecc71;--ac2:#1a9b4f;--warn:#f5c451}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.75 system-ui,-apple-system,"Hiragino Sans","Noto Sans JP","Yu Gothic UI",sans-serif;-webkit-font-smoothing:antialiased}
+a{color:var(--ac);text-decoration:none}
+a:hover{text-decoration:underline}
+code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.88em;background:#0f1511;border:1px solid var(--line);border-radius:6px;padding:.1em .4em}
+.wrap{max-width:1080px;margin:0 auto;padding:0 22px}
+nav{position:sticky;top:0;z-index:10;background:rgba(11,15,12,.82);backdrop-filter:blur(10px);border-bottom:1px solid var(--line)}
+nav .wrap{display:flex;align-items:center;gap:18px;height:58px}
+.brand{display:flex;align-items:center;gap:10px;font-weight:800;color:var(--fg);font-size:18px;letter-spacing:.01em}
+.brand img{width:30px;height:30px;border-radius:8px}
+nav .links{margin-left:auto;display:flex;gap:18px;font-size:14px}
+nav .links a{color:var(--dim)}
+nav .links a:hover{color:var(--fg);text-decoration:none}
+@media(max-width:640px){nav .links a.opt{display:none}}
+.hero{position:relative;overflow:hidden;padding:84px 0 70px}
+.hero:before{content:"";position:absolute;inset:-40% -10% auto auto;width:720px;height:720px;background:radial-gradient(closest-side,rgba(46,204,113,.18),transparent);pointer-events:none}
+.hero .wrap{display:grid;grid-template-columns:1.15fr .85fr;gap:48px;align-items:center}
+@media(max-width:860px){.hero .wrap{grid-template-columns:1fr}.hero{padding:56px 0 48px}}
+.badge{display:inline-flex;gap:8px;align-items:center;font-size:13px;color:var(--ac);border:1px solid rgba(46,204,113,.35);background:rgba(46,204,113,.08);border-radius:999px;padding:4px 12px}
+h1{font-size:clamp(34px,6vw,56px);line-height:1.15;margin:18px 0 16px;letter-spacing:-.01em}
+.nw{white-space:nowrap;display:inline-block}
+h1 em{font-style:normal;color:var(--ac)}
+.lead{color:var(--dim);font-size:18px;max-width:34em;margin:0 0 28px}
+.cta{display:flex;flex-wrap:wrap;gap:12px}
+.btn{display:inline-flex;align-items:center;gap:8px;padding:13px 22px;border-radius:12px;font-weight:700;font-size:15px;border:1px solid var(--line);color:var(--fg);background:var(--card)}
+.btn:hover{text-decoration:none;border-color:#3a4a3e}
+.btn.pri{background:var(--ac);color:#08110b;border-color:var(--ac)}
+.btn.pri:hover{background:#3ddc80}
+.small{font-size:13px;color:var(--dim)}
+.phone{justify-self:center;width:100%;max-width:330px;background:#121212;border:1px solid var(--line);border-radius:30px;padding:16px 14px 18px;box-shadow:0 30px 80px rgba(0,0,0,.5),0 0 0 6px #0e130f}
+.phone .top{display:flex;align-items:center;gap:10px;padding:4px 6px 12px;border-bottom:1px solid #2c2c2e;margin-bottom:12px}
+.av{width:34px;height:34px;border-radius:50%;background:#1d3b29;display:grid;place-items:center;font-size:17px}
+.phone .nm{font-weight:700;font-size:14px;line-height:1.2}
+.phone .ad{font:11px ui-monospace,monospace;color:#7d8a80}
+.msg{max-width:80%;padding:8px 12px;border-radius:16px;font-size:13.5px;line-height:1.5;margin:6px 0;width:fit-content}
+.in{background:#1c1c1e;border-bottom-left-radius:4px}
+.out{background:var(--ac);color:#111;margin-left:auto;border-bottom-right-radius:4px}
+.meta{font-size:10.5px;color:#7d8a80;text-align:right;margin:-2px 2px 6px}
+.compose{margin-top:12px;display:flex;gap:8px}
+.compose span{flex:1;background:#1c1c1e;border-radius:999px;padding:8px 14px;font-size:12.5px;color:#7d8a80}
+.compose b{width:34px;height:34px;border-radius:50%;background:var(--ac);display:grid;place-items:center;color:#111}
+section{padding:72px 0;border-top:1px solid var(--line)}
+section.alt{background:var(--bg2)}
+h2{font-size:clamp(26px,4vw,34px);margin:0 0 8px;letter-spacing:-.01em}
+.sub{color:var(--dim);margin:0 0 36px;max-width:42em}
+.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
+@media(max-width:860px){.grid{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:560px){.grid{grid-template-columns:1fr}}
+.card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:22px}
+.card .ic{font-size:26px;line-height:1}
+.card h3{margin:12px 0 6px;font-size:17px}
+.card p{margin:0;color:var(--dim);font-size:14.5px}
+.steps{counter-reset:s;display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
+@media(max-width:860px){.steps{grid-template-columns:1fr}}
+.step{position:relative;padding:22px 22px 22px 70px;background:var(--card);border:1px solid var(--line);border-radius:16px}
+.step:before{counter-increment:s;content:counter(s);position:absolute;left:20px;top:20px;width:34px;height:34px;border-radius:50%;background:rgba(46,204,113,.14);color:var(--ac);font-weight:800;display:grid;place-items:center}
+.step h3{margin:0 0 4px;font-size:16px}
+.step p{margin:0;color:var(--dim);font-size:14.5px}
+.dl{display:grid;grid-template-columns:repeat(2,1fr);gap:16px}
+@media(max-width:700px){.dl{grid-template-columns:1fr}}
+.dlc{display:flex;gap:16px;align-items:flex-start;background:var(--card);border:1px solid var(--line);border-radius:16px;padding:22px}
+.dlc .os{font-size:30px;line-height:1;width:40px;text-align:center}
+.dlc h3{margin:0;font-size:17px}
+.dlc p{margin:4px 0 12px;color:var(--dim);font-size:14px}
+.dlc .btn{padding:9px 16px;font-size:14px}
+.note{margin-top:22px;padding:16px 18px;border-radius:14px;border:1px solid rgba(245,196,81,.35);background:rgba(245,196,81,.07);font-size:14.5px;color:#e9dcb4}
+.note b{color:var(--warn)}
+.tech{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+@media(max-width:760px){.tech{grid-template-columns:1fr}}
+.tech ul{margin:0;padding-left:1.2em;color:var(--dim);font-size:14.5px}
+.tech li{margin:6px 0}
+.tech li b{color:var(--fg);font-weight:600}
+.faq details{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:4px 20px;margin:10px 0}
+.faq summary{cursor:pointer;font-weight:700;padding:14px 0;list-style:none}
+.faq summary::-webkit-details-marker{display:none}
+.faq summary:after{content:"+";float:right;color:var(--ac);font-weight:400}
+.faq details[open] summary:after{content:"−"}
+.faq details p{margin:0 0 16px;color:var(--dim);font-size:14.5px}
+footer{border-top:1px solid var(--line);padding:36px 0 48px;color:var(--dim);font-size:13.5px}
+footer .wrap{display:flex;flex-wrap:wrap;gap:12px 28px;align-items:center}
+footer .r{margin-left:auto;display:flex;gap:18px;flex-wrap:wrap}
+</style>
+</head>
+<body>
+<nav><div class="wrap">
+  <a class="brand" href="#"><img src="icon.png" alt="">YggChat</a>
+  <div class="links">
+    <a class="opt" href="#features">特徴</a>
+    <a class="opt" href="#how">仕組み</a>
+    <a href="#download">ダウンロード</a>
+    <a href="https://github.com/qbju/YggChat">GitHub</a>
+  </div>
+</div></nav>
+
+<header class="hero"><div class="wrap">
+  <div>
+    <span class="badge">🌲 最新 v0.19.0 · ベータ</span>
+    <h1><span class="nw">サーバーなしで、</span><br><span class="nw"><em>端末どうし</em>が</span><span class="nw">直接話す。</span></h1>
+    <p class="lead">YggChatは、メッシュネットワーク<a href="https://yggdrasil-network.github.io/">Yggdrasil</a>を内蔵したP2Pチャットです。ポート開放もNAT越えの設定もいりません。アカウントも電話番号もなく、アドレスはあなたの公開鍵そのものです。</p>
+    <div class="cta">
+      <a class="btn pri" href="#download">⬇ ダウンロード</a>
+      <a class="btn" href="https://yggchat.surge.sh/">ブラウザで使う（インストール不要）</a>
+    </div>
+    <p class="small" style="margin-top:14px">Android · Windows · Linux · PWA ／ GPL-3.0 のオープンソース</p>
+  </div>
+  <div class="phone" aria-hidden="true">
+    <div class="top"><div class="av">🦊</div><div><div class="nm">みお</div><div class="ad">200:7f3a:91c2:…:4e1d</div></div></div>
+    <div class="msg in">これってどこのサーバー経由？</div>
+    <div class="msg out">チャットのサーバーはないよ。Yggdrasilで端末どうしつながってる</div>
+    <div class="meta">既読 ✓✓</div>
+    <div class="msg in">ポート開けてないのに？</div>
+    <div class="msg out">開けなくていいの。アドレス＝鍵だから、なりすましもできない 🔐</div>
+    <div class="meta">既読 ✓✓</div>
+    <div class="compose"><span>メッセージ</span><b>➤</b></div>
+  </div>
+</div></header>
+
+<section id="features"><div class="wrap">
+  <h2>特徴</h2>
+  <p class="sub">中継サーバーを置かず、それでも普段づかいできるチャットを目指しています。</p>
+  <div class="grid">
+    <div class="card"><div class="ic">🛰️</div><h3>NAT越え不要</h3><p>Yggdrasilノードをアプリに内蔵。公開ピアにつなぐだけで、家庭のルーターやモバイル回線の内側どうしでも届きます。</p></div>
+    <div class="card"><div class="ic">🔐</div><h3>エンドツーエンド暗号化</h3><p>アドレスは公開鍵から導出。QRや招待リンクでアドレスを確かめれば、相手の鍵も確かめたことになります。</p></div>
+    <div class="card"><div class="ic">🙈</div><h3>アカウントなし</h3><p>メール・電話番号・登録は不要。知らない人からはメッセージリクエストとして届き、承認するまで名前もアイコンも見せません。</p></div>
+    <div class="card"><div class="ic">👥</div><h3>グループ最大1024人</h3><p>サーバーなしのグループチャット。副管理者、招待リンク、参加承認、参加パスワード、消えるメッセージに対応。</p></div>
+    <div class="card"><div class="ic">📦</div><h3>オフラインでも置き配</h3><p>相手がいないときは端末に保留。オプションで相手の鍵で封をした文章を公開Nostrリレーに最大7日預けられます。</p></div>
+    <div class="card"><div class="ic">🧅</div><h3>Tor / SOCKS5</h3><p>ピアやリレーへの接続をOrbotやTor経由に。自分のIPアドレスを公開ピアに見せずに使えます（アプリ版）。</p></div>
+    <div class="card"><div class="ic">📶</div><h3>LANチャット</h3><p>インターネットがなくても、同じWi-Fiやテザリング内のYggChatと直接つながります（アプリ版・既定オフ）。</p></div>
+    <div class="card"><div class="ic">📱</div><h3>端末のYggdrasilにも</h3><p>Android版はVPNモードで端末全体のYggdrasilになれます。ブラウザやSSHからも200::/7にアクセス可能。</p></div>
+    <div class="card"><div class="ic">🔁</div><h3>端末移行</h3><p>QRを読むだけで、鍵と履歴をYggdrasil経由で新しい端末へ直接転送。PWAとアプリの間でも移せます。</p></div>
+  </div>
+</div></section>
+
+<section id="how" class="alt"><div class="wrap">
+  <h2>はじめかた</h2>
+  <p class="sub">登録はありません。起動した瞬間に、あなたのアドレスができています。</p>
+  <div class="steps">
+    <div class="step"><h3>入れて開く</h3><p>アプリを起動するか、ブラウザ版を開きます。鍵が生成され、公開ピアに自動でつながります。</p></div>
+    <div class="step"><h3>アドレスを交換</h3><p>自分のQRや追加リンクを相手に見せます。ドメインのAAAAレコードに登録すれば、ドメイン名でも追加できます。</p></div>
+    <div class="step"><h3>話す</h3><p>文章・写真・グループ。メッセージは端末から端末へ直接届きます。</p></div>
+  </div>
+</div></section>
+
+<section id="download"><div class="wrap">
+  <h2>ダウンロード</h2>
+  <p class="sub">最新版はv0.19.0。ファイルはGitHub Releasesから配信しています。</p>
+  <div class="dl">
+    <div class="dlc"><div class="os">🤖</div><div><h3>Android（APK）</h3><p>おすすめ。QR読み取り、VPNモード、LANチャットなど全機能。</p><a class="btn pri" href="https://github.com/qbju/YggChat/releases/latest/download/yggchat.apk">yggchat.apk</a></div></div>
+    <div class="dlc"><div class="os">🪟</div><div><h3>Windows</h3><p>ダブルクリックでアプリのウィンドウ（WebView2）が開きます。</p><a class="btn" href="https://github.com/qbju/YggChat/releases/latest/download/yggchat-windows-amd64.exe">windows-amd64.exe</a></div></div>
+    <div class="dlc"><div class="os">🐧</div><div><h3>Linux</h3><p><code>./yggchat-linux-amd64</code> で起動。<code>-cli</code> で端末チャットも。</p><a class="btn" href="https://github.com/qbju/YggChat/releases/latest/download/yggchat-linux-amd64">linux-amd64</a></div></div>
+    <div class="dlc"><div class="os">🌐</div><div><h3>ブラウザ版（PWA）</h3><p>インストール不要。開いている間だけ動作し、LAN・Tor・プロフィールサイトなど一部機能は使えません。</p><a class="btn" href="https://yggchat.surge.sh/">yggchat.surge.sh</a></div></div>
+  </div>
+  <p class="small" style="margin-top:16px">Termux用 <a href="https://github.com/qbju/YggChat/releases/latest/download/yggchat-android-arm64">android-arm64</a> ／ <a href="https://github.com/qbju/YggChat/releases/latest/download/SHA256SUMS">SHA256SUMS</a> ／ <a href="https://github.com/qbju/YggChat/releases">すべてのリリース</a>。バイナリは未署名のため、WindowsではSmartScreenの警告が出ます。</p>
+  <div class="note"><b>ベータ版です。</b>更新が多く、互換性のない変更もしばらく頻繁に入ります。できるだけ最新版を使い、相手にも更新してもらってください。</div>
+</div></section>
+
+<section class="alt"><div class="wrap">
+  <h2>仕組みと、正直な限界</h2>
+  <p class="sub">何が守られて、何が見えるのか。</p>
+  <div class="tech">
+    <div class="card"><h3 style="margin-top:0">守られること</h3><ul>
+      <li><b>送信者の確認</b>：Yggdrasilが暗号的に保証する送信元アドレスで判定し、自己申告は使いません。</li>
+      <li><b>中継サーバーなし</b>：YggChat側のサーバーはありません。ピアが見るのは暗号化済みのリンク通信だけです。</li>
+      <li><b>端末内の保護</b>：UIはループバックのみ＋鍵付き。パスコードを設定すると履歴をAES-256-GCMで暗号化します。</li>
+      <li><b>スパム対策</b>：投稿に軽いプルーフ・オブ・ワーク（1対1は3ビット、リクエスト・参加は8ビット）。</li>
+    </ul></div>
+    <div class="card"><h3 style="margin-top:0">見えてしまうこと</h3><ul>
+      <li>接続先の公開ピアには、あなたのIPアドレスと通信量・時刻が見えます（Torで隠せます）。</li>
+      <li>グループのメンバーには、グループ名とメンバーのアドレスが共有されます。</li>
+      <li>置き配を使うと、リレーには預ける側と取りに来る側のIPと、まとめて聞いたタグの組み合わせが見えます。</li>
+      <li>ブラウザ版はブラウザ対応のwssピア（既定 <code>ygg.being.pet</code>）経由でつながります。</li>
+    </ul></div>
+  </div>
+</div></section>
+
+<section class="faq"><div class="wrap">
+  <h2>よくある質問</h2>
+  <details><summary>無料ですか？</summary><p>無料です。GPL-3.0のオープンソースで、ソースは<a href="https://github.com/qbju/YggChat">GitHub</a>にあります。</p></details>
+  <details><summary>Yggdrasilって何？</summary><p>公開鍵からIPv6アドレス（200::/7）を作り、エンドツーエンドで暗号化してルーティングする実験的なメッシュネットワークです。YggChatはそのノードを内蔵しているので、別途インストールする必要はありません。</p></details>
+  <details><summary>相手がオフラインのときは？</summary><p>送信側の端末に「送信待ち」として残り、双方がオンラインになったときに自動で届きます。置き配（Nostr）をオンにしていれば、相手の鍵で封をして公開リレーに最大7日預けます。</p></details>
+  <details><summary>機種変更したら？</summary><p>設定の「端末移行」で、新しい端末のQRを古い端末で読むだけです。片方しか手元にない場合は、パスフレーズで暗号化したバックアップファイルも使えます。</p></details>
+  <details><summary>自分でピアを立てられますか？</summary><p>はい。アプリは任意のYggdrasilピアに接続できます。ブラウザ版向けには、Listenに <code>ws://[::]:PORT?origin=https://yggchat.surge.sh</code> を書いてwssで公開してください。</p></details>
+</div></section>
+
+<footer><div class="wrap">
+  <span>🌲 YggChat · GPL-3.0</span>
+  <div class="r">
+    <a href="https://github.com/qbju/YggChat">GitHub</a>
+    <a href="https://github.com/qbju/YggChat/releases">Releases</a>
+    <a href="https://github.com/qbju/YggChat#readme">README</a>
+    <a href="https://yggchat.surge.sh/">ブラウザ版</a>
+  </div>
+</div></footer>
+</body>
+</html>
