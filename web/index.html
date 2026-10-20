@@ -981,7 +981,7 @@ img.emoji { height:1.2em; width:1.2em; margin:0 .05em 0 .1em; vertical-align:-0.
     <div id="messages"></div>
     <div class="new-msg-pill" id="new-msg-pill">↓ 新着</div>
     <div class="req-bar" id="req-bar" style="display:none;">
-      <div style="font-size:13px;">知らないアドレスからのメッセージリクエストです。承認するとあなたの名前・自己紹介・アイコンが相手に共有され、返信できるようになります。</div>
+      <div style="font-size:13px;" id="req-text">知らないアドレスからのメッセージリクエストです。承認するとあなたの名前・自己紹介・アイコンが相手に共有され、返信できるようになります。</div>
       <div class="rb-btns">
         <button id="req-accept" class="btn-accent">承認</button>
         <button id="req-block" class="btn-danger">ブロック</button>
@@ -1015,6 +1015,7 @@ img.emoji { height:1.2em; width:1.2em; margin:0 .05em 0 .1em; vertical-align:-0.
           <button id="paste-btn">クリップボードから貼り付け</button>
           <button id="start-chat-btn" style="background:var(--accent); color:#111; border:none;">チャットを開始</button>
         </div>
+        <button id="new-group-btn" style="margin-top:6px;">👥 グループを作る（ベータ）</button>
       </div>
     </div>
   </div>
@@ -1053,6 +1054,46 @@ img.emoji { height:1.2em; width:1.2em; margin:0 .05em 0 .1em; vertical-align:-0.
       <button id="ci-delete" style="color:var(--error);">会話を削除</button>
       <button id="ci-block" style="color:var(--error);">ブロック</button>
     </div>
+  </div>
+</div>
+
+<div class="screen" id="group-info-screen">
+  <div class="header">
+    <button class="icon-btn" id="gi-back">←</button>
+    <div class="title">グループ</div>
+  </div>
+  <div style="flex:1; overflow-y:auto; padding:16px; display:flex; flex-direction:column; gap:14px; align-items:center; padding-bottom:calc(16px + env(safe-area-inset-bottom));">
+    <div class="avatar large" style="background:var(--accent); border:none; color:#111;">👥</div>
+    <div style="text-align:center;">
+      <div id="gi-name" style="font-weight:600; font-size:18px;"></div>
+      <div id="gi-count" class="row-sub" style="margin-top:4px;"></div>
+    </div>
+    <div class="section" style="width:100%; max-width:420px;">
+      <div class="section-title">メンバー</div>
+      <div id="gi-members"></div>
+      <div class="row-sub">サーバーはなく、メッセージはメンバー1人ずつに直接届けます（オフラインの人にはオンラインになったときに）。写真・編集・消えるメッセージはまだ1対1だけです。</div>
+    </div>
+    <div style="display:flex; gap:8px; flex-wrap:wrap; justify-content:center;">
+      <button id="gi-add">メンバーを追加</button>
+      <button id="gi-rename">名前を変更</button>
+      <button id="gi-leave" style="color:var(--error);">退出</button>
+      <button id="gi-delete" style="color:var(--error);">会話を削除</button>
+    </div>
+  </div>
+</div>
+
+<div class="screen" id="group-pick-screen">
+  <div class="header">
+    <button class="icon-btn" id="gp-back">←</button>
+    <div class="title" id="gp-title">グループを作る</div>
+  </div>
+  <div style="flex:1; overflow-y:auto; padding:16px; display:flex; flex-direction:column; gap:12px; padding-bottom:calc(16px + env(safe-area-inset-bottom));">
+    <input id="gp-name" type="text" placeholder="グループ名" maxlength="32" autocomplete="off">
+    <div class="section-title">連絡先から選ぶ</div>
+    <div id="gp-list"></div>
+    <input id="gp-addr" type="text" placeholder="アドレスで追加（任意・カンマ区切り）" autocomplete="off" spellcheck="false">
+    <div class="row-sub">メンバーは最大20人。メンバー全員に、グループ名とメンバーのアドレスが共有されます。</div>
+    <button id="gp-ok" style="background:var(--accent); color:#111; border:none;">作成</button>
   </div>
 </div>
 
@@ -1176,7 +1217,7 @@ img.emoji { height:1.2em; width:1.2em; margin:0 .05em 0 .1em; vertical-align:-0.
     </div>
     <div class="section">
       <div class="section-title">置き配（Nostr）<span style="font-size:11px;color:#c0392b;margin-left:6px;">非推奨・実験的</span></div>
-      <div class="row-sub">相手がオフラインで届かなかった文章を、公開Nostrリレーに暗号化して最大7日預けます。中身と送信者は相手しか読めませんが、リレーには宛先タグ・時刻・IPアドレスが見え、保管も保証されません。写真は対象外。</div>
+      <div class="row-sub">相手がオフラインで届かなかった文章を、公開Nostrリレーに暗号化して最大7日預けます。中身と送信者は相手しか読めませんが、リレーにはIPアドレスと毎日変わる宛先タグが見え、保管も保証されません。写真は対象外。</div>
       <div class="toggle">
         <div class="toggle-label">Nostrリレーで置き配する</div>
         <div class="switch" id="nostr-switch"><div class="switch-handle"></div></div>
@@ -1187,6 +1228,18 @@ img.emoji { height:1.2em; width:1.2em; margin:0 .05em 0 .1em; vertical-align:-0.
         <button id="nostr-reset">既定に戻す</button>
       </div>
     </div>
+    <div class="section" id="socks-box" style="display:none;">
+      <div class="section-title">Tor / SOCKS5<span style="font-size:11px;color:#c0392b;margin-left:6px;">ベータ</span></div>
+      <div class="row-sub">YggChatのインターネットへの接続（Yggdrasilのピア・Nostrリレー・公開ピア一覧）をSOCKS5プロキシ経由にします。Torなら公開ピアやリレーに自宅のIPアドレスが見えなくなります。Androidは<b>Orbot</b>（127.0.0.1:9050）、PCはTor（9050）かTor Browser（9150）を先に起動してください。プロキシが止まっているときは直接つながらず、接続中0になります。tcp://・tls://のピアだけ使えます（quic・wsは使われません）。LANチャットは対象外です。</div>
+      <div class="toggle">
+        <div class="toggle-label">SOCKS5経由で接続する</div>
+        <div class="switch" id="socks-switch"><div class="switch-handle"></div></div>
+      </div>
+      <div class="row"><div class="row-main"><div class="row-title">プロキシ</div><div class="row-sub" id="socks-addr" style="font-family:ui-monospace,monospace;font-size:11px;"></div></div></div>
+      <div class="row-btns">
+        <button id="socks-edit">アドレスを変更</button>
+      </div>
+    </div>
     <div class="section">
       <div class="section-title">ダウンロード</div>
       <div class="row-sub">ネイティブ版はtls・tcp・quicのピアにも直接つながり、バックグラウンドでも動きます。</div>
@@ -1194,7 +1247,7 @@ img.emoji { height:1.2em; width:1.2em; margin:0 .05em 0 .1em; vertical-align:-0.
       <a class="dl-btn" href="https://yggchat.surge.sh/dl/yggchat-windows-amd64.exe" download>🪟 Windows (exe)</a>
       <a class="dl-btn" href="https://yggchat.surge.sh/dl/yggchat-linux-amd64" download>🐧 Linux (amd64)</a>
       <a class="dl-btn" href="https://yggchat.surge.sh/dl/yggchat-android-arm64" download>⌨️ Termux (arm64)</a>
-      <div class="row-sub" id="dl-ver">最新: v0.13.0 ・ SHA256SUMS で検証できます</div>
+      <div class="row-sub" id="dl-ver">最新: v0.13.5 ・ SHA256SUMS で検証できます</div>
     </div>
     <div class="section">
       <div class="section-title">About</div>
@@ -1336,6 +1389,11 @@ function initials(s){
   return p.slice(0,2).toUpperCase();
 }
 
+function senderName(m){
+  const c = state.contacts[m.from];
+  return (c && c.nick) || m.nick || addrShort(m.from || '');
+}
+function isGroup(addr){ return typeof addr === 'string' && addr.startsWith('g:'); }
 function avatarText(c, addr){
   return (c && c.avatar) ? c.avatar : initials((c && c.nick) || addr || '');
 }
@@ -1455,12 +1513,12 @@ function renderList(){
     const last = msgs[0];
     let lastText = '';
     if(last && last.sys){
-      lastText = '⏱ 消えるメッセージ: ' + ttlLabel((last.sys.split(':')[1])|0);
+      lastText = last.sys.startsWith('ttl:') ? ('⏱ 消えるメッセージ: ' + ttlLabel((last.sys.split(':')[1])|0)) : last.sys;
     }else if(last){
       if(last.out){
         lastText = 'あなた: ' + (last.img ? '📷 ' : '') + (safeText(last.text) || (last.img ? '写真' : ''));
       }else{
-        lastText = (last.img ? '📷 ' : '') + (safeText(last.text) || (last.img ? '写真' : ''));
+        lastText = (c.group ? (senderName(last) + ': ') : '') + (last.img ? '📷 ' : '') + (safeText(last.text) || (last.img ? '写真' : ''));
       }
     }
     const uc = unreadCount(a);
@@ -1472,7 +1530,7 @@ function renderList(){
     html += '<div class="contact-row" data-addr="' + escapeHtml(a) + '">'
       + '<div class="avatar small" style="background:' + avc + '; border:none; color:#111;">' + escapeHtml(av) + '</div>'
       + '<div class="info">'
-      + '<div class="name">' + escapeHtml(c.nick || addrShort(a)) + (c.req ? '<span class="req-tag">リクエスト</span>' : '') + (c.ttl ? ' <span class="ttl-badge">⏱' + escapeHtml(ttlLabel(c.ttl)) + '</span>' : '') + '</div>'
+      + '<div class="name">' + escapeHtml(c.nick || addrShort(a)) + (c.group ? ' <span class="ttl-badge">' + (c.members||[]).length + '人</span>' : '') + (c.req ? '<span class="req-tag">' + (c.group ? '招待' : 'リクエスト') + '</span>' : '') + (c.ttl ? ' <span class="ttl-badge">⏱' + escapeHtml(ttlLabel(c.ttl)) + '</span>' : '') + '</div>'
       + '<div class="last">' + escapeHtml(lastText) + '</div>'
       + '</div>'
       + '<div style="display:flex; flex-direction:column; align-items:flex-end; gap:4px;">'
@@ -1496,7 +1554,7 @@ function groupMessages(msgs){
     const prev = msgs[i-1];
     let same = false;
     if(prev){
-      if(prev.out === m.out){
+      if(prev.out === m.out && (prev.from === m.from || m.out) && !prev.sys){
         const diff = Math.abs((m.ts||0) - (prev.ts||0));
         if(diff <= 180) same = true;
       }
@@ -1533,7 +1591,9 @@ function renderMessages(){
     if(showDay){
       html += '<div class="day-sep">' + escapeHtml(dayLabel(m.ts)) + '</div>';
     }
-    const av = m.out ? (state.avatar || initials(state.nick || state.addr)) : avatarText(Object.assign({}, state.contacts[curAddr], {nick: (state.contacts[curAddr]||{}).nick || m.nick}), m.from || curAddr);
+    const inGroup = isGroup(curAddr);
+    const sc = inGroup ? (state.contacts[m.from] || {nick: m.nick}) : Object.assign({}, state.contacts[curAddr], {nick: (state.contacts[curAddr]||{}).nick || m.nick});
+    const av = m.out ? (state.avatar || initials(state.nick || state.addr)) : avatarText(sc, m.from || curAddr);
     const avc = hashColor(m.from || curAddr);
     if(m.sys){
       const t = m.sys.startsWith('ttl:') ? ((m.out ? 'あなたが' : '相手が') + '消えるメッセージを「' + ttlLabel(m.sys.slice(4)|0) + '」にしました') : m.sys;
@@ -1544,7 +1604,7 @@ function renderMessages(){
     if(!m.out && !g.same){
       html += '<div style="display:flex; gap:6px; align-items:flex-end; margin-bottom:2px;">'
         + '<div class="avatar small" style="width:28px; height:28px; font-size:10px; background:' + avc + '; border:none; color:#111;">' + escapeHtml(av) + '</div>'
-        + '<div style="font-size:11px; color:var(--dim);">' + escapeHtml(m.nick || addrShort(m.from||curAddr)) + '</div>'
+        + '<div style="font-size:11px; color:var(--dim);">' + escapeHtml(inGroup ? senderName(m) : (m.nick || addrShort(m.from||curAddr))) + '</div>'
         + '</div>';
     }
     if(m.img && /^data:image\/(jpeg|png|webp|gif);base64,[A-Za-z0-9+\/=]+$/.test(m.img)){
@@ -1646,13 +1706,18 @@ function updateChatHeader(){
   $('chat-ttl').style.display = c.ttl ? '' : 'none';
   $('chat-ttl').textContent = c.ttl ? ('⏱ 消えるメッセージ: ' + ttlLabel(c.ttl)) : '';
   const isReq = !!c.req;
+  const grp = !!c.group;
   $('req-bar').style.display = isReq ? '' : 'none';
-  $('composer').style.display = isReq ? 'none' : '';
+  $('req-text').textContent = grp ? 'グループへの招待です。参加するとこのグループに返信できます（メンバーにはあなたのアドレスが見えます）。' : '知らないアドレスからのメッセージリクエストです。承認するとあなたの名前・自己紹介・アイコンが相手に共有され、返信できるようになります。';
+  $('req-accept').textContent = grp ? '参加' : '承認';
+  $('req-block').style.display = grp ? 'none' : '';
+  $('composer').style.display = (isReq || c.left) ? 'none' : '';
+  $('attach-btn').style.display = grp ? 'none' : '';
   $('chat-avatar').style.background = hashColor(curAddr);
   $('chat-avatar').style.border = 'none';
   $('chat-avatar').style.color = '#111';
   $('chat-name').textContent = c.nick || addrShort(curAddr);
-  $('chat-addr').textContent = curAddr;
+  $('chat-addr').textContent = grp ? (c.left ? '退出済みのグループ' : ((c.members||[]).length + '人: ' + (c.members||[]).map(a => a === state.addr ? 'あなた' : ((state.contacts[a]||{}).nick || addrShort(a))).join('、'))) : curAddr;
 }
 
 let forceBottom = false;
@@ -1759,6 +1824,7 @@ $('contact-info-back').addEventListener('click', closeContactInfo);
 
 function openContactInfo(){
   if(!curAddr) return;
+  if(isGroup(curAddr)) return openGroupInfo();
   const c = state.contacts[curAddr] || {addr:curAddr, nick:''};
   $('ci-avatar').textContent = avatarText(c, curAddr);
   $('ci-bio').textContent = c.bio || '';
@@ -2510,6 +2576,9 @@ function renderPrivacy(){
   el.querySelectorAll('button[data-unblock]').forEach(b => b.addEventListener('click', async () => {
     try{ await api('/api/block', {Addr: b.getAttribute('data-unblock'), Block: false}); state.blocked = (state.blocked||[]).filter(x => x !== b.getAttribute('data-unblock')); renderPrivacy(); toast('解除しました'); }catch(e){ toast(e.message); }
   }));
+  const sk = state.socks;
+  $('socks-box').style.display = (sk && sk.available) ? '' : 'none';
+  if(sk){ setSwitch('socks-switch', sk.on); $('socks-addr').textContent = sk.addr || sk.default || ''; }
   const ns = state.nostr || {on:false, relays:[]};
   setSwitch('nostr-switch', ns.on);
   $('nostr-relays').innerHTML = (ns.relays || []).map(escapeHtml).join('<br>') || 'なし';
@@ -2543,6 +2612,21 @@ $('nostr-edit').addEventListener('click', async () => {
   const v = await uiPrompt('wss:// のリレーURL（スペース区切り、最大8つ）', cur); if(v === null) return;
   const list = v.split(/[\s,]+/).filter(Boolean);
   if(await nostrSet({Relays: list})) toast('リレーを保存しました');
+});
+async function socksSet(body, msg){
+  try{
+    const r = await api('/api/socks', body); state.socks = r; renderPrivacy();
+    if(r.restart){ toast(msg); waitRestart(s2 => !!s2.socks && s2.socks.on === r.on && s2.socks.addr === r.addr); }
+  }catch(e){ toast(e.message); }
+}
+$('socks-switch').addEventListener('click', async () => {
+  const on = !(state.socks && state.socks.on);
+  if(on && !(await uiDialog('SOCKS5（' + (state.socks.addr || '127.0.0.1:9050') + '）経由に切り替えますか？\n\nOrbotやTorを先に起動しておいてください。動いていないとどこにもつながりません。切り替えると再起動します。', {okText:'切り替える'}))) return;
+  socksSet({On: on}, on ? 'SOCKS5経由に切り替えます' : '直接接続に戻します');
+});
+$('socks-edit').addEventListener('click', async () => {
+  const v = await uiPrompt('SOCKS5プロキシ（ホスト:ポート）\nOrbot/Tor: 127.0.0.1:9050、Tor Browser: 127.0.0.1:9150', (state.socks && state.socks.addr) || '127.0.0.1:9050'); if(v === null) return;
+  socksSet({Addr: v.trim()}, 'プロキシを変更しました');
 });
 $('nostr-reset').addEventListener('click', async () => { if(await nostrSet({Reset: true})) toast('既定のリレーに戻しました'); });
 $('hide-notif-switch').addEventListener('click', () => {
@@ -2757,9 +2841,10 @@ async function openMsgMenu(id){
   const sent = m.out && (m.status === 'sent' || m.status === 'sending' || m.nostr);
   const items = [];
   if(m.text) items.push({key:'copy', label:'コピー'});
-  if(m.out && !m.img) items.push({key:'edit', label:'編集'});
+  const g = isGroup(m.peer);
+  if(m.out && !m.img && !g) items.push({key:'edit', label:'編集'});
   items.push({key:'delme', label:'自分の画面から削除', danger:true});
-  if(m.out) items.push({key:'delall', label: sent ? '相手の画面からも削除（送信取り消し）' : '削除（まだ届いていないので送られません）', danger:true});
+  if(m.out && !g) items.push({key:'delall', label: sent ? '相手の画面からも削除（送信取り消し）' : '削除（まだ届いていないので送られません）', danger:true});
   const k = await actionSheet((m.text || (m.img ? '📷 写真' : '')).slice(0, 120), items);
   if(!k) return;
   if(k === 'copy'){ copyText(m.text); return; }
@@ -2836,6 +2921,69 @@ document.querySelectorAll('#theme-seg button').forEach(b => b.addEventListener('
   if(t === 'system') document.documentElement.removeAttribute('data-theme'); else document.documentElement.setAttribute('data-theme', t);
   renderPrivacy();
 }));
+
+// ===== group chat (beta) =====
+function openGroupInfo(){
+  const c = state.contacts[curAddr]; if(!c) return;
+  $('gi-name').textContent = c.nick || 'グループ';
+  $('gi-count').textContent = c.left ? '退出済み' : ((c.members||[]).length + '人');
+  $('gi-members').innerHTML = (c.members||[]).map(a => '<div class="row" style="padding:6px 0;"><div><div>' + escapeHtml(a === state.addr ? 'あなた' : ((state.contacts[a]||{}).nick || 'anon')) + '</div><div class="row-sub" style="font-family:ui-monospace,monospace;">' + escapeHtml(a) + '</div></div></div>').join('');
+  $('gi-add').style.display = $('gi-leave').style.display = $('gi-rename').style.display = c.left ? 'none' : '';
+  $('group-info-screen').classList.add('active');
+}
+$('gi-back').addEventListener('click', () => $('group-info-screen').classList.remove('active'));
+let gpMode = 'create';
+function openGroupPick(mode){
+  gpMode = mode;
+  const g = mode === 'add' ? state.contacts[curAddr] : null;
+  $('gp-title').textContent = mode === 'add' ? 'メンバーを追加' : 'グループを作る';
+  $('gp-ok').textContent = mode === 'add' ? '追加' : '作成';
+  $('gp-name').style.display = mode === 'add' ? 'none' : '';
+  $('gp-name').value = ''; $('gp-addr').value = '';
+  const cands = Object.values(state.contacts || {}).filter(c => !c.group && !c.req && c.addr && !(g && (g.members||[]).includes(c.addr)));
+  $('gp-list').innerHTML = cands.length ? cands.map(c => '<label class="row" style="padding:6px 0; gap:10px; justify-content:flex-start;"><input type="checkbox" value="' + escapeHtml(c.addr) + '" style="width:auto;"><div><div>' + escapeHtml(c.nick || addrShort(c.addr)) + '</div><div class="row-sub" style="font-family:ui-monospace,monospace;">' + escapeHtml(addrShort(c.addr)) + '</div></div></label>').join('') : '<div class="row-sub">選べる連絡先がありません。アドレスで追加できます。</div>';
+  $('group-pick-screen').classList.add('active');
+}
+$('gp-back').addEventListener('click', () => $('group-pick-screen').classList.remove('active'));
+$('new-group-btn').addEventListener('click', () => { closeNewChat(); openGroupPick('create'); });
+$('gi-add').addEventListener('click', () => openGroupPick('add'));
+$('gp-ok').addEventListener('click', async () => {
+  const picked = [...$('gp-list').querySelectorAll('input:checked')].map(i => i.value)
+    .concat($('gp-addr').value.split(/[,\s、]+/).map(s => s.trim()).filter(Boolean));
+  if(picked.some(a => !isYggAddr(a))){ toast('Yggdrasilアドレスではないものがあります'); return; }
+  try{
+    if(gpMode === 'add'){
+      if(!picked.length){ toast('追加する人を選んでください'); return; }
+      const c = await api('/api/group/update', {ID: curAddr.slice(2), Add: picked});
+      state.contacts[c.addr] = c; updateChatHeader(); openGroupInfo();
+    }else{
+      if(!picked.length){ toast('メンバーを1人以上選んでください'); return; }
+      const c = await api('/api/group/create', {Name: $('gp-name').value.trim(), Members: picked});
+      state.contacts[c.addr] = c;
+      $('group-pick-screen').classList.remove('active');
+      openChat(c.addr);
+      return;
+    }
+    $('group-pick-screen').classList.remove('active');
+  }catch(e){ toast(e.message); }
+});
+$('gi-rename').addEventListener('click', async () => {
+  const c = state.contacts[curAddr]; if(!c) return;
+  const v = await uiPrompt('グループ名（メンバー全員に反映）', c.nick || ''); if(v === null || !v.trim()) return;
+  try{ const g = await api('/api/group/update', {ID: curAddr.slice(2), Name: v.trim()}); state.contacts[g.addr] = g; updateChatHeader(); openGroupInfo(); renderList(); }catch(e){ toast(e.message); }
+});
+$('gi-leave').addEventListener('click', async () => {
+  if(!(await uiDialog('このグループを退出しますか？\n他のメンバーに退出が通知され、以後このグループのメッセージは受け取りません。', {okText:'退出', danger:true}))) return;
+  try{ const g = await api('/api/group/leave', {ID: curAddr.slice(2)}); state.contacts[g.addr] = g; updateChatHeader(); openGroupInfo(); renderList(); }catch(e){ toast(e.message); }
+});
+$('gi-delete').addEventListener('click', async () => {
+  if(!(await uiConfirm('会話を削除しますか？' + ((state.contacts[curAddr]||{}).left ? '' : '\n（退出はしません。また届くとグループが戻ります）'), true))) return;
+  try{
+    await api('/api/contact/delete', {Addr: curAddr});
+    delete state.contacts[curAddr]; state.messages = state.messages.filter(m => m.peer !== curAddr);
+    $('group-info-screen').classList.remove('active'); document.body.classList.remove('chat-open'); curAddr = null; renderList(); toast('削除しました');
+  }catch(e){ toast(e.message); }
+});
 
 // Requests
 $('req-accept').addEventListener('click', async () => {

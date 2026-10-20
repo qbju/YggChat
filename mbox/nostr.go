@@ -30,11 +30,11 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
-	"math/big"
-	"strconv"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"math/big"
+	"strconv"
 	"time"
 
 	"github.com/btcsuite/btcd/btcec/v2"

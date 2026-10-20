@@ -273,6 +273,7 @@ func nostrOpen(this js.Value, args []js.Value) any {
 func nostrTag(this js.Value, args []js.Value) any {
 	return mbox.NostrTag(priv.Public().(ed25519.PublicKey))
 }
+
 // yggNostrTags(pksJSON) -> JSON {tags:[...], since:N}: every tag a box for us may carry now.
 func nostrTags(this js.Value, args []js.Value) any {
 	var hexes []string

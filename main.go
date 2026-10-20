@@ -66,6 +66,10 @@ type Message struct {
 	Img    string `json:"img,omitempty"`   // data:image/...;base64,... (compressed by the UI)
 	Nostr  bool   `json:"nostr,omitempty"` // also parked on Nostr relays (opt-in offline delivery)
 	Edited bool   `json:"edited,omitempty"`
+	// Per-member copy of a group message (not shown; the "g:<id>" message is).
+	Grp string `json:"grp,omitempty"` // group id
+	Of  string `json:"of,omitempty"`  // id of the visible group message
+	Hid bool   `json:"hid,omitempty"`
 }
 
 type Contact struct {
@@ -99,6 +103,8 @@ type Store struct {
 	NostrRelays []string `json:"nostr_relays,omitempty"`
 	// Edits / unsends of our messages not yet acked by the peer.
 	Ctl []ctlItem `json:"ctl,omitempty"`
+	// Group chats (groups.go), keyed by group id.
+	Groups map[string]Group `json:"groups,omitempty"`
 }
 
 func (s *Store) save() {
@@ -222,6 +228,7 @@ type App struct {
 	ns       *netstack.YggdrasilNetstack
 	sys      bool // using the device's own Yggdrasil (VPN/TUN) instead of the embedded node
 	vpn      bool // Android: we ARE the device's Yggdrasil (VpnService TUN pumped into core)
+	dataDir  string
 	vpnS     *vpnState
 	addr     string
 	store    *Store
@@ -258,7 +265,9 @@ func (a *App) broadcast(kind string, v any) {
 func (a *App) addMessage(m Message) {
 	a.store.mu.Lock()
 	a.store.Messages = append(a.store.Messages, m)
-	if _, ok := a.store.Contacts[m.Peer]; !ok {
+	if isGroupKey(m.Peer) {
+		// group conversations have no contact entry
+	} else if _, ok := a.store.Contacts[m.Peer]; !ok {
 		c := Contact{Addr: m.Peer, Req: !m.Out, Shared: m.Out, TTL: m.TTL}
 		if !m.Out {
 			c.Nick = m.Nick
@@ -294,6 +303,11 @@ type wire struct {
 	I    int    `json:"i,omitempty"`   // chunk index (fc/fca)
 	D    string `json:"d,omitempty"`   // chunk data, base64
 	Ref  string `json:"ref,omitempty"` // edit/del: id of the message it changes
+	// Group chat (groups.go)
+	G  string   `json:"g,omitempty"`  // group id
+	GN string   `json:"gn,omitempty"` // group name (gi)
+	GM []string `json:"gm,omitempty"` // members (gi)
+	GH string   `json:"gh,omitempty"` // hash of name+members (msg)
 }
 
 func (a *App) serveChat() {
@@ -372,6 +386,8 @@ func (a *App) serveChat() {
 			a.onFileChunk(from, w)
 		case "prof", "ttl":
 			a.handleCtl(from, w)
+		case "gq", "gi", "gl":
+			a.onGroupCtl(from, w)
 		case "edit", "del":
 			if a.onCtl(from, w) {
 				a.sendWire(from, wire{T: "ack", ID: w.ID})
@@ -389,6 +405,9 @@ func (a *App) serveChat() {
 // handleMsg validates and stores an incoming message (direct or from the
 // mailbox). Returns true when it should be acked.
 func (a *App) handleMsg(from string, w wire) bool {
+	if w.G != "" {
+		return a.onGroupMsg(from, w)
+	}
 	if w.Text == "" {
 		return false
 	}
@@ -453,19 +472,33 @@ func (a *App) maybeProf(peer string) {
 
 func (a *App) setStatus(peer, id, status string) {
 	a.store.mu.Lock()
+	grp, of := "", ""
 	for i := len(a.store.Messages) - 1; i >= 0; i-- {
 		if m := &a.store.Messages[i]; m.ID == id && m.Peer == peer {
 			m.Status = status
+			if m.Hid {
+				grp, of = m.Grp, m.Of
+			}
 			break
 		}
 	}
 	a.store.save()
 	a.store.mu.Unlock()
+	if grp != "" {
+		a.groupStatus(grp, of)
+		return
+	}
 	a.broadcast("status", map[string]string{"id": id, "peer": peer, "status": status})
 }
 
 // send stores the message as "sending" and delivers it in the background.
 func (a *App) send(to, text, img string) (Message, error) {
+	if isGroupKey(to) {
+		if img != "" {
+			return Message{}, fmt.Errorf("グループではまだ写真を送れません")
+		}
+		return a.sendGroup(strings.TrimPrefix(to, "g:"), text)
+	}
 	ip := net.ParseIP(to)
 	if ip == nil || len(ip) != 16 || (ip[0]&0xfe) != 0x02 {
 		return Message{}, fmt.Errorf("not a Yggdrasil address: %s", to)
@@ -549,7 +582,7 @@ func (a *App) deliverN(m Message, tries int) bool {
 	if m.Img != "" {
 		return a.deliverImg(m, tries)
 	}
-	b, _ := json.Marshal(wire{T: "msg", ID: m.ID, Nick: m.Nick, Text: m.Text, TS: m.TS, TTL: m.TTL})
+	b, _ := json.Marshal(a.msgWire(m))
 	ch := make(chan struct{})
 	a.ackMu.Lock()
 	a.acks[m.ID] = ch
@@ -603,7 +636,7 @@ func (a *App) queued(peer string) []Message {
 	defer a.store.mu.Unlock()
 	var out []Message
 	for _, m := range a.store.Messages {
-		if m.Out && (m.Status == "queued" || m.Status == "stored") && (peer == "" || m.Peer == peer) {
+		if m.Out && (m.Status == "queued" || m.Status == "stored") && !isGroupKey(m.Peer) && (peer == "" || m.Peer == peer) {
 			out = append(out, m)
 		}
 	}
@@ -712,9 +745,14 @@ func (a *App) setPeers(list []string) error {
 		want[p] = true
 	}
 	have := map[string]bool{}
-	for _, p := range a.cfg.Peers {
+	for _, p := range effectivePeers(a.cfg.Peers) {
 		have[p] = true
 	}
+	eff := map[string]bool{}
+	for _, p := range effectivePeers(list) {
+		eff[p] = true
+	}
+	want = eff
 	for p := range have {
 		if !want[p] {
 			u, _ := url.Parse(p)
@@ -738,7 +776,7 @@ var peerURIRe = regexp.MustCompile("`((?:tcp|tls|quic|ws|wss)://[^`\\s]+)`")
 // repo (one zip download), annotated with live status from the community crawler when reachable.
 // Asia first, then by region; unreachable/flaky peers last.
 func publicPeers() ([]map[string]any, error) {
-	cl := &http.Client{Timeout: 20 * time.Second}
+	cl := netHTTP(20 * time.Second)
 	r, err := cl.Get("https://codeload.github.com/yggdrasil-network/public-peers/zip/refs/heads/master")
 	if err != nil {
 		return nil, err
@@ -758,7 +796,7 @@ func publicPeers() ([]map[string]any, error) {
 		States string `json:"states"`
 	}
 	status := map[string]st{}
-	if r2, err := (&http.Client{Timeout: 8 * time.Second}).Get("https://publicpeers.neilalexander.dev/publicnodes.json"); err == nil {
+	if r2, err := netHTTP(8 * time.Second).Get("https://publicpeers.neilalexander.dev/publicnodes.json"); err == nil {
 		var d map[string]map[string]st
 		if json.NewDecoder(r2.Body).Decode(&d) == nil {
 			for _, m := range d {
@@ -839,9 +877,9 @@ func (a *App) httpHandlers(mux *http.ServeMux) {
 		json.NewEncoder(w).Encode(map[string]any{
 			"addr": a.addr, "pubkey": hex.EncodeToString(a.pub()), "system": a.sys, "vpn": a.vpn,
 			"nick": a.store.Nick, "bio": a.store.Bio, "avatar": a.store.Avatar,
-			"contacts": a.store.Contacts, "messages": a.store.Messages, "peers": peers, "platform": "native",
+			"contacts": a.contactsViewLocked(), "messages": a.visibleMessagesLocked(), "peers": peers, "platform": "native",
 			"locked": false, "haspass": a.store.key != nil, "blocked": blocked,
-			"nostr": a.nostrStateLocked(),
+			"nostr": a.nostrStateLocked(), "socks": a.socksState(),
 		})
 	})
 	mux.HandleFunc("/api/send", func(w http.ResponseWriter, r *http.Request) {
@@ -852,7 +890,9 @@ func (a *App) httpHandlers(mux *http.ServeMux) {
 		}
 		var m Message
 		var err error
-		if req.Retry != "" {
+		if req.Retry != "" && isGroupKey(strings.TrimSpace(req.To)) {
+			m, err = a.retryGroup(strings.TrimPrefix(strings.TrimSpace(req.To), "g:"), req.Retry)
+		} else if req.Retry != "" {
 			ip := net.ParseIP(strings.TrimSpace(req.To))
 			if ip == nil {
 				http.Error(w, "bad address", 400)
@@ -876,6 +916,27 @@ func (a *App) httpHandlers(mux *http.ServeMux) {
 			Accept bool
 		}
 		if !readJSON(w, r, &req) {
+			return
+		}
+		if k := strings.TrimSpace(req.Addr); isGroupKey(k) {
+			a.store.mu.Lock()
+			g, ok := a.store.Groups[strings.TrimPrefix(k, "g:")]
+			if !ok {
+				a.store.mu.Unlock()
+				http.Error(w, "no such group", 400)
+				return
+			}
+			if req.Nick != nil && cleanNick(*req.Nick) != "" {
+				g.Name = cleanNick(*req.Nick) // local rename only
+			}
+			if req.Accept {
+				g.Req = false
+			}
+			a.store.Groups[g.ID] = g
+			a.store.save()
+			a.store.mu.Unlock()
+			a.broadcast("contact", groupView(g))
+			json.NewEncoder(w).Encode(groupView(g))
 			return
 		}
 		ip := net.ParseIP(strings.TrimSpace(req.Addr))
@@ -915,7 +976,20 @@ func (a *App) httpHandlers(mux *http.ServeMux) {
 	})
 	mux.HandleFunc("/api/contact/delete", func(w http.ResponseWriter, r *http.Request) {
 		var req struct{ Addr string }
-		if r.Method != "POST" || json.NewDecoder(r.Body).Decode(&req) != nil || net.ParseIP(req.Addr) == nil {
+		if r.Method != "POST" || json.NewDecoder(r.Body).Decode(&req) != nil {
+			http.Error(w, "bad request", 400)
+			return
+		}
+		if isGroupKey(req.Addr) {
+			a.store.mu.Lock()
+			a.deleteGroupLocked(strings.TrimPrefix(req.Addr, "g:"))
+			a.store.save()
+			a.store.mu.Unlock()
+			a.broadcast("contact_del", map[string]string{"addr": req.Addr})
+			w.Write([]byte("{}"))
+			return
+		}
+		if net.ParseIP(req.Addr) == nil {
 			http.Error(w, "bad request", 400)
 			return
 		}
@@ -1123,7 +1197,8 @@ func main() {
 	for _, l := range cfg.Listen {
 		opts = append(opts, core.ListenAddress(l))
 	}
-	for _, p := range cfg.Peers {
+	loadSocks(*dataDir)
+	for _, p := range effectivePeers(cfg.Peers) {
 		opts = append(opts, core.Peer{URI: p})
 	}
 	var c *core.Core
@@ -1148,7 +1223,7 @@ func main() {
 		st.Contacts, st.Blocked = map[string]Contact{}, map[string]bool{}
 	}
 
-	a := &App{core: c, ns: ns, sys: sys, vpn: vpn, store: st, subs: map[chan []byte]struct{}{}, acks: map[string]chan struct{}{}, inflight: map[string]bool{}, seen: map[string]bool{}, profAt: map[string]time.Time{}, cfg: cfg, cfgPath: filepath.Join(*dataDir, "node.json")}
+	a := &App{core: c, ns: ns, sys: sys, vpn: vpn, store: st, subs: map[chan []byte]struct{}{}, acks: map[string]chan struct{}{}, inflight: map[string]bool{}, seen: map[string]bool{}, profAt: map[string]time.Time{}, cfg: cfg, cfgPath: filepath.Join(*dataDir, "node.json"), dataDir: *dataDir}
 	// Messages left "sending" by a previous run never got an ack.
 	for i := range st.Messages {
 		if st.Messages[i].Status == "sending" || st.Messages[i].Status == "failed" {
@@ -1221,6 +1296,8 @@ func main() {
 	a.httpHandlers(mux)
 	a.featureHandlers(mux)
 	a.nostrHandlers(mux)
+	a.groupHandlers(mux)
+	a.socksHandlers(mux)
 	a.systemHandlers(mux, *dataDir)
 	a.vpnHandlers(mux, *dataDir)
 	a.fingerHandlers(mux)

@@ -193,12 +193,16 @@ func (a *App) msgEditHandlers(mux *http.ServeMux) {
 		if !readJSON(w, r, &req) {
 			return
 		}
-		ip := net.ParseIP(req.Peer)
-		if ip == nil {
+		peer := req.Peer
+		if isGroupKey(peer) {
+			// Group messages can only be removed from this device for now.
+			req.Everyone = false
+		} else if ip := net.ParseIP(req.Peer); ip != nil {
+			peer = ip.String()
+		} else {
 			http.Error(w, "bad request", 400)
 			return
 		}
-		peer := ip.String()
 		a.store.mu.Lock()
 		idx := -1
 		for i := range a.store.Messages {

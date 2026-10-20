@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 h6e and YggChat contributors
-const CACHE = 'yggchat-pwa-v26';
+const CACHE = 'yggchat-pwa-v27';
 const INDEX = './index.html';
 
 self.addEventListener('install', e => {

@@ -33,7 +33,7 @@ func (a *App) nostrRelays() []string {
 }
 
 func relayDial(ctx context.Context, url string) (*websocket.Conn, error) {
-	c, _, err := websocket.Dial(ctx, url, nil)
+	c, _, err := websocket.Dial(ctx, url, &websocket.DialOptions{HTTPClient: netHTTP(0)})
 	if err == nil {
 		c.SetReadLimit(1 << 20)
 	}
@@ -143,7 +143,7 @@ func (a *App) nostrPut(m Message) bool {
 	if err != nil || len(pk) != 32 {
 		return false
 	}
-	wb, _ := json.Marshal(wire{T: "msg", ID: m.ID, Nick: m.Nick, Text: m.Text, TS: m.TS, TTL: m.TTL})
+	wb, _ := json.Marshal(a.msgWire(m))
 	ev, err := mbox.NostrWrap(pk, a.privKey(), wb)
 	if err != nil {
 		return false

@@ -28,7 +28,7 @@
   const idbPut = (k, v) => idb.then(db => new Promise((res, rej) => { const t = db.transaction('kv', 'readwrite'); t.objectStore('kv').put(v, k); t.oncomplete = res; t.onerror = () => rej(t.error); }));
   let raw = {};
   const outer = { key: '', peers: null, enc: null };
-  const blank = () => ({ nick: 'anon', bio: '', avatar: '', contacts: {}, messages: [], blocked: {}, nostrOn: false, nostrRelays: [], ctl: [] });
+  const blank = () => ({ nick: 'anon', bio: '', avatar: '', contacts: {}, messages: [], blocked: {}, nostrOn: false, nostrRelays: [], ctl: [], groups: {} });
   let st = blank();
   let locked = false;
   let aesKey = null; // CryptoKey while unlocked with a passcode
@@ -43,7 +43,7 @@
     if (outer.peers && outer.peers.some(p => /workers\.dev|instabox\.tech/.test(p))) outer.peers = null; // old Cloudflare relay / removed entry peer -> defaults
     if (!outer.peers) outer.peers = RECOMMENDED.slice();
     locked = !!outer.enc;
-    if (!locked) { Object.assign(st, { nick: raw.nick || 'anon', bio: raw.bio || '', avatar: raw.avatar || '', contacts: raw.contacts || {}, messages: raw.messages || [], blocked: raw.blocked || {}, nostrOn: !!raw.nostrOn, nostrRelays: raw.nostrRelays || [], ctl: raw.ctl || [] }); migrate(); }
+    if (!locked) { Object.assign(st, { nick: raw.nick || 'anon', bio: raw.bio || '', avatar: raw.avatar || '', contacts: raw.contacts || {}, messages: raw.messages || [], blocked: raw.blocked || {}, nostrOn: !!raw.nostrOn, nostrRelays: raw.nostrRelays || [], ctl: raw.ctl || [], groups: raw.groups || {} }); migrate(); }
   }
 
   const b64 = u8 => btoa(String.fromCharCode(...new Uint8Array(u8)));
@@ -82,7 +82,8 @@
     st.messages.push(m);
     if (st.messages.length > 5000) st.messages.splice(0, st.messages.length - 5000);
     let c = st.contacts[m.peer];
-    if (!c) { c = st.contacts[m.peer] = { addr: m.peer, nick: m.out ? '' : (m.nick || ''), req: !m.out, shared: !!m.out, ttl: m.ttl || 0 }; emit('contact', c); }
+    if (isG(m.peer)) { /* group conversations have no contact entry */ }
+    else if (!c) { c = st.contacts[m.peer] = { addr: m.peer, nick: m.out ? '' : (m.nick || ''), req: !m.out, shared: !!m.out, ttl: m.ttl || 0 }; emit('contact', c); }
     else if (!m.out && m.nick && !c.renamed && c.nick !== m.nick) { c.nick = m.nick; emit('contact', c); }
     save();
     emit('message', m);
@@ -91,6 +92,7 @@
   function setStatus(peer, id, status) {
     const m = st.messages.find(x => x.peer === peer && x.id === id);
     if (m) { m.status = status; save(); }
+    if (m && m.hid) { groupStatus(m.grp, m.of); return; }
     emit('status', { id, peer, status });
   }
 
@@ -155,7 +157,7 @@
   const hello = p => send(p, { t: 'hi', pk: myPK() });
   function helloAll() { if (!locked) for (const p of Object.keys(st.contacts)) hello(p); }
 
-  const handleMsg = (src, w) => !!w.text && acceptMsg(src, w, '');
+  const handleMsg = (src, w) => w.g ? onGroupMsg(src, w) : Promise.resolve(!!w.text && acceptMsg(src, w, ''));
   function acceptMsg(src, w, img) {
     if ((!w.text && !img) || String(w.text || '').length > 8000 || !/^[0-9A-Za-z_-]{1,40}$/.test(String(w.id))) return false;
     if (locked || st.blocked[src]) return false;
@@ -167,6 +169,87 @@
     if (ttl) { m.ttl = ttl; m.exp = now() + ttl; }
     addMessage(m);
     return true;
+  }
+
+  // ---- group chat (v0.13.5, provisional; same wire as the native node, see groups.go) ----
+  // A group message goes to every member as its own acked "msg" with g (group id)
+  // and gh (hash of name+members); the copies are hidden, the "g:<id>" message shows.
+  const isG = k => String(k || '').startsWith('g:');
+  const MAXG = 20;
+  const gView = g => ({ addr: 'g:' + g.id, nick: g.name, avatar: '👥', group: true, members: g.members, req: !!g.req, left: !!g.left });
+  const okGID = id => /^[0-9a-f]{16}$/.test(String(id || ''));
+  function cleanMembers(list, must) {
+    const out = [];
+    for (const x of [must].concat(list || [])) { const a = norm(String(x || '')); if (a && isYgg(a) && !out.includes(a)) out.push(a); }
+    return out.slice(0, MAXG).sort();
+  }
+  const gHash = async g => hexOf(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(g.name + '\n' + g.members.slice().sort().join(',')))).slice(0, 8);
+  const hasM = (g, a) => g.members.includes(a);
+  const nameOf = a => a === addr ? 'あなた' : ((st.contacts[a] && st.contacts[a].nick) || a.slice(0, 9) + '…');
+  function gSys(g, text) { addMessage({ id: 's' + Date.now().toString(16) + Math.random().toString(16).slice(2, 5), peer: 'g:' + g.id, from: addr, ts: now(), sys: text, out: true }); }
+  function gInfo(g, extra) { const w = { t: 'gi', g: g.id, gn: g.name, gm: g.members }; for (let i = 0; i < 3; i++) setTimeout(() => { for (const m of g.members.concat(extra || [])) if (m !== addr) send(m, w); }, i * 2000); }
+  function groupStatus(gid, id) {
+    const cs = st.messages.filter(m => m.hid && m.grp === gid && m.of === id);
+    const n = cs.length, sent = cs.filter(m => m.status === 'sent').length, sending = cs.filter(m => m.status === 'sending').length, stored = cs.filter(m => m.status === 'stored').length;
+    const s = (!n || sent === n) ? 'sent' : sending ? 'sending' : (sent + stored === n) ? 'stored' : 'queued';
+    const v = st.messages.find(m => m.peer === 'g:' + gid && m.id === id);
+    if (v && v.status !== s) { v.status = s; save(); emit('status', { id, peer: v.peer, status: s }); }
+  }
+  async function msgPkt(m) {
+    const w = { t: 'msg', id: m.id, nick: m.nick, text: m.text, ts: m.ts, ttl: m.ttl || undefined };
+    if (m.grp) { w.ttl = undefined; w.g = m.grp; const g = st.groups[m.grp]; if (g) w.gh = await gHash(g); }
+    return w;
+  }
+  function sendGroup(gid, text) {
+    const g = st.groups[gid];
+    if (!g || g.left) return null;
+    if (g.req) { g.req = false; emit('contact', gView(g)); }
+    const id = Date.now().toString(16) + Math.random().toString(16).slice(2, 6), ts = now();
+    const v = { id, peer: 'g:' + gid, from: addr, nick: st.nick, text, ts, out: true, status: 'sending' };
+    const cs = g.members.filter(a => a !== addr).map((a, i) => ({ id: id + 'g' + i, peer: a, from: addr, nick: st.nick, text, ts, out: true, status: 'sending', grp: gid, of: id, hid: true }));
+    if (!cs.length) v.status = 'sent';
+    st.messages.push(...cs);
+    addMessage(v);
+    for (const c of cs) deliver(c);
+    return v;
+  }
+  async function onGroupMsg(src, w) {
+    if (!okGID(w.g) || !w.text || String(w.text).length > 8000 || !/^[0-9A-Za-z_-]{1,40}$/.test(String(w.id))) return false;
+    if (locked || st.blocked[src]) return false;
+    let g = st.groups[w.g], ask = false;
+    const known = !!g;
+    if (!g) {
+      const c = st.contacts[src];
+      g = st.groups[w.g] = { id: w.g, name: 'グループ', members: cleanMembers([src], addr), req: !(c && c.shared && !c.req) };
+      ask = true; save(); emit('contact', gView(g));
+    } else if (g.left || !hasM(g, src)) { send(src, { t: 'gq', g: w.g }); return false; }
+    else if (w.gh && w.gh !== await gHash(g)) ask = true;
+    if (ask) send(src, { t: 'gq', g: w.g });
+    const key = 'g:' + w.g;
+    if (st.messages.some(m => m.peer === key && m.from === src && m.id === w.id)) return true;
+    addMessage({ id: w.id, peer: key, from: src, nick: cleanNick(w.nick), text: w.text, ts: w.ts || now(), out: false });
+    return true;
+  }
+  function onGroupCtl(src, w) {
+    if (!okGID(w.g) || locked) return;
+    let g = st.groups[w.g];
+    if (w.t === 'gq') { if (g && !g.left && hasM(g, src) && hasM(g, addr)) send(src, { t: 'gi', g: g.id, gn: g.name, gm: g.members }); return; }
+    if (w.t === 'gl') {
+      if (!g || !hasM(g, src)) return;
+      g.members = g.members.filter(a => a !== src); save(); emit('contact', gView(g)); gSys(g, nameOf(src) + ' が退出しました'); return;
+    }
+    if (w.t === 'gi') {
+      if (!Array.isArray(w.gm) || !w.gm.length) return;
+      if (g && (g.left || !hasM(g, src))) return;
+      const ms = cleanMembers(w.gm, src), inG = ms.includes(addr);
+      if (!g) { if (!inG) return; const c = st.contacts[src]; g = st.groups[w.g] = { id: w.g, name: '', members: [], req: !(c && c.shared && !c.req) }; }
+      const old = { name: g.name, members: g.members.slice() }, known = !!old.name;
+      g.name = cleanNick(w.gn) || 'グループ'; g.members = ms; if (!inG) g.left = true;
+      save(); emit('contact', gView(g));
+      if (!inG) gSys(g, 'グループから外されました');
+      else if (known && old.name !== g.name && old.name !== 'グループ') gSys(g, nameOf(src) + ' がグループ名を「' + g.name + '」にしました');
+      if (known && inG) for (const m of ms) if (!old.members.includes(m) && m !== addr) gSys(g, nameOf(src) + ' が ' + nameOf(m) + ' を追加しました');
+    }
   }
 
   // finger (opt-in): answer {t:"fq"} with nick + .plan; collect {t:"fr"} replies.
@@ -205,7 +288,8 @@
     if (w.t === 'fh') { onFileHeader(src, w); return; }
     if (w.t === 'fc') { onFileChunk(src, w); return; }
     if ((w.t === 'edit' || w.t === 'del') && onCtl(src, w)) { send(src, { t: 'ack', id: w.id }); return; }
-    if (w.t === 'msg' && handleMsg(src, w)) { send(src, { t: 'ack', id: w.id }); askPK(src); if (queuedFor(src).length) flush(src); }
+    if (w.t === 'gq' || w.t === 'gi' || w.t === 'gl') { onGroupCtl(src, w); return; }
+    if (w.t === 'msg') handleMsg(src, w).then(okm => { if (okm) { send(src, { t: 'ack', id: w.id }); askPK(src); if (queuedFor(src).length) flush(src); } });
   }
 
   // ---- images: header + 12 KiB chunks, per-chunk acks, SHA-256 check ----
@@ -278,7 +362,7 @@
     inflight.add(m.id);
     if (m.status !== 'sending') setStatus(m.peer, m.id, 'sending');
     if (m.img) { try { return await deliverImg(m, tries); } finally { inflight.delete(m.id); } }
-    const pkt = JSON.stringify({ t: 'msg', id: m.id, nick: m.nick, text: m.text, ts: m.ts, ttl: m.ttl || undefined });
+    const pkt = JSON.stringify(await msgPkt(m));
     const acked = new Promise(r => acks.set(m.id, r));
     try {
       for (let i = 0; i < tries; i++) {
@@ -348,14 +432,14 @@
         let w; try { w = JSON.parse(r.w); } catch { continue; }
         if (w.t !== 'msg') continue;
         learnPK(r.from, r.pk);
-        if (handleMsg(r.from, w)) { nSeen.add(id); send(r.from, { t: 'ack', id: w.id }); if (r.del) nostrPublish(rs, r.del); }
+        if (await handleMsg(r.from, w)) { nSeen.add(id); send(r.from, { t: 'ack', id: w.id }); if (r.del) nostrPublish(rs, r.del); }
       }
     } finally { nBusy = false; }
   }
   async function nostrPark(m) {
     const rs = nRelays(); if (!rs || m.img || m.nostr) return;
     const c = st.contacts[m.peer]; if (!c || !c.pk) return;
-    const ev = yggNostrWrap(c.pk, JSON.stringify({ t: 'msg', id: m.id, nick: m.nick, text: m.text, ts: m.ts, ttl: m.ttl || undefined }));
+    const ev = yggNostrWrap(c.pk, JSON.stringify(await msgPkt(m)));
     if (!ev || !(await nostrPublish(rs, ev))) return;
     const x = st.messages.find(y => y.peer === m.peer && y.id === m.id);
     if (x && x.status === 'queued') { x.nostr = true; setStatus(m.peer, m.id, 'stored'); }
@@ -414,7 +498,7 @@
     switch (ep) {
       case 'state':
         if (locked) return ok({ locked: true, addr, peers: yggPeers(), platform: 'web' });
-        return ok({ addr, pubkey: myPK(), nick: st.nick, bio: st.bio, avatar: st.avatar, contacts: st.contacts, messages: st.messages, peers: yggPeers(), platform: 'web', locked: false, haspass: !!aesKey, blocked: Object.keys(st.blocked), nostr: nostrState() });
+        return ok({ addr, pubkey: myPK(), nick: st.nick, bio: st.bio, avatar: st.avatar, contacts: Object.assign({}, st.contacts, Object.fromEntries(Object.values(st.groups || {}).map(g => ['g:' + g.id, gView(g)]))), messages: st.messages.filter(m => !m.hid), peers: yggPeers(), platform: 'web', locked: false, haspass: !!aesKey, blocked: Object.keys(st.blocked), nostr: nostrState() });
       case 'unlock': {
         if (!locked) return ok({});
         try {
@@ -448,6 +532,17 @@
         return ok({});
       }
       case 'send': {
+        if (isG(body.To)) {
+          const gid = String(body.To).slice(2);
+          if (body.Retry) {
+            const v = st.messages.find(x => x.peer === body.To && x.id === body.Retry && x.out); if (!v) return bad('no such message', 404);
+            for (const c of st.messages.filter(m => m.hid && m.grp === gid && m.of === v.id && m.status !== 'sent')) { setStatus(c.peer, c.id, 'sending'); deliver(c); }
+            return ok(v);
+          }
+          if (body.Img) return bad('グループではまだ写真を送れません');
+          const t = String(body.Text || ''); if (!t || t.length > 4000) return bad('message empty or too long');
+          const v = sendGroup(gid, t); return v ? ok(v) : bad('このグループには送れません');
+        }
         if (body.Retry) {
           const m = st.messages.find(x => x.peer === norm(body.To || '') && x.id === body.Retry && x.out);
           if (!m) return bad('no such message', 404);
@@ -467,7 +562,35 @@
         if (ttl) { m.ttl = ttl; m.exp = m.ts + ttl; }
         addMessage(m); if (share) sendProf(dst); deliver(m); return ok(m);
       }
+      case 'group/create': {
+        const ms = cleanMembers(body.Members, addr); if (ms.length < 2) return bad('メンバーを1人以上選んでください');
+        const id = hexOf(crypto.getRandomValues(new Uint8Array(8)));
+        const g = st.groups[id] = { id, name: cleanNick(body.Name) || 'グループ', members: ms };
+        save(); emit('contact', gView(g)); gSys(g, 'グループ「' + g.name + '」を作りました'); gInfo(g); return ok(gView(g));
+      }
+      case 'group/update': {
+        const g = st.groups[body.ID]; if (!g || g.left) return bad('no such group');
+        const old = { name: g.name, members: g.members.slice() };
+        if (body.Name != null && cleanNick(body.Name)) g.name = cleanNick(body.Name);
+        g.members = cleanMembers(g.members.concat(body.Add || []), addr); g.req = false;
+        save(); emit('contact', gView(g));
+        if (g.name !== old.name) gSys(g, 'グループ名を「' + g.name + '」にしました');
+        for (const m of g.members) if (!old.members.includes(m)) gSys(g, nameOf(m) + ' を追加しました');
+        gInfo(g); return ok(gView(g));
+      }
+      case 'group/leave': {
+        const g = st.groups[body.ID]; if (!g) return bad('no such group');
+        const was = g.left; g.left = true; g.req = false; save(); emit('contact', gView(g));
+        if (!was) { for (let i = 0; i < 3; i++) setTimeout(() => { for (const m of g.members) if (m !== addr) send(m, { t: 'gl', g: g.id }); }, i * 2000); gSys(g, 'グループを退出しました'); }
+        return ok(gView(g));
+      }
       case 'contact': {
+        if (isG(body.Addr)) {
+          const g = st.groups[String(body.Addr).slice(2)]; if (!g) return bad('no such group');
+          if (body.Nick != null && cleanNick(body.Nick)) g.name = cleanNick(body.Nick);
+          if (body.Accept) g.req = false;
+          save(); emit('contact', gView(g)); return ok(gView(g));
+        }
         const a = norm(body.Addr || ''); if (!isYgg(a)) return bad('not a Yggdrasil address');
         const exists = !!st.contacts[a];
         const c = st.contacts[a] || (st.contacts[a] = { addr: a, nick: '' });
@@ -481,6 +604,7 @@
         return ok(c);
       }
       case 'contact/delete': {
+        if (isG(body.Addr)) { const gid = String(body.Addr).slice(2); delete st.groups[gid]; st.messages = st.messages.filter(m => m.peer !== body.Addr && m.grp !== gid); save(); emit('contact_del', { addr: body.Addr }); return ok({}); }
         const a = norm(body.Addr || ''); if (!a) return bad('bad address');
         delete st.contacts[a]; st.messages = st.messages.filter(m => m.peer !== a); save(); emit('contact_del', { addr: a }); return ok({});
       }
@@ -538,7 +662,7 @@
         st.messages.splice(i, 1);
         st.ctl = (st.ctl || []).filter(c => !(c.peer === m.peer && c.w.ref === m.id));
         save();
-        if (body.Everyone && isSent(m)) queueCtl(m.peer, { t: 'del', id: ctlID(), ref: m.id });
+        if (body.Everyone && isSent(m) && !isG(m.peer)) queueCtl(m.peer, { t: 'del', id: ctlID(), ref: m.id });
         emit('msg_del', { peer: m.peer, id: m.id });
         return ok({});
       }

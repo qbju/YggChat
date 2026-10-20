@@ -102,6 +102,9 @@ func (s *Store) fix() {
 	if s.Blocked == nil {
 		s.Blocked = map[string]bool{}
 	}
+	if s.Groups == nil {
+		s.Groups = map[string]Group{}
+	}
 	if s.Nick == "" {
 		s.Nick = "anon"
 	}

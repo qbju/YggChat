@@ -54,6 +54,18 @@ POST /api/send {To, Text?, Img: "data:image/(jpeg|png|webp|gif);base64,..."} (de
 Wire: {t:"fh", id, nick, text?, ts, ttl?, mime, size, n, sha} then {t:"fc", id, i, d} (864-byte raw chunks so every datagram fits the 1280-byte IPv6 MTU unfragmented — the PWA can't do IPv6 fragments; caption ≤800 UTF-8 bytes so the header fits too; image ≤600 KB) acked by {t:"fca", id, i}; after all chunks + SHA-256 match the receiver stores it and sends {t:"ack", id}. Sender rounds: header + unacked chunks every 2.5 s; gives up after `tries` rounds without progress → queued (no mailbox for images).
 
 
+## Groups (v0.13.5, beta)
+- Groups appear in `/api/state` `contacts` under the key `g:<16 hex id>` as `{addr, nick, avatar:"👥", group:true, members:[addr...], req, left}`; their messages have `peer: "g:<id>"` and `from` = the sender. Per-member delivery copies are hidden.
+- POST /api/send {To:"g:<id>", Text} (text only) / {To:"g:<id>", Retry:id}
+- POST /api/group/create {Name, Members:[addr]} -> group view
+- POST /api/group/update {ID, Name?, Add?:[addr]} -> group view (pushed to all members)
+- POST /api/group/leave {ID} -> group view (members are told)
+- POST /api/contact {Addr:"g:<id>", Nick?, Accept?} renames locally / accepts an invitation; /api/contact/delete {Addr:"g:<id>"} deletes it locally.
+- Wire: msg + {g, gh}; {t:"gq",g}; {t:"gi",g,gn,gm}; {t:"gl",g}. See groups.go.
+
+## POST /api/socks (v0.13.5, native, beta)
+- {} -> {on, addr, default, available}; {On?, Addr?} saves data/socks.json and restarts the node when it changed (`restart: true`). Also in /api/state as `socks`.
+
 ## POST /api/nostr  (v0.8, optional / deprecated)
 Body: `{"On": bool?, "Relays": ["wss://..."]?, "Reset": bool?}` → `{"on", "relays", "defaults"}`. Also returned as `nostr` in `/api/state`.
 When on, an outgoing text message that is not acked becomes status `stored` after it is parked on the relays:
