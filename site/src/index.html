@@ -1,0 +1,92 @@
+
+<header class="hero"><div class="wrap">
+  <div>
+    <span class="badge">🌲 最新 v0.19.0 · ベータ</span>
+    <h1><span class="nw">サーバーなしで、</span><br><span class="nw"><em>端末どうし</em>が</span><span class="nw">直接話す。</span></h1>
+    <p class="lead">YggChatは、メッシュネットワーク<a href="https://yggdrasil-network.github.io/">Yggdrasil</a>を内蔵したP2Pチャットです。ポート開放もNAT越えの設定もいりません。アカウントも電話番号もなく、アドレスはあなたの公開鍵そのものです。</p>
+    <div class="cta">
+      <a class="btn pri" href="/download">⬇ ダウンロード</a>
+      <a class="btn" href="https://yggchat.surge.sh/">ブラウザで使う（インストール不要）</a>
+    </div>
+    <p class="small" style="margin-top:14px">Android · Windows · Linux · PWA ／ GPL-3.0 のオープンソース</p>
+  </div>
+  <div class="phone" aria-hidden="true">
+    <div class="top"><div class="av">🦊</div><div><div class="nm">みお</div><div class="ad">200:7f3a:91c2:…:4e1d</div></div></div>
+    <div class="msg in">これってどこのサーバー経由？</div>
+    <div class="msg out">チャットのサーバーはないよ。Yggdrasilで端末どうしつながってる</div>
+    <div class="meta">既読 ✓✓</div>
+    <div class="msg in">ポート開けてないのに？</div>
+    <div class="msg out">開けなくていいの。アドレス＝鍵だから、なりすましもできない 🔐</div>
+    <div class="meta">既読 ✓✓</div>
+    <div class="compose"><span>メッセージ</span><b>➤</b></div>
+  </div>
+</div></header>
+
+<section id="features"><div class="wrap">
+  <h2>特徴</h2>
+  <p class="sub">中継サーバーを置かず、それでも普段づかいできるチャットを目指しています。</p>
+  <div class="grid">
+    <div class="card"><div class="ic">🛰️</div><h3>NAT越え不要</h3><p>Yggdrasilノードをアプリに内蔵。公開ピアにつなぐだけで、家庭のルーターやモバイル回線の内側どうしでも届きます。</p></div>
+    <div class="card"><div class="ic">🔐</div><h3>エンドツーエンド暗号化</h3><p>アドレスは公開鍵から導出。QRや招待リンクでアドレスを確かめれば、相手の鍵も確かめたことになります。</p></div>
+    <div class="card"><div class="ic">🙈</div><h3>アカウントなし</h3><p>メール・電話番号・登録は不要。知らない人からはメッセージリクエストとして届き、承認するまで名前もアイコンも見せません。</p></div>
+    <div class="card"><div class="ic">👥</div><h3>グループ最大1024人</h3><p>サーバーなしのグループチャット。副管理者、招待リンク、参加承認、参加パスワード、消えるメッセージに対応。</p></div>
+    <div class="card"><div class="ic">📦</div><h3>オフラインでも置き配</h3><p>相手がいないときは端末に保留。オプションで相手の鍵で封をした文章を公開Nostrリレーに最大7日預けられます。</p></div>
+    <div class="card"><div class="ic">🧅</div><h3>Tor / SOCKS5</h3><p>ピアやリレーへの接続をOrbotやTor経由に。自分のIPアドレスを公開ピアに見せずに使えます（アプリ版）。</p></div>
+    <div class="card"><div class="ic">📶</div><h3>LANチャット</h3><p>インターネットがなくても、同じWi-Fiやテザリング内のYggChatと直接つながります（アプリ版・既定オフ）。</p></div>
+    <div class="card"><div class="ic">📱</div><h3>端末のYggdrasilにも</h3><p>Android版はVPNモードで端末全体のYggdrasilになれます。ブラウザやSSHからも200::/7にアクセス可能。</p></div>
+    <div class="card"><div class="ic">🔁</div><h3>端末移行</h3><p>QRを読むだけで、鍵と履歴をYggdrasil経由で新しい端末へ直接転送。PWAとアプリの間でも移せます。</p></div>
+  </div>
+  <p class="more"><a class="btn" href="/guide">機能ごとの使い方を見る →</a></p>
+</div></section>
+
+<section id="how" class="alt"><div class="wrap">
+  <h2>はじめかた</h2>
+  <p class="sub">登録はありません。起動した瞬間に、あなたのアドレスができています。</p>
+  <div class="steps">
+    <div class="step"><h3>入れて開く</h3><p>アプリを起動するか、ブラウザ版を開きます。鍵が生成され、公開ピアに自動でつながります。</p></div>
+    <div class="step"><h3>アドレスを交換</h3><p>自分のQRや追加リンクを相手に見せます。ドメインのAAAAレコードに登録すれば、ドメイン名でも追加できます。</p></div>
+    <div class="step"><h3>話す</h3><p>文章・写真・グループ。メッセージは端末から端末へ直接届きます。</p></div>
+  </div>
+</div></section>
+
+<section id="download"><div class="wrap">
+  <h2>ダウンロード</h2>
+  <p class="sub">最新版はv0.19.0。ファイルはGitHub Releasesから配信しています。</p>
+  <div class="dl">
+    <div class="dlc"><div class="os">🤖</div><div><h3>Android（APK）</h3><p>おすすめ。QR読み取り、VPNモード、LANチャットなど全機能。</p><a class="btn pri" href="https://github.com/qbju/YggChat/releases/latest/download/yggchat.apk">yggchat.apk</a></div></div>
+    <div class="dlc"><div class="os">🪟</div><div><h3>Windows</h3><p>ダブルクリックでアプリのウィンドウ（WebView2）が開きます。</p><a class="btn" href="https://github.com/qbju/YggChat/releases/latest/download/yggchat-windows-amd64.exe">windows-amd64.exe</a></div></div>
+    <div class="dlc"><div class="os">🐧</div><div><h3>Linux</h3><p><code>./yggchat-linux-amd64</code> で起動。<code>-cli</code> で端末チャットも。</p><a class="btn" href="https://github.com/qbju/YggChat/releases/latest/download/yggchat-linux-amd64">linux-amd64</a></div></div>
+    <div class="dlc"><div class="os">🌐</div><div><h3>ブラウザ版（PWA）</h3><p>インストール不要。開いている間だけ動作し、LAN・Tor・プロフィールサイトなど一部機能は使えません。</p><a class="btn" href="https://yggchat.surge.sh/">yggchat.surge.sh</a></div></div>
+  </div>
+  <p class="small" style="margin-top:16px">Termux用 <a href="https://github.com/qbju/YggChat/releases/latest/download/yggchat-android-arm64">android-arm64</a> ／ <a href="https://github.com/qbju/YggChat/releases/latest/download/SHA256SUMS">SHA256SUMS</a> ／ <a href="https://github.com/qbju/YggChat/releases">すべてのリリース</a>。バイナリは未署名のため、WindowsではSmartScreenの警告が出ます。</p>
+  <div class="note"><b>ベータ版です。</b>更新が多く、互換性のない変更もしばらく頻繁に入ります。できるだけ最新版を使い、相手にも更新してもらってください。</div>
+</div></section>
+
+<section class="alt"><div class="wrap">
+  <h2>仕組みと、正直な限界</h2>
+  <p class="sub">何が守られて、何が見えるのか。</p>
+  <div class="tech">
+    <div class="card"><h3 style="margin-top:0">守られること</h3><ul>
+      <li><b>送信者の確認</b>：Yggdrasilが暗号的に保証する送信元アドレスで判定し、自己申告は使いません。</li>
+      <li><b>中継サーバーなし</b>：YggChat側のサーバーはありません。ピアが見るのは暗号化済みのリンク通信だけです。</li>
+      <li><b>端末内の保護</b>：UIはループバックのみ＋鍵付き。パスコードを設定すると履歴をAES-256-GCMで暗号化します。</li>
+      <li><b>スパム対策</b>：投稿に軽いプルーフ・オブ・ワーク（1対1は3ビット、リクエスト・参加は8ビット）。</li>
+    </ul></div>
+    <div class="card"><h3 style="margin-top:0">見えてしまうこと</h3><ul>
+      <li>接続先の公開ピアには、あなたのIPアドレスと通信量・時刻が見えます（Torで隠せます）。</li>
+      <li>グループのメンバーには、グループ名とメンバーのアドレスが共有されます。</li>
+      <li>置き配を使うと、リレーには預ける側と取りに来る側のIPと、まとめて聞いたタグの組み合わせが見えます。</li>
+      <li>ブラウザ版はブラウザ対応のwssピア（既定 <code>ygg.being.pet</code>）経由でつながります。</li>
+    </ul></div>
+  </div>
+</div></section>
+<section><div class="wrap">
+  <h2>もっと知る</h2>
+  <p class="sub">使い方から仕組み、これまでの更新まで。</p>
+  <div class="pages">
+    <a href="/guide">📖 使い方<span>グループ、招待リンク、端末移行、VPN、Tor…</span></a>
+    <a href="/security">🔐 セキュリティ<span>暗号、送信者の確認、見えてしまうこと</span></a>
+    <a href="/faq">💬 よくある質問<span>無料？ オフラインの相手には？</span></a>
+    <a href="/changelog">🗒️ 更新履歴<span>v0.3からv0.19.0まで</span></a>
+  </div>
+</div></section>

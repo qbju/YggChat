@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ダウンロード — YggChat</title>
+<meta name="description" content="YggChat v0.19.0 のダウンロード。Android APK、Windows、Linux、ブラウザ版。">
+<meta name="theme-color" content="#0b0f0c">
+<link rel="canonical" href="https://yggchat.pages.dev/download">
+<meta property="og:title" content="ダウンロード — YggChat">
+<meta property="og:description" content="YggChat v0.19.0 のダウンロード。Android APK、Windows、Linux、ブラウザ版。">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://yggchat.pages.dev/download">
+<meta property="og:image" content="https://yggchat.pages.dev/icon.png">
+<meta name="twitter:card" content="summary">
+<link rel="icon" href="/icon.png">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<nav><div class="wrap">
+  <a class="brand" href="/"><img src="/icon.png" alt="">YggChat</a>
+  <div class="links"><a class="opt" href="/guide">使い方</a><a class="opt" href="/security">セキュリティ</a><a class="opt" href="/faq">FAQ</a><a class="opt" href="/changelog">更新履歴</a><a class="on " href="/download">ダウンロード</a><a class="opt" href="https://github.com/qbju/YggChat">GitHub</a></div>
+</div></nav>
+<header class="phead"><div class="wrap"><h1>ダウンロード</h1><p>最新版は<b>v0.19.0</b>。ファイルは<a href="https://github.com/qbju/YggChat/releases">GitHub Releases</a>から配信しています。</p></div></header>
+<section style="border-top:0;padding-top:28px"><div class="wrap">
+  <div class="dl">
+    <div class="dlc"><div class="os">🤖</div><div><h3>Android（APK）</h3><p>おすすめ。QR読み取り、VPNモード、LANチャット、プロフィールサイトなど全機能。Android 7.0以降・arm64。</p><a class="btn pri" href="https://github.com/qbju/YggChat/releases/latest/download/yggchat.apk">yggchat.apk</a></div></div>
+    <div class="dlc"><div class="os">🪟</div><div><h3>Windows</h3><p>ダブルクリックでアプリのウィンドウ（WebView2）が開きます。WebView2がない環境では既定のブラウザで開きます。</p><a class="btn" href="https://github.com/qbju/YggChat/releases/latest/download/yggchat-windows-amd64.exe">windows-amd64.exe</a></div></div>
+    <div class="dlc"><div class="os">🐧</div><div><h3>Linux</h3><p><code>chmod +x</code> して <code>./yggchat-linux-amd64</code>。<code>-cli</code> で端末チャットも。</p><a class="btn" href="https://github.com/qbju/YggChat/releases/latest/download/yggchat-linux-amd64">linux-amd64</a></div></div>
+    <div class="dlc"><div class="os">🌐</div><div><h3>ブラウザ版（PWA）</h3><p>インストール不要。開いている間だけ動作します。ホーム画面に追加するとアプリのように使えます。</p><a class="btn" href="https://yggchat.surge.sh/">yggchat.surge.sh</a></div></div>
+  </div>
+  <p class="small" style="margin-top:16px">Termux用 <a href="https://github.com/qbju/YggChat/releases/latest/download/yggchat-android-arm64">android-arm64</a> ／ <a href="https://github.com/qbju/YggChat/releases/latest/download/SHA256SUMS">SHA256SUMS</a> ／ <a href="https://github.com/qbju/YggChat/releases">すべてのリリース</a></p>
+  <div class="note"><b>ベータ版です。</b>更新が多く、互換性のない変更もしばらく頻繁に入ります。できるだけ最新版を使い、相手にも更新してもらってください。</div>
+</div></section>
+<section class="alt"><div class="wrap">
+  <h2>できること比べ</h2>
+  <div class="prose" style="max-width:none"><div class="tbl"><table>
+    <tr><th></th><th>Android</th><th>Windows / Linux</th><th>ブラウザ版</th></tr>
+    <tr><td>1対1・グループ・写真</td><td>✓</td><td>✓</td><td>✓</td></tr>
+    <tr><td>置き配（Nostr）</td><td>✓</td><td>✓</td><td>✓</td></tr>
+    <tr><td>端末移行</td><td>✓</td><td>✓</td><td>✓</td></tr>
+    <tr><td>閉じていても受信</td><td>✓</td><td>起動中</td><td>—</td></tr>
+    <tr><td>QR読み取り</td><td>✓</td><td>カメラがあれば</td><td>✓</td></tr>
+    <tr><td>LANチャット・finger・プロフィールサイト</td><td>✓</td><td>✓</td><td>—</td></tr>
+    <tr><td>Tor / SOCKS5</td><td>✓</td><td>✓</td><td>—</td></tr>
+    <tr><td>端末全体のYggdrasil（VPN）</td><td>✓</td><td>—</td><td>—</td></tr>
+  </table></div></div>
+</div></section>
+<section><div class="wrap doc" style="padding:0;display:block">
+  <div class="prose"><h2>ソースからビルド</h2>
+<p>Go（<code>go.mod</code>
+のバージョン）が必要です。Twemojiの画像はリポジトリに含めていないので、最初に取得します。</p>
+<pre class="sh"><code>./twemoji/fetch.sh                      # twemoji/svg.zip を作成
+CGO_ENABLED=0 go build -trimpath -ldflags=&quot;-s -w -checklinkname=0&quot; .
+GOOS=js GOARCH=wasm go build -trimpath -ldflags=&quot;-s -w&quot; -o pwa/ygg.wasm ./wasm</code></pre>
+<p>Android APK（Gradle不使用）:
+<code>libyggchat.so</code>（<code>GOOS=android GOARCH=arm64</code>
+のバイナリ）を <code>android/</code> に置いて
+<code>android/build.sh</code>。
+<code>ANDROID_HOME</code>、<code>YGG_KEYSTORE</code>、<code>YGG_KS_PASS</code>
+で SDK と署名鍵を指定できます。GitHub
+Actions（<code>.github/workflows/build.yml</code>）が push
+ごとにAPKと各バイナリを作り、<code>v*</code>
+タグでReleaseに載せます。署名鍵は
+<code>android/yggchat.jks.enc</code>（AES-256で暗号化）で、復号キーはリポジトリのSecret
+<code>KEYSTORE_KEY</code>
+にだけあります。Secretがない場合のAPKは使い捨て鍵で署名され、インストール済みのYggChatを上書きできません。PWA（yggchat.surge.sh）の公開はActionsとは別に行っています。</p>
+</div>
+</div></section>
+
+<footer><div class="wrap">
+  <span>🌲 YggChat v0.19.0 · GPL-3.0</span>
+  <div class="r">
+    <a href="/guide">使い方</a><a href="/security">セキュリティ</a><a href="/faq">FAQ</a><a href="/changelog">更新履歴</a>
+    <a href="https://github.com/qbju/YggChat">GitHub</a><a href="https://yggchat.surge.sh/">ブラウザ版</a>
+  </div>
+</div></footer>
+</body>
+</html>

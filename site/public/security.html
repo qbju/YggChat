@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>セキュリティ — YggChat</title>
+<meta name="description" content="YggChatの暗号と通信の仕組み、プルーフ・オブ・ワーク、見えてしまう情報。">
+<meta name="theme-color" content="#0b0f0c">
+<link rel="canonical" href="https://yggchat.pages.dev/security">
+<meta property="og:title" content="セキュリティ — YggChat">
+<meta property="og:description" content="YggChatの暗号と通信の仕組み、プルーフ・オブ・ワーク、見えてしまう情報。">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://yggchat.pages.dev/security">
+<meta property="og:image" content="https://yggchat.pages.dev/icon.png">
+<meta name="twitter:card" content="summary">
+<link rel="icon" href="/icon.png">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<nav><div class="wrap">
+  <a class="brand" href="/"><img src="/icon.png" alt="">YggChat</a>
+  <div class="links"><a class="opt" href="/guide">使い方</a><a class="on opt" href="/security">セキュリティ</a><a class="opt" href="/faq">FAQ</a><a class="opt" href="/changelog">更新履歴</a><a class="" href="/download">ダウンロード</a><a class="opt" href="https://github.com/qbju/YggChat">GitHub</a></div>
+</div></nav>
+<header class="phead"><div class="wrap"><h1>セキュリティと仕組み</h1><p>何が守られて、何が見えるのか。正直に書いています。</p></div></header>
+<div class="wrap doc"><aside class="toc"><b>目次</b>
+<a href="#crypto">暗号と通信の仕組み</a>
+<a href="#pow">投稿のPoW</a>
+<a href="#verify">ファイルの検証</a>
+<a href="#license">ライセンスとクレジット</a></aside><div class="prose"><h2 id="crypto">暗号と通信の仕組み</h2>
+<ul>
+<li>メッセージはYggdrasilのセッション暗号で端末間エンドツーエンドに暗号化されます。アドレスは公開鍵から導出されるため、QR／招待リンクでアドレスを確認すれば相手の鍵も確認できます。</li>
+<li>受信メッセージの送信者は、Yggdrasilが暗号的に保証する送信元IPv6アドレスで判定しています（自己申告は使いません）。</li>
+<li><strong>ネイティブ版</strong>:
+ノードは端末内で動作。UI/APIはループバック（<code>127.0.0.1</code>／<code>[::1]</code>／<code>localhost</code>）でしか待ち受けられず、接続元アドレス・Host／Origin／Content-Typeを検証します。さらにデータフォルダの
+<code>ui-key</code> に置いた鍵（Cookieまたは <code>X-YggChat-Key</code>
+ヘッダー）がないリクエストは拒否するので、同じ端末の他アプリ・他ユーザーからも操作できません（同じユーザー権限で動く悪意あるプログラムは鍵ファイルを読めるため防げません）。ブラウザで使う場合は起動時に表示される
+<code>http://127.0.0.1:7780/?k=…</code> を開いてください。</li>
+<li><strong>PWA版</strong>:
+ノードはブラウザ内（WebAssembly）で動作し、秘密鍵と履歴はブラウザのIndexedDBにだけ保存されます。
+<ul>
+<li>ブラウザは生のTCP/UDPを開けないため、ブラウザのOriginを許可したYggdrasilピアにwssで直接つなぎます。</li>
+<li>既定は
+<code>ygg.being.pet</code>（2026-10-19時点で公開一覧から見つかった唯一のブラウザ可ピア）。</li>
+<li>YggChat側の中継サーバーはありません。ピアが見るのは暗号化済みのYggdrasilリンク通信だけです（接続元IPと通信量・時刻は見えます）。</li>
+<li>自分でピアを立てる場合: Listen に
+<code>"ws://[::]:PORT?origin=https://yggchat.surge.sh"</code>
+を書き、TLS終端してwssで公開してください。</li>
+<li>PWAはタブ／アプリを開いている間だけ動きます。</li>
+</ul></li>
+<li>パスコードを設定すると、端末内の履歴はAES-256-GCMで暗号化して保存されます（ネイティブ:
+scrypt、PWA: PBKDF2-SHA256
+31万回）。ロック中は受信せず、相手側で保留されます。秘密鍵（<code>node.json</code>／PWAの鍵）は暗号化対象外です。</li>
+<li>オフラインの相手宛ては送信側の端末に「送信待ち」として残り、双方がオンラインになったときに自動で送ります。
+v0.13.6から、新しく始める人は「置き配（Nostr）」が最初からオンです（それ以前から使っている人の設定はそのまま。設定でいつでもオフにできます）。オンの間、届かなかった文章を相手の鍵で封をして公開Nostrリレーに最大7日預けます（相手もオンにしている必要あり）。
+リレーには中身・送信者・Yggdrasilアドレスは見えません。宛先タグは二人の鍵から作る値で、相手ごと・日ごとに変わり、連絡先同士でしか計算できません（知らない人はあなたの置き配を探したり大量に送ったりできない）。送信時刻は最大48時間ぼかし、長さは1KB/2KB/4KB…の段階にそろえます。それでもリレーには、預ける側と取りに来る側のIPアドレスと、1回の取得でどのタグをまとめて聞いたかは見えます（Torを通してもタグの組み合わせは見えます）。</li>
+<li>知らない相手からはメッセージリクエストとして届き、承認するまでこちらの名前・自己紹介・アイコンは共有されません。</li>
+</ul>
+
+<h2 id="pow">投稿のPoW</h2>
+<p>メッセージには、送る側の端末で少しだけ計算（プルーフ・オブ・ワーク）した値を付けます。大量のスパムを送るコストを上げるためで、ふつうに使う分には一瞬です。</p>
+<ul>
+<li>1対1は3ビット、知らない人へのメッセージリクエストとグループへの参加は8ビット。グループの投稿はホストが「なし／3〜16ビット」から選べます（1投稿につき1回の計算で、メンバー全員分に使います）。</li>
+<li>受け取る側が足りないと判断すると「何ビット必要か」を返し、送る側が自動で計算し直します。</li>
+<li>v0.18.0以前の版はPoWを付けません。互換のため、3ビット以下でよい場所ではPoWなしも受け取ります（v0.24まで）。設定の「リクエストと参加にPoWを必須にする」（既定オフ）をオンにすると、PoWなしのリクエストと参加を断ります。ホストがPoWを変えたグループでは、PoWなしの投稿は届きません。</li>
+</ul>
+
+<h2 id="verify">ファイルの検証</h2>
+<p><code>SHA256SUMS</code>
+で各ファイルのハッシュを確認できます。バイナリは未署名のため、WindowsではSmartScreenの警告が出ます。</p>
+
+<h2 id="license">ライセンスとクレジット</h2>
+<p>YggChat is free software, licensed under the GNU General Public
+License v3.0 or later (<a
+href="https://github.com/qbju/YggChat/blob/main/LICENSE">LICENSE</a>).
+Copyright (C) 2026 h6e and YggChat contributors.</p>
+<ul>
+<li>内蔵しているYggdrasil Network（yggdrasil-go/yggstack:
+LGPLv3+静的リンク例外、ironwood/phony:
+MPL-2.0）、gVisor（Apache-2.0）、Go（BSD-3-Clause）、quic-go（MIT）、coder/websocket（ISC）、qrcode-generator（MIT,
+Kazuhiko Arase）、jsQR（Apache-2.0, Cosmo
+Wolfe）、Windows版のgo-webview2（MIT）・WebView2
+SDK（BSD-3-Clause）・go-winloader（ISC）などの一覧と全文は <a
+href="https://github.com/qbju/YggChat/blob/main/THIRD_PARTY_NOTICES.txt">THIRD_PARTY_NOTICES.txt</a>
+にあります（アプリの設定→About、または <code>yggchat -licenses</code>
+でも表示）。</li>
+<li>yggdrasil-go は WebAssembly
+対応のため一部ファイルを改変しています（該当ファイルに改変の注記あり）。</li>
+<li>絵文字は<a href="https://github.com/jdecked/twemoji">Twemoji</a>（©
+Twitter, Inc. and other contributors, CC-BY
+4.0）の画像を同梱して表示します（CDN不使用）。</li>
+<li>「QRコード」は株式会社デンソーウェーブの登録商標です。</li>
+</ul>
+</div></div>
+
+<footer><div class="wrap">
+  <span>🌲 YggChat v0.19.0 · GPL-3.0</span>
+  <div class="r">
+    <a href="/guide">使い方</a><a href="/security">セキュリティ</a><a href="/faq">FAQ</a><a href="/changelog">更新履歴</a>
+    <a href="https://github.com/qbju/YggChat">GitHub</a><a href="https://yggchat.surge.sh/">ブラウザ版</a>
+  </div>
+</div></footer>
+</body>
+</html>

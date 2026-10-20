@@ -1,0 +1,22 @@
+<header class="phead"><div class="wrap"><h1>よくある質問</h1><p>見つからないことは <a href="https://github.com/qbju/YggChat/issues">GitHubのIssues</a> へ。</p></div></header>
+<section class="faq" style="border-top:0;padding-top:24px"><div class="wrap">
+  <h3 style="margin:8px 0 4px;color:var(--dim);font-size:14px">はじめに</h3>
+  <details><summary>無料ですか？</summary><p>無料です。広告もありません。GPL-3.0のオープンソースで、ソースは<a href="https://github.com/qbju/YggChat">GitHub</a>にあります。</p></details>
+  <details><summary>Yggdrasilって何？</summary><p>公開鍵からIPv6アドレス（200::/7）を作り、エンドツーエンドで暗号化してルーティングする実験的なメッシュネットワークです。YggChatはそのノードを内蔵しているので、別途インストールする必要はありません。</p></details>
+  <details><summary>アカウント登録は？</summary><p>ありません。起動すると鍵が作られ、そこから導かれるYggdrasilアドレスがあなたのIDになります。メールアドレスや電話番号は使いません。</p></details>
+  <details><summary>どれを使えばいい？</summary><p>Androidならアプリ（APK）がおすすめです。すぐ試すならブラウザ版（PWA）。ブラウザ版はタブを開いている間だけ動き、LANチャット・Tor・プロフィールサイトなどは使えません。<a href="/download">ダウンロード</a>で比べられます。</p></details>
+  <h3 style="margin:28px 0 4px;color:var(--dim);font-size:14px">使い方</h3>
+  <details><summary>相手を追加するには？</summary><p>自分のQRコードか追加リンクを相手に見せ、相手が「新しいチャット」で読むか貼り付けます。ドメインのAAAAレコードにアドレスを登録しておけば、ドメイン名でも追加できます。</p></details>
+  <details><summary>相手がオフラインのときは？</summary><p>送信側の端末に「送信待ち」として残り、双方がオンラインになったときに自動で届きます。置き配（Nostr）をオンにしていれば、相手の鍵で封をして公開リレーに最大7日預けます。</p></details>
+  <details><summary>グループは何人まで？</summary><p>最初は24人で、ホストが24〜1024人から選べます。25人以上のグループはメンバー全員がv0.19.0以上である必要があります。</p></details>
+  <details><summary>機種変更したら？</summary><p>設定の「端末移行」で、新しい端末のQRを古い端末で読むだけです。片方しか手元にない場合は、パスフレーズで暗号化したバックアップファイルも使えます。</p></details>
+  <details><summary>送ったメッセージを消せる？</summary><p>吹き出しを長押し（PCは右クリック）で、編集や「相手の画面からも削除」ができます。すでに読まれた内容や、置き配でリレーに預けた分は取り消せません。</p></details>
+  <h3 style="margin:28px 0 4px;color:var(--dim);font-size:14px">安全性</h3>
+  <details><summary>なりすましはできない？</summary><p>受信したメッセージの送信者は、Yggdrasilが暗号的に保証する送信元アドレスで判定しています。アドレスは公開鍵から作られるので、最初にQRや招待リンクでアドレスを確認すれば、以後なりすましはできません。</p></details>
+  <details><summary>IPアドレスは相手に見える？</summary><p>チャット相手に見えるのはYggdrasilアドレスです。ただし接続先の公開ピアにはあなたのIPアドレスが見えます。隠したい場合はアプリ版の「Tor / SOCKS5」を使ってください。詳しくは<a href="/security">セキュリティ</a>へ。</p></details>
+  <details><summary>スパムは来ない？</summary><p>知らない人からはメッセージリクエストとして届き、承認するまで名前もアイコンも見せません。送信には軽いプルーフ・オブ・ワークが必要で、大量送信のコストを上げています。</p></details>
+  <h3 style="margin:28px 0 4px;color:var(--dim);font-size:14px">そのほか</h3>
+  <details><summary>自分でピアを立てられますか？</summary><p>はい。アプリは任意のYggdrasilピアに接続できます。ブラウザ版向けには、Listenに <code>ws://[::]:PORT?origin=https://yggchat.surge.sh</code> を書き、TLS終端してwssで公開してください。</p></details>
+  <details><summary>Windowsで警告が出ます</summary><p>バイナリにコード署名をしていないため、SmartScreenの警告が出ます。<a href="https://github.com/qbju/YggChat/releases/latest/download/SHA256SUMS">SHA256SUMS</a>でハッシュを確認できます。</p></details>
+  <details><summary>まだベータ？</summary><p>はい。更新が多く、互換性のない変更もしばらく入ります。できるだけ最新版を使い、相手にも更新してもらってください。</p></details>
+</div></section>

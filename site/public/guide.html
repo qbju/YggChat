@@ -1,0 +1,280 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>使い方 — YggChat</title>
+<meta name="description" content="YggChatの機能ごとの使い方。グループ、招待リンク、端末移行、ドメイン、LAN、finger、Tor、Android VPNモード、CLI。">
+<meta name="theme-color" content="#0b0f0c">
+<link rel="canonical" href="https://yggchat.pages.dev/guide">
+<meta property="og:title" content="使い方 — YggChat">
+<meta property="og:description" content="YggChatの機能ごとの使い方。グループ、招待リンク、端末移行、ドメイン、LAN、finger、Tor、Android VPNモード、CLI。">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://yggchat.pages.dev/guide">
+<meta property="og:image" content="https://yggchat.pages.dev/icon.png">
+<meta name="twitter:card" content="summary">
+<link rel="icon" href="/icon.png">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<nav><div class="wrap">
+  <a class="brand" href="/"><img src="/icon.png" alt="">YggChat</a>
+  <div class="links"><a class="on opt" href="/guide">使い方</a><a class="opt" href="/security">セキュリティ</a><a class="opt" href="/faq">FAQ</a><a class="opt" href="/changelog">更新履歴</a><a class="" href="/download">ダウンロード</a><a class="opt" href="https://github.com/qbju/YggChat">GitHub</a></div>
+</div></nav>
+<header class="phead"><div class="wrap"><h1>使い方</h1><p>機能ごとの説明です。「アプリ版のみ」はAndroid・Windows・Linux版で使え、ブラウザ版では使えません。</p></div></header>
+<div class="wrap doc"><aside class="toc"><b>目次</b>
+<a href="#start">インストールと起動</a>
+<a href="#group">グループチャット</a>
+<a href="#links">リンクとURLスキーム</a>
+<a href="#edit">メッセージの編集・削除</a>
+<a href="#move">端末移行</a>
+<a href="#domain-add">ドメイン名で追加</a>
+<a href="#domain">確認済みドメイン</a>
+<a href="#site">プロフィールサイト</a>
+<a href="#lan">LANチャット</a>
+<a href="#finger">finger</a>
+<a href="#tor">Tor / SOCKS5</a>
+<a href="#sysygg">端末のYggdrasilを使う</a>
+<a href="#vpn">Android VPNモード</a>
+<a href="#cli">端末チャット（CLI）</a></aside><div class="prose"><h2 id="start">インストールと起動</h2>
+<div class="tbl"><table>
+<thead>
+<tr class="header">
+<th>環境</th>
+<th>使い方</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>PWA（インストール不要）</td>
+<td><a
+href="https://yggchat.surge.sh/">https://yggchat.surge.sh/</a></td>
+</tr>
+<tr class="even">
+<td>Windows</td>
+<td><code>yggchat-windows-amd64.exe</code> をダブルクリック →
+アプリのウィンドウ（WebView2）が開きます。WebView2ランタイムがない環境では既定のブラウザで鍵付きの
+<code>http://127.0.0.1:7780/?k=…</code> を開きます</td>
+</tr>
+<tr class="odd">
+<td>Android</td>
+<td>APK版推奨。Termuxなら <code>yggchat-android-arm64</code></td>
+</tr>
+<tr class="even">
+<td>Linux</td>
+<td><code>./yggchat-linux-amd64</code></td>
+</tr>
+</tbody>
+</table></div>
+<ul>
+<li>データ: <code>~/.yggchat/</code>（<code>node.json</code> =
+秘密鍵、<code>chat.json</code> = 履歴、どちらも <code>0600</code>）</li>
+<li>オプション: <code>-peers</code> <code>-listen</code>
+<code>-ui</code> <code>-data</code> <code>-cli</code>
+<code>-nowindow</code> <code>-licenses</code></li>
+<li>Windows版はウィンドウを閉じると終了します。<code>-nowindow</code>
+を付けると従来どおりウィンドウを出さずにブラウザから使えます。2回起動した場合は動いているノードのウィンドウを開くだけです。</li>
+<li>ビルド済みファイルは <a
+href="https://github.com/qbju/YggChat/releases">Releases</a> / <a
+href="https://github.com/qbju/YggChat/actions">Actions</a>
+と、アプリの設定→ダウンロードから入手できます。</li>
+</ul>
+
+<h2 id="group">グループチャット</h2>
+<p>「＋」→「グループを作る」で、連絡先（またはアドレス）からメンバーを選びます。人数の上限は最初24人で、ホストがグループ設定で24〜1024人から選べます（v0.19.0〜）。</p>
+<ul>
+<li>サーバーはありません。送ったメッセージはメンバー1人ずつに直接届け、オフラインの人にはつながったときに届けます（置き配オンなら、連絡先どうしのメンバーにはNostrにも預けます）。</li>
+<li>メンバー全員に、グループ名とメンバーのアドレスが共有されます。メンバーなら誰でも名前を変更できます。退出すると他のメンバーに通知されます。</li>
+<li>作った人がホストです（v0.16.0〜）。メンバーの追加・削除はホストと副管理者だけができます。v0.16.0より前に作ったグループにはホストがいません（誰でも追加できる従来どおり）。</li>
+<li>副管理者（v0.19.0〜、最大10人、ホストが任命）:
+参加の承認、自分の招待リンクの発行、一般メンバーの追加・削除ができます。設定・パスワード・副管理者の任命はホストだけ。ホストがオフラインでも、副管理者がオンラインなら新しい人が入れます。ホストが退出すると、最初の副管理者がホストを引き継ぎます（副管理者がいないと、以後だれも追加・削除できません）。</li>
+<li>25人以上のグループ（v0.19.0〜）:
+メンバー一覧が1パケットに収まらないので分割して送ります。メンバー全員がv0.19.0以上である必要があります。65人以上のグループでは、オフラインのメンバーへのNostr置き配はしません（リレーにメンバーの数だけ預けることになるため）。</li>
+<li>連絡先でない人から招待されたグループは「招待」として表示され、参加するまで返信できません。</li>
+<li>招待リンク（v0.17.0〜）: ホストと副管理者はグループ情報の「🔗
+招待リンク」でリンクとQRを出せます。リンクは人ごとに別で、開いた人はリンクを出した人がオンラインのときに参加できます。「リセット」するとその人の前のリンクは使えなくなります（他の人のリンクはそのまま）。リンクにはホストのYggdrasilアドレス・グループID・合言葉（ランダム8バイト）が入っています。v0.17.0より前のホストのグループには使えません。</li>
+<li>グループ設定（v0.18.0〜、ホストだけが変更）:
+写真を送れるか／参加に承認が必要か（ホストか副管理者が承認）／新しく入った人に過去のメッセージを見せるか／消えるメッセージ（5分〜4週間）／参加パスワード／人数の上限（v0.19.0〜）／投稿のPoW（v0.19.0〜、なし・3〜16ビット）。
+<ul>
+<li>設定はメンバーの端末それぞれが守る仕組みです。v0.18.0より前の版のメンバーには効きません（写真を送れてしまう、消えない
+など）。改造したアプリも防げません。</li>
+<li>承認・パスワードは招待リンクから入る人に使います（ホスト・副管理者が直接追加する場合は不要）。パスワードはホストと副管理者の端末にだけハッシュ（PBKDF2-SHA256）で保存し、5回間違えると10分間受け付けません。</li>
+<li>過去のメッセージは、参加を受け付けた人（ホストか副管理者）の端末にある最新30件が新メンバーに届きます（写真は「📷」の文字だけ、長い文は省略）。中継した人を信頼する前提です。</li>
+</ul></li>
+<li>写真も送れます（v0.16.0〜。v0.16.0より前の版のメンバーには、グループではなく1対1の写真として届きます）。編集・送信取り消しは1対1のみ。v0.13.5より前の版はグループのメッセージを受け取れません。</li>
+</ul>
+
+<h2 id="links">リンクとURLスキーム</h2>
+<div class="tbl"><table>
+<thead>
+<tr class="header">
+<th>リンク</th>
+<th>意味</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td><code>https://yggchat.surge.sh/#add=&lt;アドレス&gt;&amp;n=&lt;名前&gt;</code>
+/ <code>yggchat://add/&lt;アドレス&gt;?n=&lt;名前&gt;</code></td>
+<td>相手を追加</td>
+</tr>
+<tr class="even">
+<td><code>https://yggchat.surge.sh/#j=&lt;コード&gt;</code> /
+<code>yggchat://join/&lt;コード&gt;</code></td>
+<td>グループに参加（コードは43文字）</td>
+</tr>
+</tbody>
+</table></div>
+<ul>
+<li>Android版は <code>yggchat://</code> と <code>web+yggchat://</code>
+を開けます。<code>https://yggchat.surge.sh/</code>
+のリンクも開けますが、Androidの「対応リンクを開く」をアプリ設定でオンにする必要がある場合があります（自動確認はしていません）。</li>
+<li>PWAはインストールしたChrome系ブラウザ（主にパソコン）で
+<code>web+yggchat://</code> を受け取れます。ブラウザは
+<code>yggchat://</code>
+のような独自スキームをWebアプリに渡せないためです。</li>
+<li>Windows / Linux版のスキーム登録はまだです。https
+のリンクを使ってください。</li>
+<li>新しいチャットのアドレス欄に貼り付けたり、QRで読んだりしても使えます。</li>
+</ul>
+
+<h2 id="edit">メッセージの編集・削除</h2>
+<p>吹き出しを長押し（PCは右クリック）→
+コピー／編集／自分の画面から削除／相手の画面からも削除。</p>
+<ul>
+<li>編集と送信取り消しは自分のメッセージだけで、相手は元の送信者のアドレスからの指示しか受け付けません。</li>
+<li>相手がオフラインなら、つながったときに反映されます。</li>
+<li>すでに読まれた内容やNostr置き配に預けた分は消せません。</li>
+</ul>
+
+<h2 id="move">端末移行</h2>
+<p>設定 →「端末移行」。PWAとアプリの間でも移せます。</p>
+<ul>
+<li><strong>新しい端末</strong>で「この端末で受け取る」→
+移行コード（ygm1:…）とQRが出ます。</li>
+<li><strong>古い端末</strong>で「この端末から送る」→
+カメラでそのQRを読む（カメラがなければコードを入力。履歴も移すか選べます）。鍵とデータはYggdrasil経由で直接届きます（LAN不要・別の回線同士でもOK・途中で切れても続きから再送）。</li>
+<li>中身は新しい端末がその場で作った使い捨てのX25519鍵あてに暗号化（AES-256-GCM）されるので、コードを持つ端末以外は読めません。コードは自分の端末にだけ入れてください。</li>
+<li>終わったら古い端末のIDは消してください（同じIDを2台で動かすと届かなくなります。完了時に案内が出ます）。</li>
+<li>片方しか手元にない時は「バックアップを書き出す／読み込む」（パスフレーズで暗号化した
+.ygb
+ファイル）。Androidアプリ版はファイル保存に未対応なので直接転送を使ってください。</li>
+</ul>
+
+<h2 id="domain-add">ドメイン名で追加</h2>
+<p>「新しいチャット」にドメイン名を入れると、そのドメインのAAAAレコードを引き、Yggdrasilアドレス（200::/7）が入っていればその相手と会話を始めます。自分のドメインに
+<code>chat.example.com AAAA 200:…</code>
+のように登録しておけば、アドレスの代わりにドメインを教えられます。</p>
+<ul>
+<li>問い合わせはDNS-over-HTTPS（Cloudflare →
+Google）。SOCKS5オン時はプロキシ経由で、システムのDNSには落ちません（ネイティブ版はSOCKSオフでDoHが使えないときだけシステムのDNSを使います）。</li>
+<li>DNSはなりすましできるので、追加時に表示されるアドレスを確認してください。一度追加すれば、以降はアドレス（鍵）で通信します。</li>
+</ul>
+
+<h2 id="domain">確認済みドメイン</h2>
+<p>設定のプロフィールにドメイン（例:
+<code>chat.example.com</code>）を入れると、プロフィールと一緒に相手へ届きます。受け取った側は、そのドメインのAAAAレコードを引き、送ってきた人のYggdrasilアドレスと一致したときだけ「✓
+chat.example.com」と表示します。</p>
+<ul>
+<li>アドレス→ドメイン：プロフィールは本人の鍵から直接届くので、なりすましできません（逆引きDNSの代わり）。</li>
+<li>ドメイン→アドレス：AAAAレコードが一致することで、そのドメインの持ち主だと確かめます。</li>
+<li>設定するときは、先にDNSでAAAAに自分のアドレスを登録してください（一致しないと保存できません）。確認は12時間ごとにやり直します。</li>
+</ul>
+
+<h2 id="site">プロフィールサイト</h2>
+<p>設定の「プロフィールサイト」に書いたHTMLの1ページを、自分のYggdrasilアドレスの80番ポートで公開します（<code>http://[200:…]/</code>）。Yggdrasilにつながっている人なら、普通のブラウザでも見られます。</p>
+<ul>
+<li>オフの間は80番ポート自体を閉じます。公開中は、オンラインかどうかが外から分かります。</li>
+<li>置けるのは1ページ（256KBまで）だけで、ほかのファイルやアプリの情報には一切アクセスできません。画像は
+<code>data:</code> URL で埋め込めます。</li>
+<li>連絡先情報の「サイト」ボタンで、相手のページをアプリ内（自分のYggdrasilノード経由）で開けます。スクリプト・フォーム・外部の読み込みは無効にして表示します。</li>
+<li>AndroidのVPNモードでは8080番で待ち受けて80番に付け替えます。PWA（ブラウザ版）では公開も閲覧もできません。</li>
+</ul>
+
+<h2 id="lan">LANチャット</h2>
+<p><strong>設定→LANチャット</strong>
+をオンにすると、Yggdrasilのマルチキャスト探索で同じWi-Fi・有線LAN・テザリング上のノードを見つけ、リンクローカルで直接ピアになります。インターネットや公開ピアがなくても同じLAN内で会話できます。</p>
+<ul>
+<li>「近くのノード」に表示名（互いにLANで直接つながっている相手とだけ交換）とアドレスが出て、「話す」で開けます。</li>
+<li>LANパスワードを設定すると、同じパスワードのノードとだけピアになります（Yggdrasil公式のmulticast
+Password）。</li>
+<li>オンの間、同じLANの人にはあなたのアドレスと表示名が見えます。Androidでは有効中だけMulticastLockを取ります。</li>
+<li>システムYggdrasilモードでは端末側Yggdrasilの設定に従います。PWAはLANを使えません。</li>
+</ul>
+
+<h2 id="finger">finger</h2>
+<p><strong>設定→finger</strong> をオンにすると、Yggdrasil上の誰でも
+<code>finger @[あなたのアドレス]</code>（TCP 79番, RFC 1288）で表示名と
+<code>.plan</code> を見られます。</p>
+<ul>
+<li>オンライン状態・連絡先・鍵などは返しません。転送（<code>user@host@host</code>）は拒否します。</li>
+<li>オフの間はTCP
+79番の待ち受け自体を閉じ、UDPの問い合わせにも無言なので、外からYggChatだと見分けられません。</li>
+<li>他人をfingerすると、問い合わせ先にはあなたのアドレスが見えます。</li>
+<li>アプリ内の「fingerで調べる」や連絡先の「finger」ボタンで、他のYggChat（UDPの
+<code>{t:"fq"}</code>）や一般のfingerサーバー（TCP
+79）を問い合わせられます。</li>
+<li>AndroidのVPNモードではOSが79番を開けないため、TUNの中継で79番⇔7979番を付け替えます。</li>
+<li>PWAはTCPを使えないので、YggChat同士の問い合わせだけ対応です。</li>
+</ul>
+
+<h2 id="tor">Tor / SOCKS5</h2>
+<p>設定の「Tor /
+SOCKS5」をオンにすると、YggChatがインターネットにつなぐ通信（Yggdrasilのピア、Nostrリレー、公開ピア一覧の取得）をすべてSOCKS5プロキシ経由にします。Androidは<a
+href="https://orbot.app/">Orbot</a>（127.0.0.1:9050）、PCはTor（9050）またはTor
+Browser（9150）を先に起動してください。</p>
+<ul>
+<li>公開ピアやNostrリレーに、自分のIPアドレスが見えなくなります（Torの場合）。ホスト名はプロキシ側で解決します。</li>
+<li>プロキシが止まっていても直接はつながりません（接続中0になります）。tcp://・tls://
+のピアだけ使い、quic://・ws:// のピアは使いません。</li>
+<li>自分で設定した待ち受け（<code>-listen</code>）、LANチャット、端末のYggdrasil／VPNモードは対象外です。PWA（ブラウザ版）では使えません。</li>
+<li>Torを通しても、置き配の宛先タグの組み合わせや、Yggdrasil上の相手とのやりとりそのもの（相手のアドレス）は消えません。</li>
+</ul>
+
+<h2 id="sysygg">端末のYggdrasilを使う</h2>
+<p>Yggdrasil公式Androidアプリや、PCで常駐しているyggdrasilサービス（TUN）があれば、<strong>設定→ピア→「端末のYggdrasilを使う」</strong>
+でそちら経由に切り替えられます（またはデータフォルダに
+<code>system-ygg</code> ファイル、環境変数
+<code>YGGCHAT_SYSTEM=1</code>）。</p>
+<ul>
+<li>アドレスは端末側Yggdrasilのものになり、ピア設定もそちらで行います。</li>
+<li>内蔵ノードの鍵は残るので、オフにすれば元のアドレスに戻ります。</li>
+<li>このモードではNostr置き配は使えません。</li>
+<li>受信はUDP 7777番をOS上で待ち受け、送信元が <code>200::/7</code>
+のものだけを受け付けます。</li>
+</ul>
+
+<h2 id="vpn">Android VPNモード</h2>
+<p><strong>設定→ピア→「YggChatを端末のYggdrasilにする（VPN）」</strong>
+をオンにすると、公式アプリの代わりになります。</p>
+<ul>
+<li><code>200::/7</code>
+宛てだけをVPN（TUN）で受け持ち、ブラウザやSSHなど他のアプリもYggdrasilに接続できます。</li>
+<li>アドレス・鍵はYggChatのまま。通常のネット通信はVPNを通りません（allowBypass
+/ IPv4は素通し）。</li>
+<li>TUNのfdは同じアプリ（同じUID）からだけ受け取ります。公式アプリのVPNとは同時に使えません。</li>
+<li><strong>「外からの接続」</strong>
+で、Yggdrasil上の他人からこの端末への接続を選べます:
+すべて閉じる（既定）／指定ポートだけ開ける／すべて開ける。
+閉じている間も、自分から開いた接続の返事・YggChatのチャット（UDP
+7777）・オン時のfingerは通り、それ以外は黙って捨てる（pingにも答えない）ので、外からは空のホストに見えます。</li>
+</ul>
+
+<h2 id="cli">端末チャット（CLI）</h2>
+<pre class="sh"><code>./yggchat-linux-amd64 -cli        # Termux: ./yggchat-android-arm64 -cli</code></pre>
+<p>同じ <code>-ui</code>
+でノードが動いていればそれにつながり、なければその場でノードを起動します（ノードのログは
+<code>データ/node.log</code> へ）。</p>
+<p><code>/help</code>
+でコマンド一覧。<code>/list</code>、<code>/open &lt;番号|名前&gt;</code>、<code>/add &lt;アドレス&gt; [名前]</code>。それ以外の入力は開いている相手に送信。受信はリアルタイムで表示されます。</p>
+</div></div>
+
+<footer><div class="wrap">
+  <span>🌲 YggChat v0.19.0 · GPL-3.0</span>
+  <div class="r">
+    <a href="/guide">使い方</a><a href="/security">セキュリティ</a><a href="/faq">FAQ</a><a href="/changelog">更新履歴</a>
+    <a href="https://github.com/qbju/YggChat">GitHub</a><a href="https://yggchat.surge.sh/">ブラウザ版</a>
+  </div>
+</div></footer>
+</body>
+</html>
