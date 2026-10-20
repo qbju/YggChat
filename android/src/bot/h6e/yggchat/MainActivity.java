@@ -17,6 +17,9 @@ public class MainActivity extends Activity {
     // True only while the main frame shows the app's own UI; the YggAndroid
     // bridge refuses to act for any other page.
     private volatile boolean onHome;
+    // Pending <input type=file> callback from the WebView.
+    private ValueCallback<Uri[]> fileCb;
+    static final int FILE_REQ = 3;
 
     // Opens the UI through the launch URL, which gives the WebView the API key
     // as an HttpOnly cookie. Waits for the node to create the key on first run.
@@ -133,6 +136,31 @@ public class MainActivity extends Activity {
                 if (r.isForMainFrame()) { final WebView vv = v; new Handler().postDelayed(new Runnable(){ public void run(){ loadHome(vv, 0); }}, 700); }
             }
         });
+        // <input type="file">: WebView shows nothing unless the app opens a picker.
+        web.setWebChromeClient(new WebChromeClient() {
+            @Override public boolean onShowFileChooser(WebView v, ValueCallback<Uri[]> cb, FileChooserParams p) {
+                if (fileCb != null) { fileCb.onReceiveValue(null); fileCb = null; }
+                if (!onHome) { cb.onReceiveValue(null); return true; }
+                Intent i = new Intent(Intent.ACTION_GET_CONTENT).addCategory(Intent.CATEGORY_OPENABLE).setType("*/*");
+                // Only real MIME types narrow the picker; extensions like .ygb would hide everything.
+                java.util.ArrayList<String> mimes = new java.util.ArrayList<String>();
+                boolean any = false;
+                if (p.getAcceptTypes() != null) for (String t : p.getAcceptTypes()) for (String a : t.split(",")) {
+                    a = a.trim();
+                    if (a.isEmpty()) continue;
+                    if (a.contains("/") && !a.equals("application/octet-stream")) mimes.add(a); else any = true;
+                }
+                if (!any && !mimes.isEmpty()) {
+                    if (mimes.size() == 1) i.setType(mimes.get(0));
+                    else i.putExtra(Intent.EXTRA_MIME_TYPES, mimes.toArray(new String[0]));
+                }
+                if (p.getMode() == FileChooserParams.MODE_OPEN_MULTIPLE) i.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
+                fileCb = cb;
+                try { startActivityForResult(Intent.createChooser(i, null), FILE_REQ); }
+                catch (Exception e) { fileCb = null; cb.onReceiveValue(null); }
+                return true;
+            }
+        });
         web.setDownloadListener(new DownloadListener() {
             public void onDownloadStart(String url, String ua, String cd, String mime, long len) { openOutside(Uri.parse(url)); }
         });
@@ -145,6 +173,20 @@ public class MainActivity extends Activity {
     }
 
     @Override protected void onActivityResult(int code, int res, Intent data) {
+        if (code == FILE_REQ) {
+            ValueCallback<Uri[]> cb = fileCb; fileCb = null;
+            if (cb == null) return;
+            Uri[] r = null;
+            if (res == RESULT_OK && data != null) {
+                if (data.getClipData() != null) {
+                    int n = data.getClipData().getItemCount();
+                    r = new Uri[n];
+                    for (int k = 0; k < n; k++) r[k] = data.getClipData().getItemAt(k).getUri();
+                } else if (data.getData() != null) r = new Uri[]{ data.getData() };
+            }
+            cb.onReceiveValue(r);
+            return;
+        }
         if (code != 2) return;
         if (res == RESULT_OK) { startService(new Intent(this, YggVpn.class)); vpnResult(true); }
         else { getSharedPreferences("ygg", 0).edit().putBoolean("vpn", false).apply(); vpnResult(false); }
