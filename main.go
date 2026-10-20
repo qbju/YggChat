@@ -72,6 +72,7 @@ type Message struct {
 	Hid bool   `json:"hid,omitempty"`
 	// GImg: a hidden group copy whose photo is on the visible message (Of).
 	GImg bool `json:"gimg,omitempty"`
+	Hist bool `json:"hist,omitempty"` // relayed by the group host as history for a new member (v0.18)
 }
 
 type Contact struct {
@@ -246,6 +247,8 @@ type App struct {
 	ackMu    sync.Mutex
 	acks     map[string]chan struct{}
 	joins    map[string]string // group id -> host, while our invite-link join is pending (guarded by store.mu)
+	pwMu     sync.Mutex
+	pwFails  map[string]*pwFail // wrong group passwords per address (groupset.go)
 	flMu     sync.Mutex
 	inflight map[string]bool
 	probing  map[string]bool // peers with a quick re-probe running (flMu)
@@ -322,6 +325,11 @@ type wire struct {
 	GO  string   `json:"go,omitempty"`  // host (gi, v0.16+)
 	GH  string   `json:"gh,omitempty"`  // hash of name+members (msg)
 	Tok string   `json:"tok,omitempty"` // invite-link token (gj, v0.17)
+	// v0.18 group settings
+	GS *GroupSet `json:"gs,omitempty"` // host's settings (gi)
+	Pw string    `json:"pw,omitempty"` // join password (gj)
+	K  string    `json:"k,omitempty"`  // gjn kind: "pw" (password needed/wrong), "wait" (approval pending)
+	By string    `json:"by,omitempty"` // ghs: original sender of a history message
 }
 
 func (a *App) serveChat() {
@@ -406,7 +414,7 @@ func (a *App) serveChat() {
 			a.onFileChunk(from, w)
 		case "prof", "ttl":
 			a.handleCtl(from, w)
-		case "gq", "gi", "gl", "gj", "gjn":
+		case "gq", "gi", "gl", "gj", "gjn", "ghs":
 			a.onGroupCtl(from, w)
 		case "edit", "del":
 			if a.onCtl(from, w) {
@@ -1356,6 +1364,7 @@ func main() {
 	a.nostrHandlers(mux)
 	a.groupHandlers(mux)
 	a.inviteHandlers(mux)
+	a.groupSetHandlers(mux)
 	a.socksHandlers(mux)
 	a.siteHandlers(mux)
 	a.resolveHandlers(mux)

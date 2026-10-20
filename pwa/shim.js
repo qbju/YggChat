@@ -176,7 +176,58 @@
   // and gh (hash of name+members); the copies are hidden, the "g:<id>" message shows.
   const isG = k => String(k || '').startsWith('g:');
   const MAXG = 20;
-  const gView = g => ({ addr: 'g:' + g.id, nick: g.name, avatar: '👥', group: true, members: g.members, req: !!g.req, left: !!g.left, owner: g.owner || '' });
+  const gView = g => { const v = { addr: 'g:' + g.id, nick: g.name, avatar: '👥', group: true, members: g.members, req: !!g.req, left: !!g.left, owner: g.owner || '', set: g.set || {} }; if (g.set && g.set.ttl) v.ttl = g.set.ttl; if (g.pend && g.pend.length) v.pend = g.pend; return v; };
+  // ---- group settings (v0.18, see groupset.go) ----
+  const GTTLS = [0, 300, 3600, 86400, 604800, 2419200];
+  const cleanSet = s => { s = s || {}; const o = {}; if (s.nf) o.nf = true; if (s.ap) o.ap = true; if (s.hi) o.hi = true; if (s.pw) o.pw = true; if (GTTLS.includes(s.ttl | 0) && s.ttl) o.ttl = s.ttl | 0; return o; };
+  const ttlText = s => ({ 0: 'オフ', 300: '5分', 3600: '1時間', 86400: '1日', 604800: '1週間', 2419200: '4週間' })[s] || 'オン';
+  const onOff = b => b ? 'オン' : 'オフ';
+  function setDiff(a, b) {
+    a = a || {}; b = b || {}; const o = [];
+    if (!!a.nf !== !!b.nf) o.push('写真の送信を' + onOff(!b.nf) + 'にしました');
+    if (!!a.ap !== !!b.ap) o.push('参加の承認を' + onOff(b.ap) + 'にしました');
+    if (!!a.hi !== !!b.hi) o.push('新メンバーへの履歴共有を' + onOff(b.hi) + 'にしました');
+    if ((a.ttl | 0) !== (b.ttl | 0)) o.push('消えるメッセージを「' + ttlText(b.ttl | 0) + '」にしました');
+    if (!!a.pw !== !!b.pw) o.push('参加パスワードを' + onOff(b.pw) + 'にしました');
+    return o;
+  }
+  const PWITER = 100000;
+  async function pbk(p, salt, len) { const k = await crypto.subtle.importKey('raw', new TextEncoder().encode(p), 'PBKDF2', false, ['deriveBits']); return new Uint8Array(await crypto.subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt, iterations: PWITER }, k, len * 8)); }
+  async function hashPass(p) { const salt = crypto.getRandomValues(new Uint8Array(16)); return 'p1:' + hexOf(salt) + ':' + hexOf(await pbk(p, salt, 32)); }
+  async function checkPass(h, p) {
+    const x = String(h || '').split(':'); if (x.length !== 3 || x[0] !== 'p1' || !p) return false;
+    const want = hexBytes(x[2]); const got = await pbk(p, hexBytes(x[1]), want.length);
+    let d = got.length ^ want.length; for (let i = 0; i < want.length; i++) d |= got[i] ^ want[i]; return d === 0;
+  }
+  const pwFails = {};
+  function pwLimited(a, failed) { const t = Date.now(); let f = pwFails[a]; if (!f || t - f.at > 600000) f = pwFails[a] = { n: 0, at: t }; if (failed) f.n++; return f.n >= 5; }
+  function historyOf(gid) {
+    const t = now(), out = [];
+    for (let i = st.messages.length - 1; i >= 0 && out.length < 30; i--) { const m = st.messages[i]; if (m.peer !== 'g:' + gid || m.hid || m.sys || (m.exp && m.exp <= t) || (!m.text && !m.img)) continue; out.push(m); }
+    return out.reverse();
+  }
+  function sendHistory(to, gid, hist) {
+    const t = now();
+    const ws = hist.map(m => {
+      let text = m.img ? (m.text ? '📷 ' + m.text : '📷 写真') : m.text;
+      if (u8len(text) > 700) { while (u8len(text) > 700) text = text.slice(0, -1); text += '…（省略）'; }
+      const w = { t: 'ghs', g: gid, id: m.id, by: m.from, nick: m.nick, text, ts: m.ts }; if (m.exp) w.ttl = m.exp - t; return w;
+    });
+    let d = 3000; for (let r = 0; r < 2; r++) { for (const w of ws) { setTimeout(() => send(to, w), d); d += 60; } d += 4000; }
+  }
+  function admit(g, src, nick, how) {
+    g.members = cleanMembers(g.members.concat([src]), addr); g.pend = (g.pend || []).filter(p => p.addr !== src); if (!g.pend.length) delete g.pend;
+    save(); emit('contact', gView(g)); gSys(g, (nick || nameOf(src)) + ' が' + how); gInfo(g);
+    if (g.set && g.set.hi) { const h = historyOf(g.id); if (h.length) sendHistory(src, g.id, h); }
+  }
+  function onHistory(src, w) {
+    const g = st.groups[w.g], by = norm(String(w.by || ''));
+    if (!g || g.left || !g.owner || g.owner !== src || !(g.set && g.set.hi) || !by || !isYgg(by) || by === addr || !w.text || String(w.text).length > 2000 || !/^[0-9A-Za-z_-]{1,40}$/.test(String(w.id)) || (w.ttl | 0) < 0) return;
+    const key = 'g:' + g.id; if (st.messages.some(m => m.peer === key && m.from === by && m.id === w.id)) return;
+    const m = { id: w.id, peer: key, from: by, nick: cleanNick(w.nick), text: String(w.text), ts: w.ts || now(), out: false, hist: true };
+    if (w.ttl | 0) m.exp = now() + (w.ttl | 0);
+    addMessage(m);
+  }
   const okGID = id => /^[0-9a-f]{16}$/.test(String(id || ''));
   function cleanMembers(list, must) {
     const out = [];
@@ -187,7 +238,8 @@
   const hasM = (g, a) => g.members.includes(a);
   const nameOf = a => a === addr ? 'あなた' : ((st.contacts[a] && st.contacts[a].nick) || a.slice(0, 9) + '…');
   function gSys(g, text) { addMessage({ id: 's' + Date.now().toString(16) + Math.random().toString(16).slice(2, 5), peer: 'g:' + g.id, from: addr, ts: now(), sys: text, out: true }); }
-  function gInfo(g, extra) { const w = { t: 'gi', g: g.id, gn: g.name, gm: g.members, go: g.owner || undefined }; for (let i = 0; i < 3; i++) setTimeout(() => { for (const m of g.members.concat(extra || [])) if (m !== addr) send(m, w); }, i * 2000); }
+  const giWire = g => { const w = { t: 'gi', g: g.id, gn: g.name, gm: g.members, go: g.owner || undefined }; if (g.owner) w.gs = cleanSet(g.set); return w; };
+  function gInfo(g, extra) { const w = giWire(g); for (let i = 0; i < 3; i++) setTimeout(() => { for (const m of g.members.concat(extra || [])) if (m !== addr) send(m, w); }, i * 2000); }
   function groupStatus(gid, id) {
     const cs = st.messages.filter(m => m.hid && m.grp === gid && m.of === id);
     const n = cs.length, sent = cs.filter(m => m.status === 'sent').length, sending = cs.filter(m => m.status === 'sending').length, stored = cs.filter(m => m.status === 'stored').length;
@@ -197,18 +249,20 @@
   }
   async function msgPkt(m) {
     const w = { t: 'msg', id: m.id, nick: m.nick, text: m.text, ts: m.ts, ttl: m.ttl || undefined };
-    if (m.grp) { w.ttl = undefined; w.g = m.grp; const g = st.groups[m.grp]; if (g) w.gh = await gHash(g); }
+    if (m.grp) { w.g = m.grp; const g = st.groups[m.grp]; if (g) w.gh = await gHash(g); }
     return w;
   }
   function sendGroup(gid, text, img) {
     const g = st.groups[gid];
     if (!g || g.left) return null;
+    if (img && g.set && g.set.nf) return null;
     if (g.req) { g.req = false; emit('contact', gView(g)); }
     const id = Date.now().toString(16) + Math.random().toString(16).slice(2, 6), ts = now();
-    const v = { id, peer: 'g:' + gid, from: addr, nick: st.nick, text, ts, out: true, status: 'sending' };
+    const ttl = (g.set && g.set.ttl) | 0, tx = ttl ? { ttl, exp: ts + ttl } : {};
+    const v = Object.assign({ id, peer: 'g:' + gid, from: addr, nick: st.nick, text, ts, out: true, status: 'sending' }, tx);
     if (img) v.img = img;
     // The photo stays on the visible message only (gimg on the copies).
-    const cs = g.members.filter(a => a !== addr).map((a, i) => ({ id: id + 'g' + i, peer: a, from: addr, nick: st.nick, text, ts, out: true, status: 'sending', grp: gid, of: id, hid: true, gimg: img ? true : undefined }));
+    const cs = g.members.filter(a => a !== addr).map((a, i) => Object.assign({ id: id + 'g' + i, peer: a, from: addr, nick: st.nick, text, ts, out: true, status: 'sending', grp: gid, of: id, hid: true, gimg: img ? true : undefined }, tx));
     if (!cs.length) v.status = 'sent';
     st.messages.push(...cs);
     addMessage(v);
@@ -229,8 +283,13 @@
     if (ask) send(src, { t: 'gq', g: w.g });
     const key = 'g:' + w.g;
     if (st.messages.some(m => m.peer === key && m.from === src && m.id === w.id)) return true;
+    const nf = !!(g.set && g.set.nf);
+    if (img && nf) { if (!w.text) return true; img = ''; } // photos off: ack and drop
+    let ttl = w.ttl | 0; const gt = (g.set && g.set.ttl) | 0;
+    if (gt && (ttl <= 0 || ttl > gt)) ttl = gt; if (ttl < 0 || ttl > MAXTTL) ttl = 0;
     const m = { id: w.id, peer: key, from: src, nick: cleanNick(w.nick), text: w.text || '', ts: w.ts || now(), out: false };
     if (img) m.img = img;
+    if (ttl) { m.ttl = ttl; m.exp = now() + ttl; }
     addMessage(m);
     return true;
   }
@@ -254,20 +313,32 @@
     if (!host || !isYgg(host)) throw new Error('招待リンクのアドレスが不正です');
     return { host, gid: hexOf(b.slice(16, 24)), tok: hexOf(b.slice(24)) };
   }
-  function onJoin(src, w) {
+  async function onJoin(src, w) {
     const g = st.groups[w.g];
     if (!g || g.left || g.owner !== addr || !g.tok || w.tok !== g.tok || st.blocked[src]) { send(src, { t: 'gjn', g: w.g, text: 'この招待リンクは使えません（リセットされたか、グループがなくなりました）' }); return; }
-    if (hasM(g, src)) { send(src, { t: 'gi', g: g.id, gn: g.name, gm: g.members, go: g.owner }); return; }
+    if (hasM(g, src)) { send(src, giWire(g)); return; }
     if (g.members.length >= MAXG) { send(src, { t: 'gjn', g: w.g, text: 'グループが満員です（最大' + MAXG + '人）' }); return; }
-    g.members = cleanMembers(g.members.concat([src]), addr); save(); emit('contact', gView(g));
-    gSys(g, (cleanNick(w.nick) || nameOf(src)) + ' が招待リンクから参加しました'); gInfo(g);
+    const nick = cleanNick(w.nick);
+    if (g.pwh) {
+      if (pwLimited(src, false)) { send(src, { t: 'gjn', g: w.g, text: 'パスワードを何度も間違えたので、しばらく参加できません' }); return; }
+      if (!await checkPass(g.pwh, String(w.pw || ''))) { if (w.pw) pwLimited(src, true); send(src, { t: 'gjn', g: w.g, k: 'pw', text: w.pw ? 'パスワードが違います' : 'このグループに入るにはパスワードが必要です' }); return; }
+    }
+    if (g.set && g.set.ap) {
+      const fresh = !(g.pend || []).some(p => p.addr === src);
+      if (fresh) { if ((g.pend || []).length >= 20) { send(src, { t: 'gjn', g: w.g, text: '参加申請がいっぱいです。しばらくしてからもう一度開いてね' }); return; } (g.pend = g.pend || []).push({ addr: src, nick, ts: now() }); save(); }
+      send(src, { t: 'gjn', g: w.g, k: 'wait', text: 'ホストの承認待ちです。承認されると自動で参加します' });
+      if (fresh) { emit('contact', gView(g)); gSys(g, (nick || nameOf(src)) + ' が参加を申請しています'); emit('notice', { text: '「' + g.name + '」に参加申請があります' }); }
+      return;
+    }
+    admit(g, src, nick, '招待リンクから参加しました');
   }
   function onGroupCtl(src, w) {
     if (!okGID(w.g) || locked) return;
     let g = st.groups[w.g];
     if (w.t === 'gj') { onJoin(src, w); return; }
-    if (w.t === 'gjn') { if (joins[w.g] === src) { delete joins[w.g]; emit('notice', { text: cleanText(w.text, 200) }); } return; }
-    if (w.t === 'gq') { if (g && !g.left && hasM(g, src) && hasM(g, addr)) send(src, { t: 'gi', g: g.id, gn: g.name, gm: g.members, go: g.owner || undefined }); return; }
+    if (w.t === 'gjn') { if (joins[w.g] === src) { if (w.k !== 'wait') delete joins[w.g]; emit('notice', { text: cleanText(w.text, 200), k: w.k || '', g: w.g }); } return; }
+    if (w.t === 'ghs') { onHistory(src, w); return; }
+    if (w.t === 'gq') { if (g && !g.left && hasM(g, src) && hasM(g, addr)) send(src, giWire(g)); return; }
     if (w.t === 'gl') {
       if (!g || !hasM(g, src)) return;
       g.members = g.members.filter(a => a !== src); save(); emit('contact', gView(g)); gSys(g, nameOf(src) + ' が退出しました'); return;
@@ -285,7 +356,10 @@
       if (joins[w.g] === src && g.owner === src) delete joins[w.g];
       const old = { name: g.name, members: g.members.slice() }, known = !!old.name;
       g.name = cleanNick(w.gn) || 'グループ'; g.members = ms; if (!inG) g.left = true;
+      let diffs = [];
+      if (w.gs && typeof w.gs === 'object' && g.owner && src === g.owner) { const ns = cleanSet(w.gs); if (known) diffs = setDiff(g.set, ns); g.set = ns; }
       save(); emit('contact', gView(g));
+      if (inG) for (const t of diffs) gSys(g, nameOf(src) + ' が' + t);
       if (!inG) gSys(g, 'グループから外されました');
       else if (known && old.name !== g.name && old.name !== 'グループ') gSys(g, nameOf(src) + ' がグループ名を「' + g.name + '」にしました');
       if (known && inG) for (const m of ms) if (!old.members.includes(m) && m !== addr) gSys(g, nameOf(src) + ' が ' + nameOf(m) + ' を追加しました');
@@ -337,7 +411,7 @@
     if (w.t === 'fh') { onFileHeader(src, w); return; }
     if (w.t === 'fc') { onFileChunk(src, w); return; }
     if ((w.t === 'edit' || w.t === 'del') && onCtl(src, w)) { send(src, { t: 'ack', id: w.id }); return; }
-    if (w.t === 'gq' || w.t === 'gi' || w.t === 'gl' || w.t === 'gj' || w.t === 'gjn') { onGroupCtl(src, w); return; }
+    if (w.t === 'gq' || w.t === 'gi' || w.t === 'gl' || w.t === 'gj' || w.t === 'gjn' || w.t === 'ghs') { onGroupCtl(src, w); return; }
     if (w.t === 'msg') handleMsg(src, w).then(okm => { if (okm) { send(src, { t: 'ack', id: w.id }); askPK(src); if (queuedFor(src).length) flush(src); } });
   }
 
@@ -444,7 +518,7 @@
     const p = parseImg(m.img); if (!p) { setStatus(m.peer, m.id, 'failed'); return false; }
     const n = Math.ceil(p.bytes.length / CHUNK);
     const hdr = { t: 'fh', id: m.id, nick: m.nick, text: m.text || undefined, ts: m.ts, ttl: m.ttl || undefined, mime: p.mime, size: p.bytes.length, n, sha: await sha(p.bytes) };
-    if (m.grp) { const gw = await msgPkt(m); hdr.ttl = undefined; hdr.g = gw.g; hdr.gh = gw.gh; }
+    if (m.grp) { const gw = await msgPkt(m); hdr.ttl = gw.ttl; hdr.g = gw.g; hdr.gh = gw.gh; }
     const got = new Set(); chunkAcks.set(m.id, got);
     const acked = new Promise(r => acks.set(m.id, r));
     let done = false; acked.then(() => done = true);
@@ -467,7 +541,7 @@
   function onFileHeader(src, w) {
     const n = w.n | 0, size = w.size | 0;
     if (!/^[0-9A-Za-z_-]{1,40}$/.test(String(w.id)) || !MIMES.has(w.mime) || n < 1 || n > MAXN || size < 1 || size > IMGMAX || Math.ceil(size / CHUNK) !== n || !/^[0-9a-f]{64}$/.test(String(w.sha)) || u8len(w.text) > CAPMAX || u8len(w.nick) > 120) return;
-    if (st.messages.some(m => (m.peer === src || (w.g && m.peer === 'g:' + w.g && m.from === src)) && m.id === w.id)) { send(src, { t: 'ack', id: w.id }); return; }
+    if (st.messages.some(m => (m.peer === src || (w.g && m.peer === 'g:' + w.g && m.from === src)) && m.id === w.id) || (w.g && !w.text && st.groups[w.g] && st.groups[w.g].set && st.groups[w.g].set.nf)) { send(src, { t: 'ack', id: w.id }); return; }
     const t = Date.now();
     for (const [k, f] of inFiles) if (t - f.at > 180000) inFiles.delete(k);
     const key = src + '/' + w.id;
@@ -722,6 +796,7 @@
           }
           const t = String(body.Text || ''); if ((!t && !body.Img) || t.length > 4000) return bad('message empty or too long');
           if (body.Img && !parseImg(body.Img)) return bad('unsupported or too large image (max 600KB)');
+          const gg = st.groups[gid]; if (body.Img && gg && gg.set && gg.set.nf) return bad('このグループでは写真を送れません（ホストの設定）');
           const v = sendGroup(gid, t, body.Img || ''); return v ? ok(v) : bad('このグループには送れません');
         }
         if (body.Retry) {
@@ -754,6 +829,15 @@
         const old = { name: g.name, members: g.members.slice() };
         if (body.Name != null && cleanNick(body.Name)) g.name = cleanNick(body.Name);
         const rmReq = Array.isArray(body.Remove) && body.Remove.length;
+        const oldSet = Object.assign({}, g.set || {}), hadPw = !!g.pwh;
+        if ((body.Set || body.Pass != null) && (!g.owner || g.owner !== addr)) return bad('設定を変えられるのはホストだけです', 403);
+        if (body.Pass != null) {
+          const p = String(body.Pass);
+          if (p && ([...p].length < 4 || [...p].length > 64)) return bad('パスワードは4〜64文字にしてください');
+          if (p) g.pwh = await hashPass(p); else delete g.pwh;
+        }
+        if (body.Set) g.set = cleanSet(body.Set);
+        if (body.Set || body.Pass != null) { g.set = cleanSet(Object.assign({}, g.set || {}, { pw: !!g.pwh })); }
         if (((body.Add || []).length || rmReq) && g.owner && g.owner !== addr) return bad('メンバーを追加・削除できるのはホストだけです', 403);
         if (rmReq && !g.owner) return bad('このグループにはホストがいないので外せません（v0.16.0より前に作ったグループ）');
         g.members = cleanMembers(g.members.concat(body.Add || []), addr);
@@ -765,6 +849,8 @@
         g.req = false;
         save(); emit('contact', gView(g));
         if (g.name !== old.name) gSys(g, 'グループ名を「' + g.name + '」にしました');
+        for (const t of setDiff(oldSet, g.set || {})) gSys(g, 'あなたが' + t);
+        if (body.Pass && hadPw) gSys(g, 'あなたが参加パスワードを変更しました');
         for (const m of g.members) if (!old.members.includes(m)) gSys(g, nameOf(m) + ' を追加しました');
         for (const m of removed) gSys(g, nameOf(m) + ' を外しました');
         gInfo(g, removed); return ok(gView(g));
@@ -782,9 +868,16 @@
         if (g0 && !g0.left && !g0.req && hasM(g0, addr)) return ok({ already: true, addr: 'g:' + j.gid });
         if (g0 && g0.left) { delete st.groups[j.gid]; save(); }
         joins[j.gid] = j.host;
-        const jw = { t: 'gj', g: j.gid, tok: j.tok, nick: st.nick };
+        const jw = { t: 'gj', g: j.gid, tok: j.tok, nick: st.nick, pw: body.Pw ? String(body.Pw) : undefined };
         let wait = 0; for (let i = 0; i < 4; i++) { setTimeout(() => { if (joins[j.gid]) send(j.host, jw); }, wait * 1000); wait += 2 + i * 2; }
         return ok({ addr: 'g:' + j.gid });
+      }
+      case 'group/approve': {
+        const g = st.groups[body.ID]; if (!g || g.left || g.owner !== addr) return bad('承認できるのはホストだけです', 403);
+        const a = norm(String(body.Addr || '')), p = (g.pend || []).find(x => x.addr === a); if (!p) return bad('その申請はありません');
+        if (!body.OK) { g.pend = g.pend.filter(x => x.addr !== a); if (!g.pend.length) delete g.pend; save(); emit('contact', gView(g)); send(a, { t: 'gjn', g: g.id, text: '参加は承認されませんでした' }); return ok(gView(g)); }
+        if (g.members.length >= MAXG) return bad('グループが満員です');
+        admit(g, a, p.nick, '参加しました（承認）'); return ok(gView(g));
       }
       case 'group/leave': {
         const g = st.groups[body.ID]; if (!g) return bad('no such group');

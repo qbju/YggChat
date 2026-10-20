@@ -79,7 +79,7 @@ func (a *App) deliverImg(m Message, tries int) bool {
 	hdr := wire{T: "fh", ID: m.ID, Nick: m.Nick, Text: m.Text, TS: m.TS, TTL: m.TTL, Mime: mime, Size: len(raw), N: n, Sha: hex.EncodeToString(sum[:])}
 	if m.Grp != "" {
 		gw := a.msgWire(m)
-		hdr.TTL, hdr.G, hdr.GH = 0, gw.G, gw.GH
+		hdr.TTL, hdr.G, hdr.GH = gw.TTL, gw.G, gw.GH
 	}
 	fs := a.files()
 	fs.mu.Lock()
@@ -144,7 +144,7 @@ func (a *App) onFileHeader(from string, w wire) {
 		(w.Size+imgChunk-1)/imgChunk != w.N || !shaRe.MatchString(w.Sha) || len(w.Text) > capMax || len(w.Nick) > 120 {
 		return
 	}
-	if a.hasMsg(from, w.ID) || (w.G != "" && validGID(w.G) && a.hasGroupMsg(w.G, from, w.ID)) {
+	if a.hasMsg(from, w.ID) || (w.G != "" && validGID(w.G) && (a.hasGroupMsg(w.G, from, w.ID) || (w.Text == "" && a.groupNoFiles(w.G)))) {
 		a.sendWire(from, wire{T: "ack", ID: w.ID})
 		return
 	}

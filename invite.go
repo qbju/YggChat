@@ -75,17 +75,51 @@ func (a *App) onJoin(from string, w wire, g Group, known bool) {
 		no("この招待リンクは使えません")
 		return
 	}
-	g.Members = cleanMembers(append(append([]string{}, g.Members...), from), a.addr)
-	a.store.Groups[g.ID] = g
-	a.store.save()
-	a.store.mu.Unlock()
-	a.broadcast("contact", groupView(g))
-	who := cleanNick(w.Nick)
-	if who == "" {
-		who = a.nameOf(from)
+	nick := cleanNick(w.Nick)
+	if g.PwH != "" {
+		if a.pwLimited(from, false) {
+			no("パスワードを何度も間違えたので、しばらく参加できません")
+			return
+		}
+		if !checkGroupPass(g.PwH, w.Pw) {
+			text := "このグループに入るにはパスワードが必要です"
+			if w.Pw != "" {
+				a.pwLimited(from, true)
+				text = "パスワードが違います"
+			}
+			a.store.mu.Unlock()
+			a.sendWire(from, wire{T: "gjn", G: w.G, K: "pw", Text: text})
+			return
+		}
 	}
-	a.groupSys(g, who+" が招待リンクから参加しました")
-	a.sendInfo(g)
+	if g.Set.Approve {
+		fresh := true
+		for _, p := range g.Pend {
+			fresh = fresh && p.Addr != from
+		}
+		if fresh {
+			if len(g.Pend) >= maxPending {
+				no("参加申請がいっぱいです。しばらくしてからもう一度開いてね")
+				return
+			}
+			g.Pend = append(g.Pend, Pend{Addr: from, Nick: nick, TS: time.Now().Unix()})
+			a.store.Groups[g.ID] = g
+			a.store.save()
+		}
+		a.store.mu.Unlock()
+		a.sendWire(from, wire{T: "gjn", G: w.G, K: "wait", Text: "ホストの承認待ちです。承認されると自動で参加します"})
+		if fresh {
+			a.broadcast("contact", groupView(g))
+			who := nick
+			if who == "" {
+				who = a.nameOf(from)
+			}
+			a.groupSys(g, who+" が参加を申請しています")
+			a.broadcast("notice", map[string]string{"text": "「" + g.Name + "」に参加申請があります"})
+		}
+		return
+	}
+	a.admit(g, from, nick, "招待リンクから参加しました")
 }
 
 func (a *App) inviteHandlers(mux *http.ServeMux) {
@@ -114,7 +148,7 @@ func (a *App) inviteHandlers(mux *http.ServeMux) {
 		json.NewEncoder(w).Encode(map[string]string{"code": code, "link": "https://yggchat.surge.sh/#j=" + code})
 	})
 	mux.HandleFunc("/api/group/join", func(w http.ResponseWriter, r *http.Request) {
-		var req struct{ Code string }
+		var req struct{ Code, Pw string }
 		if !readJSON(w, r, &req) {
 			return
 		}
@@ -147,7 +181,7 @@ func (a *App) inviteHandlers(mux *http.ServeMux) {
 		a.joins[gid] = host
 		nick := a.store.Nick
 		a.store.mu.Unlock()
-		jw := wire{T: "gj", G: gid, Tok: tok, Nick: nick}
+		jw := wire{T: "gj", G: gid, Tok: tok, Nick: nick, Pw: req.Pw}
 		go func() {
 			for i := 0; i < 4; i++ {
 				a.store.mu.Lock()

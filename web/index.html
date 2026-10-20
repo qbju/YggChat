@@ -134,6 +134,7 @@ input, textarea {
 
 .row-sub.info { display:none; }
 .section.show-info .row-sub.info { display:block; }
+.section.ro .switch { opacity:.55; pointer-events:none; }
 .info-btn { background:none; border:1px solid var(--dim); color:var(--dim); width:20px; height:20px; padding:0; border-radius:50%; font-size:12px; line-height:18px; margin-left:8px; vertical-align:middle; font-family:serif; font-style:italic; font-weight:700; }
 .section.show-info .info-btn { background:var(--accent); border-color:var(--accent); color:#111; }
 
@@ -1104,7 +1105,24 @@ img.emoji { height:1.2em; width:1.2em; margin:0 .05em 0 .1em; vertical-align:-0.
     <div class="section" style="width:100%; max-width:420px;">
       <div class="section-title">メンバー</div>
       <div id="gi-members"></div>
-      <div class="row-sub">サーバーはなく、メッセージはメンバー1人ずつに直接届けます（オフラインの人にはオンラインになったときに）。編集・消えるメッセージはまだ1対1だけです。</div>
+      <div class="row-sub">サーバーはなく、メッセージはメンバー1人ずつに直接届けます（オフラインの人にはオンラインになったときに）。編集はまだ1対1だけです。</div>
+    </div>
+    <div class="section" id="gi-pend-sec" style="width:100%; max-width:420px; display:none;">
+      <div class="section-title">参加申請</div>
+      <div id="gi-pend"></div>
+    </div>
+    <div class="section" id="gi-set-sec" style="width:100%; max-width:420px;">
+      <div class="section-title">グループ設定</div>
+      <div class="toggle"><div class="toggle-label">写真を送れる</div><div class="switch gi-sw" data-k="files" id="gi-sw-files"><div class="switch-handle"></div></div></div>
+      <div class="toggle"><div class="toggle-label">参加にホストの承認が必要</div><div class="switch gi-sw" data-k="ap" id="gi-sw-ap"><div class="switch-handle"></div></div></div>
+      <div class="toggle"><div class="toggle-label">新しい人に過去のメッセージを見せる</div><div class="switch gi-sw" data-k="hi" id="gi-sw-hi"><div class="switch-handle"></div></div></div>
+      <div class="row"><div class="row-main"><div class="row-title">消えるメッセージ</div></div>
+        <select id="gi-ttl" style="max-width:140px;">
+          <option value="0">オフ</option><option value="300">5分</option><option value="3600">1時間</option><option value="86400">1日</option><option value="604800">1週間</option><option value="2419200">4週間</option>
+        </select></div>
+      <div class="row"><div class="row-main"><div class="row-title">参加パスワード</div><div class="row-sub" id="gi-pw-state">なし</div></div><button id="gi-pw" class="row-action">設定</button></div>
+      <div class="row-sub" id="gi-set-note"></div>
+      <div class="row-sub info">変えられるのはホストだけ。設定はメンバーの端末それぞれが守る仕組みなので、古いバージョンのメンバーには効きません。承認・パスワードは招待リンクから入る人に使います。過去のメッセージはホストの端末にある最新30件（写真は「📷」の文字だけ）をホストが送ります。消えるメッセージは送ってからこの時間で全員の端末から消えます。</div>
     </div>
     <div style="display:flex; gap:8px; flex-wrap:wrap; justify-content:center;">
       <button id="gi-link">🔗 招待リンク</button>
@@ -1340,7 +1358,7 @@ img.emoji { height:1.2em; width:1.2em; margin:0 .05em 0 .1em; vertical-align:-0.
       <a class="dl-btn" href="https://yggchat.surge.sh/dl/yggchat-windows-amd64.exe" download>🪟 Windows (exe)</a>
       <a class="dl-btn" href="https://yggchat.surge.sh/dl/yggchat-linux-amd64" download>🐧 Linux (amd64)</a>
       <a class="dl-btn" href="https://yggchat.surge.sh/dl/yggchat-android-arm64" download>⌨️ Termux (arm64)</a>
-      <div class="row-sub" id="dl-ver">最新: v0.17.0 ・ SHA256SUMS で検証できます</div>
+      <div class="row-sub" id="dl-ver">最新: v0.18.0 ・ SHA256SUMS で検証できます</div>
     </div>
     <div class="section">
       <div class="section-title">About</div>
@@ -1796,6 +1814,7 @@ async function retrySend(id){
 function updateChatHeader(){
   const c = state.contacts[curAddr] || {addr:curAddr, nick:''};
   $('chat-avatar').textContent = avatarText(c, curAddr);
+  $('attach-btn').style.display = (c.group && c.set && c.set.nf) ? 'none' : '';
   $('chat-ttl').style.display = c.ttl ? '' : 'none';
   $('chat-ttl').textContent = c.ttl ? ('⏱ 消えるメッセージ: ' + ttlLabel(c.ttl)) : '';
   const isReq = !!c.req;
@@ -2700,11 +2719,12 @@ function parseLink(t){
   m = t.match(/#u=([^&\s]+)/); if(m) return parseLink(safeDec(m[1]));
   return null;
 }
-let pendingJoin = null;
-async function joinByCode(code){
-  if(!await uiDialog('招待されたグループに参加しますか？', {okText:'参加'})) return;
+let pendingJoin = null, pendingCode = '';
+async function joinByCode(code, pw){
+  if(pw === undefined && !await uiDialog('招待されたグループに参加しますか？', {okText:'参加'})) return;
+  pendingCode = code;
   try{
-    const r = await api('/api/group/join', {Code: code});
+    const r = await api('/api/group/join', {Code: code, Pw: pw || ''});
     if(r.already){ openChat(r.addr); return; }
     pendingJoin = r.addr;
     toast('ホストに参加をお願いしています…');
@@ -2823,7 +2843,11 @@ function connectEvents(){
       }else if(d.type === 'lan'){
         if(state.lan){ state.lan.nearby = (d.data && d.data.nearby) || []; renderLan(); }
       }else if(d.type === 'notice'){
-        if(d.data && d.data.text){ pendingJoin = null; toast(d.data.text); }
+        if(d.data && d.data.k === 'pw' && pendingJoin && pendingCode){
+          pendingJoin = null;
+          uiPrompt(d.data.text + '\nパスワードを入力', '').then(v => { if(v) joinByCode(pendingCode, v); });
+        }else if(d.data && d.data.k === 'wait'){ pendingJoin = null; toast(d.data.text); }
+        else if(d.data && d.data.text){ pendingJoin = null; toast(d.data.text); }
       }else if(d.type === 'move'){
         onMoveEvent(d.data || {});
       }else if(d.type === 'peers'){
@@ -2964,7 +2988,7 @@ $('nostr-legacy-switch').addEventListener('click', async () => {
   if(await nostrSet({Legacy: on})) toast(on ? '旧式の置き配も通します' : '旧式の置き配を止めました');
 });
 // Settings explanations stay folded behind an (i) button per section.
-document.querySelectorAll('#settings-screen .section').forEach(sec => {
+document.querySelectorAll('#settings-screen .section, #group-info-screen .section').forEach(sec => {
   if(!sec.querySelector('.row-sub.info')) return;
   const t = sec.querySelector('.section-title'); if(!t) return;
   const b = document.createElement('button');
@@ -3338,8 +3362,47 @@ function openGroupInfo(){
   $('gi-add').style.display = $('gi-leave').style.display = $('gi-rename').style.display = c.left ? 'none' : '';
   if(c.owner && c.owner !== state.addr) $('gi-add').style.display = 'none';
   $('gi-link').style.display = host ? '' : 'none';
+  const set = c.set || {};
+  setSwitch('gi-sw-files', !set.nf); setSwitch('gi-sw-ap', !!set.ap); setSwitch('gi-sw-hi', !!set.hi);
+  $('gi-ttl').value = String(set.ttl || 0); if(!$('gi-ttl').value) $('gi-ttl').value = '0';
+  $('gi-pw-state').textContent = set.pw ? 'あり' : 'なし';
+  $('gi-pw').textContent = set.pw ? '変更' : '設定';
+  const canSet = host && !!c.owner;
+  $('gi-set-sec').style.display = (c.owner && !c.left) ? '' : 'none';
+  $('gi-set-sec').classList.toggle('ro', !canSet);
+  $('gi-ttl').disabled = !canSet; $('gi-pw').style.display = canSet ? '' : 'none';
+  $('gi-set-note').textContent = canSet ? '' : 'ホストが決めた設定です';
+  const pend = host ? (c.pend || []) : [];
+  $('gi-pend-sec').style.display = pend.length ? '' : 'none';
+  $('gi-pend').innerHTML = pend.map(p => '<div class="row" style="padding:6px 0;"><div class="row-main"><div class="row-title">' + escapeHtml(p.nick || 'anon') + '</div><div class="row-sub" style="font-family:ui-monospace,monospace;">' + escapeHtml(p.addr) + '</div></div><button class="gi-ok" data-addr="' + escapeHtml(p.addr) + '">承認</button><button class="gi-no" data-addr="' + escapeHtml(p.addr) + '" style="color:var(--error);">拒否</button></div>').join('');
   $('group-info-screen').classList.add('active');
 }
+async function groupSet(patch){
+  const c = state.contacts[curAddr]; if(!c) return;
+  try{ const g = await api('/api/group/update', Object.assign({ID: curAddr.slice(2)}, patch)); state.contacts[g.addr] = g; updateChatHeader(); openGroupInfo(); renderList(); return true; }
+  catch(e){ toast(e.message); openGroupInfo(); return false; }
+}
+document.querySelectorAll('.gi-sw').forEach(sw => sw.addEventListener('click', () => {
+  const c = state.contacts[curAddr]; if(!c || c.owner !== state.addr) return;
+  const set = Object.assign({}, c.set || {}), k = sw.getAttribute('data-k');
+  if(k === 'files') set.nf = !set.nf; else set[k] = !set[k];
+  groupSet({Set: set});
+}));
+$('gi-ttl').addEventListener('change', () => {
+  const c = state.contacts[curAddr]; if(!c) return;
+  groupSet({Set: Object.assign({}, c.set || {}, {ttl: parseInt($('gi-ttl').value, 10) || 0})});
+});
+$('gi-pw').addEventListener('click', async () => {
+  const c = state.contacts[curAddr]; if(!c) return;
+  const v = await uiPrompt('参加パスワード（4〜64文字）' + ((c.set||{}).pw ? '\n空にすると解除します' : ''), ''); if(v === null) return;
+  if(!v && !(c.set||{}).pw) return;
+  if(await groupSet({Pass: v})) toast(v ? '参加パスワードを設定しました' : '参加パスワードを解除しました');
+});
+$('gi-pend').addEventListener('click', async (e) => {
+  const b = e.target.closest && e.target.closest('.gi-ok, .gi-no'); if(!b) return;
+  const ok = b.classList.contains('gi-ok');
+  try{ const g = await api('/api/group/approve', {ID: curAddr.slice(2), Addr: b.getAttribute('data-addr'), OK: ok}); state.contacts[g.addr] = g; openGroupInfo(); renderList(); toast(ok ? '承認しました' : '拒否しました'); }catch(e){ toast(e.message); }
+});
 $('gi-back').addEventListener('click', () => $('group-info-screen').classList.remove('active'));
 $('gi-members').addEventListener('click', async (e) => {
   const b = e.target.closest && e.target.closest('.gi-kick'); if(!b) return;
