@@ -45,6 +45,11 @@ POST /api/profile {Nick,Bio,Avatar} -> shares with contacts where shared.
 POST /api/contact {Addr, Nick?, TTL?, Accept?}  (merge; Accept shares profile; TTL syncs to peer)
 POST /api/block {Addr, Block}; POST /api/passcode {Old, New("" removes)}; POST /api/lock {}; POST /api/unlock {Pass}
 POST /api/identity/reset {Confirm:true} -> new key, contacts/history wiped, node restarts.
+POST /api/move/recv {} -> {code:"ygm1:<addr>:<x25519 pub b64url>"} (start receiving; {Stop:true} cancels). On success the node imports the bundle and restarts.
+POST /api/move/send {Code, History} -> {size}; progress/result as event "move" {role:"send"|"recv", phase:"send"|"recv"|"import"|"done"|"error", got, n, err}. {Cancel:true} stops.
+POST /api/move/export {Pass, History} -> {data: base64 of "YGB1"||salt||nonce||AES-GCM(gzip(bundle))} (scrypt N=2^15).
+POST /api/move/import {Pass, Data} -> {} then restart. Bundle: {v:1, key:<ed25519 priv hex>, store:<chat.json shape>}.
+Wire: {t:"mh",id,size,n,sha} + {t:"mc",id,i,d} (864-byte chunks) acked {t:"mca",id,i}; receiver answers {t:"mok",id} or {t:"mng",id,text}.
 Events add: msg_del {peer,id}, locked.
 Wire adds: msg.ttl; {t:"prof",nick,bio,av,pk}; {t:"ttl",ttl}; hi/hiack carry pk. Receivers verify pk against the source address.
 Mailbox: removed in v0.7 (no server-side store-and-forward; offline messages stay queued on the sender).
