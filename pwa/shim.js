@@ -43,7 +43,7 @@
     if (outer.peers && outer.peers.some(p => /workers\.dev|instabox\.tech/.test(p))) outer.peers = null; // old Cloudflare relay / removed entry peer -> defaults
     if (!outer.peers) outer.peers = RECOMMENDED.slice();
     locked = !!outer.enc;
-    if (!locked) { Object.assign(st, { nick: raw.nick || 'anon', bio: raw.bio || '', avatar: raw.avatar || '', contacts: raw.contacts || {}, messages: raw.messages || [], blocked: raw.blocked || {}, nostrOn: !!raw.nostrOn, nostrLegacy: !!raw.nostrLegacy, nostrRelays: raw.nostrRelays || [], ctl: raw.ctl || [], groups: raw.groups || {} }); migrate(); }
+    if (!locked) { Object.assign(st, { nick: raw.nick || 'anon', bio: raw.bio || '', avatar: raw.avatar || '', contacts: raw.contacts || {}, messages: raw.messages || [], blocked: raw.blocked || {}, nostrOn: raw.key ? !!raw.nostrOn : true, nostrLegacy: !!raw.nostrLegacy, nostrRelays: raw.nostrRelays || [], ctl: raw.ctl || [], groups: raw.groups || {} }); migrate(); }
   }
 
   const b64 = u8 => btoa(String.fromCharCode(...new Uint8Array(u8)));
