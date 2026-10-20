@@ -47,7 +47,7 @@ func TestNostrPairTagAndPadding(t *testing.T) {
 			t.Fatal("open failed", err)
 		}
 		found := false
-		for _, tg := range NostrTags(bpriv, [][]byte{apub}, time.Now().Unix()) {
+		for _, tg := range NostrTags(bpriv, [][]byte{apub}, time.Now().Unix(), true) {
 			found = found || tg == ab
 		}
 		if !found {

@@ -132,6 +132,11 @@ input, textarea {
   font-size:14px;
 }
 
+.row-sub.info { display:none; }
+.section.show-info .row-sub.info { display:block; }
+.info-btn { background:none; border:1px solid var(--dim); color:var(--dim); width:20px; height:20px; padding:0; border-radius:50%; font-size:12px; line-height:18px; margin-left:8px; vertical-align:middle; font-family:serif; font-style:italic; font-weight:700; }
+.section.show-info .info-btn { background:var(--accent); border-color:var(--accent); color:#111; }
+
 input[type=checkbox] {
   width:24px; height:24px; min-width:24px; padding:0; margin:0;
   border:2px solid var(--dim); border-radius:6px; background:transparent;
@@ -1163,14 +1168,14 @@ img.emoji { height:1.2em; width:1.2em; margin:0 .05em 0 .1em; vertical-align:-0.
             <div class="switch" id="vpn-switch"><div class="switch-handle"></div></div>
           </div>
           <div class="row"><div class="row-main"><div class="row-title">外からの接続</div><div class="row-sub" id="vpn-in-state">すべて閉じる</div></div><button id="vpn-in-btn" class="row-action">変更</button></div>
-          <div class="row-sub">公式アプリの代わりになります。ブラウザ・SSHなど他のアプリからも200::/7（Yggdrasil）につながり、アドレスはYggChatのまま。通常のネット通信はVPNを通りません。公式アプリのVPNとは同時に使えません。</div>
+          <div class="row-sub info">公式アプリの代わりになります。ブラウザ・SSHなど他のアプリからも200::/7（Yggdrasil）につながり、アドレスはYggChatのまま。通常のネット通信はVPNを通りません。公式アプリのVPNとは同時に使えません。</div>
         </div>
-        <div class="row-sub" id="sys-note">Yggdrasil公式アプリ（Android）や常駐のyggdrasilサービスが動いていれば、内蔵ノードの代わりにそれで通信します。アドレスは端末側Yggdrasilのものに変わり、相手からは別人として見えます。Nostr置き配は使えません。</div>
+        <div class="row-sub info" id="sys-note">Yggdrasil公式アプリ（Android）や常駐のyggdrasilサービスが動いていれば、内蔵ノードの代わりにそれで通信します。アドレスは端末側Yggdrasilのものに変わり、相手からは別人として見えます。Nostr置き配は使えません。</div>
       </div>
     </div>
     <div class="section" id="lan-sec">
       <div class="section-title">LANチャット</div>
-      <div class="row-sub">同じWi-Fi・有線LAN・テザリングにいるYggdrasilノードを自動で見つけて直接つながります。インターネットが落ちていても、同じネットワーク内ならそのまま話せます。</div>
+      <div class="row-sub info">同じWi-Fi・有線LAN・テザリングにいるYggdrasilノードを自動で見つけて直接つながります。インターネットが落ちていても、同じネットワーク内ならそのまま話せます。</div>
       <div id="lan-box">
         <div class="toggle">
           <div class="toggle-label">LANで近くのノードを探す</div>
@@ -1179,13 +1184,13 @@ img.emoji { height:1.2em; width:1.2em; margin:0 .05em 0 .1em; vertical-align:-0.
         <div class="row"><div class="row-main"><div class="row-title">LANパスワード</div><div class="row-sub" id="lan-pass-state">なし（同じLANの誰とでもつながる）</div></div><button id="lan-pass" class="row-action">変更</button></div>
         <div class="row-sub" id="lan-ifaces"></div>
         <div id="lan-nearby"></div>
-        <div class="row-sub">オンの間、同じLANの人にはあなたのYggdrasilアドレスと表示名が見えます。寮や学校のWi-Fiでは、パスワードを決めて仲間内だけにするのがおすすめ。</div>
+        <div class="row-sub info">オンの間、同じLANの人にはあなたのYggdrasilアドレスと表示名が見えます。寮や学校のWi-Fiでは、パスワードを決めて仲間内だけにするのがおすすめ。</div>
       </div>
       <div class="row-sub" id="lan-unsupported" style="display:none;"></div>
     </div>
     <div class="section">
       <div class="section-title">finger（.plan）</div>
-      <div class="row-sub">オンにすると、Yggdrasil上の誰でも <span style="font-family:ui-monospace,monospace;">finger @[あなたのアドレス]</span> で表示名と.planを見られます。オンラインかどうか・連絡先などは出しません。オフの間は79番ポート自体を閉じるので、外からYggChatだと見分けられません。</div>
+      <div class="row-sub info">オンにすると、Yggdrasil上の誰でも <span style="font-family:ui-monospace,monospace;">finger @[あなたのアドレス]</span> で表示名と.planを見られます。オンラインかどうか・連絡先などは出しません。オフの間は79番ポート自体を閉じるので、外からYggChatだと見分けられません。</div>
       <div class="toggle">
         <div class="toggle-label">fingerで公開する</div>
         <div class="switch" id="finger-switch"><div class="switch-handle"></div></div>
@@ -1199,7 +1204,7 @@ img.emoji { height:1.2em; width:1.2em; margin:0 .05em 0 .1em; vertical-align:-0.
     </div>
     <div class="section" id="site-box" style="display:none;">
       <div class="section-title">プロフィールサイト<span style="font-size:11px;color:#c0392b;margin-left:6px;">ベータ</span></div>
-      <div class="row-sub">オンにすると、Yggdrasil上の誰でも <span style="font-family:ui-monospace,monospace;" id="site-url"></span> で、ここに書いたHTMLの1ページを見られます（80番ポート）。オフの間は80番ポート自体を閉じます。公開中は、あなたがオンラインかどうかが外から分かります。写真は data: URL で埋め込めます（256KBまで）。</div>
+      <div class="row-sub info">オンにすると、Yggdrasil上の誰でも <span style="font-family:ui-monospace,monospace;" id="site-url"></span> で、ここに書いたHTMLの1ページを見られます（80番ポート）。オフの間は80番ポート自体を閉じます。公開中は、あなたがオンラインかどうかが外から分かります。写真は data: URL で埋め込めます（256KBまで）。</div>
       <div class="toggle">
         <div class="toggle-label">サイトを公開する</div>
         <div class="switch" id="site-switch"><div class="switch-handle"></div></div>
@@ -1250,12 +1255,17 @@ img.emoji { height:1.2em; width:1.2em; margin:0 .05em 0 .1em; vertical-align:-0.
       </div>
     </div>
     <div class="section">
-      <div class="section-title">置き配（Nostr）<span style="font-size:11px;color:#c0392b;margin-left:6px;">非推奨・実験的</span></div>
-      <div class="row-sub">相手がオフラインで届かなかった文章を、公開Nostrリレーに暗号化して最大7日預けます。中身と送信者は相手しか読めませんが、リレーにはIPアドレスと毎日変わる宛先タグが見え、保管も保証されません。写真は対象外。</div>
+      <div class="section-title">置き配（Nostr）<span style="font-size:11px;color:#c0392b;margin-left:6px;">実験的</span></div>
+      <div class="row-sub info">相手がオフラインで届かなかった文章を、公開Nostrリレーに暗号化して最大7日預けます。中身と送信者は相手しか読めませんが、リレーにはIPアドレスと毎日変わる宛先タグが見え、保管も保証されません。写真は対象外。</div>
       <div class="toggle">
         <div class="toggle-label">Nostrリレーで置き配する</div>
         <div class="switch" id="nostr-switch"><div class="switch-handle"></div></div>
       </div>
+      <div class="toggle">
+        <div class="toggle-label">旧式の置き配も通す（v0.12以前の相手用・v0.20まで）</div>
+        <div class="switch" id="nostr-legacy-switch"><div class="switch-handle"></div></div>
+      </div>
+      <div class="row-sub info">旧式をオンにすると、v0.12以前のYggChatとも置き配をやり取りできます。そのぶん、旧式の箱には相手ごとに変わらない宛先タグが付くので、リレーから「同じ人あての箱」だと分かります。v0.20で旧式は廃止します。</div>
       <div class="row"><div class="row-main"><div class="row-title">リレー</div><div class="row-sub" id="nostr-relays" style="font-family:ui-monospace,monospace;font-size:11px;word-break:break-all;"></div></div></div>
       <div class="row-btns">
         <button id="nostr-edit">リレーを編集</button>
@@ -1264,7 +1274,7 @@ img.emoji { height:1.2em; width:1.2em; margin:0 .05em 0 .1em; vertical-align:-0.
     </div>
     <div class="section" id="socks-box" style="display:none;">
       <div class="section-title">Tor / SOCKS5<span style="font-size:11px;color:#c0392b;margin-left:6px;">ベータ</span></div>
-      <div class="row-sub">YggChatのインターネットへの接続（Yggdrasilのピア・Nostrリレー・公開ピア一覧）をSOCKS5プロキシ経由にします。Torなら公開ピアやリレーに自宅のIPアドレスが見えなくなります。Androidは<b>Orbot</b>（127.0.0.1:9050）、PCはTor（9050）かTor Browser（9150）を先に起動してください。プロキシが止まっているときは直接つながらず、接続中0になります。tcp://・tls://のピアだけ使えます（quic・wsは使われません）。LANチャットは対象外です。</div>
+      <div class="row-sub info">YggChatのインターネットへの接続（Yggdrasilのピア・Nostrリレー・公開ピア一覧）をSOCKS5プロキシ経由にします。Torなら公開ピアやリレーに自宅のIPアドレスが見えなくなります。Androidは<b>Orbot</b>（127.0.0.1:9050）、PCはTor（9050）かTor Browser（9150）を先に起動してください。プロキシが止まっているときは直接つながらず、接続中0になります。tcp://・tls://のピアだけ使えます（quic・wsは使われません）。LANチャットは対象外です。</div>
       <div class="toggle">
         <div class="toggle-label">SOCKS5経由で接続する</div>
         <div class="switch" id="socks-switch"><div class="switch-handle"></div></div>
@@ -1276,7 +1286,7 @@ img.emoji { height:1.2em; width:1.2em; margin:0 .05em 0 .1em; vertical-align:-0.
     </div>
     <div class="section">
       <div class="section-title">ダウンロード</div>
-      <div class="row-sub">ネイティブ版はtls・tcp・quicのピアにも直接つながり、バックグラウンドでも動きます。</div>
+      <div class="row-sub info">ネイティブ版はtls・tcp・quicのピアにも直接つながり、バックグラウンドでも動きます。</div>
       <a class="dl-btn" href="https://yggchat.surge.sh/dl/yggchat.apk" download>📱 Android (APK)</a>
       <a class="dl-btn" href="https://yggchat.surge.sh/dl/yggchat-windows-amd64.exe" download>🪟 Windows (exe)</a>
       <a class="dl-btn" href="https://yggchat.surge.sh/dl/yggchat-linux-amd64" download>🐧 Linux (amd64)</a>
@@ -2615,6 +2625,7 @@ function renderPrivacy(){
   if(sk){ setSwitch('socks-switch', sk.on); $('socks-addr').textContent = sk.addr || sk.default || ''; }
   const ns = state.nostr || {on:false, relays:[]};
   setSwitch('nostr-switch', ns.on);
+  setSwitch('nostr-legacy-switch', !!ns.legacy);
   $('nostr-relays').innerHTML = (ns.relays || []).map(escapeHtml).join('<br>') || 'なし';
   document.querySelectorAll('#theme-seg button').forEach(b => b.classList.toggle('on', b.getAttribute('data-theme') === (localStorage.getItem('yggchat_theme') || 'system')));
 }
@@ -2640,6 +2651,19 @@ $('nostr-switch').addEventListener('click', async () => {
   const on = !(state.nostr && state.nostr.on);
   if(on && !(await uiDialog('Nostr置き配をオンにしますか？\n\n届かなかった文章を暗号化して公開リレーに最大7日預けます。中身と送信者は相手しか読めませんが、リレー運営者にはIPアドレスと、毎日変わる宛先タグが見えます（送信時刻はぼかします）。連絡先にいる相手同士でしか届きません。リレーが消さない・預かってくれないこともあります。相手側もオンにしている必要があります。', {okText:'オンにする'}))) return;
   if(await nostrSet({On: on})) toast(on ? '置き配をオンにしました' : '置き配をオフにしました');
+});
+$('nostr-legacy-switch').addEventListener('click', async () => {
+  const on = !(state.nostr && state.nostr.legacy);
+  if(await nostrSet({Legacy: on})) toast(on ? '旧式の置き配も通します' : '旧式の置き配を止めました');
+});
+// Settings explanations stay folded behind an (i) button per section.
+document.querySelectorAll('#settings-screen .section').forEach(sec => {
+  if(!sec.querySelector('.row-sub.info')) return;
+  const t = sec.querySelector('.section-title'); if(!t) return;
+  const b = document.createElement('button');
+  b.className = 'info-btn'; b.type = 'button'; b.textContent = 'i'; b.setAttribute('aria-label', '説明');
+  b.addEventListener('click', e => { e.stopPropagation(); sec.classList.toggle('show-info'); });
+  t.appendChild(b);
 });
 $('nostr-edit').addEventListener('click', async () => {
   const cur = ((state.nostr && state.nostr.relays) || []).join(' ');

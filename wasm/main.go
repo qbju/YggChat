@@ -257,7 +257,11 @@ func nostrWrap(this js.Value, args []js.Value) any {
 	if err != nil || len(pk) != ed25519.PublicKeySize {
 		return ""
 	}
-	ev, err := mbox.NostrWrap(pk, priv, []byte(args[1].String()))
+	wrap := mbox.NostrWrap
+	if len(args) > 2 && args[2].Truthy() {
+		wrap = mbox.NostrWrapLegacy
+	}
+	ev, err := wrap(pk, priv, []byte(args[1].String()))
 	if err != nil {
 		return ""
 	}
@@ -285,7 +289,7 @@ func nostrTags(this js.Value, args []js.Value) any {
 		}
 	}
 	now := time.Now().Unix()
-	b, _ := json.Marshal(map[string]any{"tags": mbox.NostrTags(priv, pks, now), "since": mbox.NostrSince(now)})
+	b, _ := json.Marshal(map[string]any{"tags": mbox.NostrTags(priv, pks, now, len(args) > 1 && args[1].Truthy()), "since": mbox.NostrSince(now)})
 	return string(b)
 }
 func nostrDefaults(this js.Value, args []js.Value) any {

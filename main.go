@@ -98,9 +98,11 @@ type Store struct {
 	Contacts map[string]Contact `json:"contacts"`
 	Messages []Message          `json:"messages"`
 	Blocked  map[string]bool    `json:"blocked,omitempty"`
-	// Optional, deprecated: park undeliverable messages on public Nostr relays.
+	// Park undeliverable messages on public Nostr relays (on by default for new installs since v0.13.6).
 	NostrOn     bool     `json:"nostr_on,omitempty"`
 	NostrRelays []string `json:"nostr_relays,omitempty"`
+	// Also send/receive pre-v0.13 boxes with the static tag (until v0.20).
+	NostrLegacy bool `json:"nostr_legacy,omitempty"`
 	// Edits / unsends of our messages not yet acked by the peer.
 	Ctl []ctlItem `json:"ctl,omitempty"`
 	// Group chats (groups.go), keyed by group id.
@@ -1217,7 +1219,14 @@ func main() {
 	}
 
 	st := &Store{path: filepath.Join(*dataDir, "chat.json")}
+	_, statErr := os.Stat(st.path)
+	fresh := os.IsNotExist(statErr)
 	st.load()
+	if fresh {
+		// v0.13.6: new installs start with Nostr 置き配 on (hardened in v0.13.0).
+		// Existing users keep whatever they chose.
+		st.NostrOn = true
+	}
 	if !st.locked {
 		st.fix()
 	} else {

@@ -62,8 +62,8 @@ type Event struct {
 	Sig       string     `json:"sig"`
 }
 
-// NostrTag is the pre-v0.13 static recipient tag. New boxes never use it; it is
-// only still fetched so boxes from v0.12 senders arrive (remove in v0.14).
+// NostrTag is the pre-v0.13 static recipient tag. Only used when the user turns
+// on "旧式の置き配も通す" (send a second legacy box, fetch this tag); remove in v0.20.
 func NostrTag(pk []byte) string {
 	h := sha256.Sum256([]byte("yggchat-nostr:" + hex.EncodeToString(pk)))
 	return hex.EncodeToString(h[:])
@@ -94,8 +94,11 @@ func NostrPairTag(priv ed25519.PrivateKey, peer []byte, d int64) (string, error)
 // NostrTags returns every tag a box for us may carry right now: each peer's
 // pair tag for the TTL window (plus a day of clock skew either side) and the
 // legacy static tag. Order is shuffled so it says nothing about the contact list.
-func NostrTags(priv ed25519.PrivateKey, peers [][]byte, now int64) []string {
-	out := []string{NostrTag(priv.Public().(ed25519.PublicKey))}
+func NostrTags(priv ed25519.PrivateKey, peers [][]byte, now int64, legacy bool) []string {
+	var out []string
+	if legacy {
+		out = append(out, NostrTag(priv.Public().(ed25519.PublicKey)))
+	}
 	for _, pk := range peers {
 		for d := day(now) - NostrTTL/86400 - 1; d <= day(now)+1; d++ {
 			if t, err := NostrPairTag(priv, pk, d); err == nil {
@@ -156,6 +159,16 @@ func signEvent(sk *btcec.PrivateKey, e *Event) error {
 
 // NostrWrap returns a signed Nostr event (JSON) carrying wb for recipient `to`.
 func NostrWrap(to ed25519.PublicKey, priv ed25519.PrivateKey, wb []byte) (string, error) {
+	return nostrWrap(to, priv, wb, false)
+}
+
+// NostrWrapLegacy is NostrWrap with the pre-v0.13 static tag and no
+// back-dating, so v0.12 receivers find it. Opt-in; remove in v0.20.
+func NostrWrapLegacy(to ed25519.PublicKey, priv ed25519.PrivateKey, wb []byte) (string, error) {
+	return nostrWrap(to, priv, wb, true)
+}
+
+func nostrWrap(to ed25519.PublicKey, priv ed25519.PrivateKey, wb []byte, legacy bool) (string, error) {
 	sk, err := btcec.NewPrivateKey()
 	if err != nil {
 		return "", err
@@ -185,7 +198,11 @@ func NostrWrap(to ed25519.PublicKey, priv ed25519.PrivateKey, wb []byte) (string
 	if err != nil {
 		return "", err
 	}
-	e := &Event{CreatedAt: now - int64(randInt(nostrBackdate)), Kind: NostrKind, Content: box, Tags: [][]string{
+	created := now - int64(randInt(nostrBackdate))
+	if legacy {
+		tag, created = NostrTag(to), now
+	}
+	e := &Event{CreatedAt: created, Kind: NostrKind, Content: box, Tags: [][]string{
 		{"p", tag},
 		{"expiration", itoa(now + NostrTTL - int64(randInt(12*3600)))},
 	}}

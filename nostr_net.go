@@ -138,6 +138,7 @@ func (a *App) nostrPut(m Message) bool {
 	}
 	a.store.mu.Lock()
 	c := a.store.Contacts[m.Peer]
+	legacy := a.store.NostrLegacy
 	a.store.mu.Unlock()
 	pk, err := hex.DecodeString(c.PK)
 	if err != nil || len(pk) != 32 {
@@ -148,7 +149,14 @@ func (a *App) nostrPut(m Message) bool {
 	if err != nil {
 		return false
 	}
-	return nostrPublish(relays, ev)
+	ok := nostrPublish(relays, ev)
+	if legacy {
+		// A second box with the old static tag, for peers still on v0.12.
+		if lev, err := mbox.NostrWrapLegacy(pk, a.privKey(), wb); err == nil {
+			ok = nostrPublish(relays, lev) || ok
+		}
+	}
+	return ok
 }
 
 var nostrSeen sync.Map // event id -> struct{}
@@ -161,13 +169,14 @@ func (a *App) nostrFetch() {
 	}
 	a.store.mu.Lock()
 	var peers [][]byte
+	legacy := a.store.NostrLegacy
 	for _, c := range a.store.Contacts {
 		if pk, err := hex.DecodeString(c.PK); err == nil && len(pk) == 32 {
 			peers = append(peers, pk)
 		}
 	}
 	a.store.mu.Unlock()
-	tags := mbox.NostrTags(a.privKey(), peers, time.Now().Unix())
+	tags := mbox.NostrTags(a.privKey(), peers, time.Now().Unix(), legacy)
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	evs := map[string]string{}
@@ -222,7 +231,7 @@ func (a *App) nostrStateLocked() map[string]any {
 	if len(relays) == 0 {
 		relays = mbox.DefaultRelays
 	}
-	return map[string]any{"on": a.store.NostrOn, "relays": relays, "defaults": mbox.DefaultRelays}
+	return map[string]any{"on": a.store.NostrOn, "legacy": a.store.NostrLegacy, "relays": relays, "defaults": mbox.DefaultRelays}
 }
 
 // cleanRelays keeps up to 8 distinct wss:// URLs.
@@ -248,6 +257,7 @@ func (a *App) nostrHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("/api/nostr", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			On     *bool
+			Legacy *bool
 			Relays []string
 			Reset  bool
 		}
@@ -259,6 +269,9 @@ func (a *App) nostrHandlers(mux *http.ServeMux) {
 		if req.On != nil {
 			turnedOn = *req.On && !a.store.NostrOn
 			a.store.NostrOn = *req.On
+		}
+		if req.Legacy != nil {
+			a.store.NostrLegacy = *req.Legacy
 		}
 		if req.Reset {
 			a.store.NostrRelays = nil

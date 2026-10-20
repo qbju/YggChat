@@ -307,7 +307,7 @@ const cliHelp = `コマンド:
   /retry             今の会話の送れていないメッセージを再送
   /me                自分のアドレス・ピア数
   /nick <名前>       自分の名前を変更
-  /nostr on|off      Nostr置き配（非推奨）の切り替え
+  /nostr on|off      Nostr置き配の切り替え
   /quit              終了（-cli で起動したノードも止まります）
 それ以外の入力は、開いている相手に送信します。`
 
@@ -484,7 +484,7 @@ func (c *cli) cmd(l string) {
 		c.printf("名前を %s にしました", arg)
 	case "/nostr":
 		if arg != "on" && arg != "off" {
-			c.printf("使い方: /nostr on|off  （非推奨：公開リレーに暗号化して最大7日預けます。宛先タグ・時刻・IPはリレーに見えます）")
+			c.printf("使い方: /nostr on|off  （公開リレーに暗号化して最大7日預けます。宛先タグ・時刻・IPはリレーに見えます）")
 			return
 		}
 		var res struct{ On bool }

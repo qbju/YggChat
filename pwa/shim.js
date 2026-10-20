@@ -28,7 +28,7 @@
   const idbPut = (k, v) => idb.then(db => new Promise((res, rej) => { const t = db.transaction('kv', 'readwrite'); t.objectStore('kv').put(v, k); t.oncomplete = res; t.onerror = () => rej(t.error); }));
   let raw = {};
   const outer = { key: '', peers: null, enc: null };
-  const blank = () => ({ nick: 'anon', bio: '', avatar: '', contacts: {}, messages: [], blocked: {}, nostrOn: false, nostrRelays: [], ctl: [], groups: {} });
+  const blank = () => ({ nick: 'anon', bio: '', avatar: '', contacts: {}, messages: [], blocked: {}, nostrOn: true, nostrRelays: [], ctl: [], groups: {} });
   let st = blank();
   let locked = false;
   let aesKey = null; // CryptoKey while unlocked with a passcode
@@ -43,7 +43,7 @@
     if (outer.peers && outer.peers.some(p => /workers\.dev|instabox\.tech/.test(p))) outer.peers = null; // old Cloudflare relay / removed entry peer -> defaults
     if (!outer.peers) outer.peers = RECOMMENDED.slice();
     locked = !!outer.enc;
-    if (!locked) { Object.assign(st, { nick: raw.nick || 'anon', bio: raw.bio || '', avatar: raw.avatar || '', contacts: raw.contacts || {}, messages: raw.messages || [], blocked: raw.blocked || {}, nostrOn: !!raw.nostrOn, nostrRelays: raw.nostrRelays || [], ctl: raw.ctl || [], groups: raw.groups || {} }); migrate(); }
+    if (!locked) { Object.assign(st, { nick: raw.nick || 'anon', bio: raw.bio || '', avatar: raw.avatar || '', contacts: raw.contacts || {}, messages: raw.messages || [], blocked: raw.blocked || {}, nostrOn: !!raw.nostrOn, nostrLegacy: !!raw.nostrLegacy, nostrRelays: raw.nostrRelays || [], ctl: raw.ctl || [], groups: raw.groups || {} }); migrate(); }
   }
 
   const b64 = u8 => btoa(String.fromCharCode(...new Uint8Array(u8)));
@@ -386,7 +386,7 @@
   // deletion. Relays still see IP addresses and which tags one fetch asks for.
   const nDefaults = () => { try { return JSON.parse(yggNostrDefaults()); } catch { return []; } };
   const nRelays = () => (!locked && st.nostrOn) ? (st.nostrRelays && st.nostrRelays.length ? st.nostrRelays.slice() : nDefaults()) : null;
-  const nostrState = () => ({ on: !!st.nostrOn, relays: st.nostrRelays && st.nostrRelays.length ? st.nostrRelays : nDefaults(), defaults: nDefaults() });
+  const nostrState = () => ({ on: !!st.nostrOn, legacy: !!st.nostrLegacy, relays: st.nostrRelays && st.nostrRelays.length ? st.nostrRelays : nDefaults(), defaults: nDefaults() });
   function relayTalk(url, first, onMsg, ms) {
     return new Promise(res => {
       let ws, done = false;
@@ -423,7 +423,7 @@
     const rs = nRelays(); if (!rs || nBusy) return;
     nBusy = true;
     try {
-      let q; try { q = JSON.parse(yggNostrTags(JSON.stringify(Object.values(st.contacts).map(c => c.pk).filter(Boolean)))); } catch { return; }
+      let q; try { q = JSON.parse(yggNostrTags(JSON.stringify(Object.values(st.contacts).map(c => c.pk).filter(Boolean)), !!st.nostrLegacy)); } catch { return; }
       const evs = new Map();
       for (const l of await Promise.all(rs.map(r => relayFetch(r, q.tags, q.since)))) for (const e of l) if (e && e.id) evs.set(e.id, e);
       for (const [id, e] of evs) {
@@ -440,7 +440,9 @@
     const rs = nRelays(); if (!rs || m.img || m.nostr) return;
     const c = st.contacts[m.peer]; if (!c || !c.pk) return;
     const ev = yggNostrWrap(c.pk, JSON.stringify(await msgPkt(m)));
-    if (!ev || !(await nostrPublish(rs, ev))) return;
+    let ok = !!ev && await nostrPublish(rs, ev);
+    if (st.nostrLegacy) { const lev = yggNostrWrap(c.pk, JSON.stringify(await msgPkt(m)), true); if (lev && await nostrPublish(rs, lev)) ok = true; }
+    if (!ok) return;
     const x = st.messages.find(y => y.peer === m.peer && y.id === m.id);
     if (x && x.status === 'queued') { x.nostr = true; setStatus(m.peer, m.id, 'stored'); }
   }
@@ -638,6 +640,7 @@
       case 'nostr': {
         const was = !!st.nostrOn;
         if (body.On != null) st.nostrOn = !!body.On;
+        if (body.Legacy != null) st.nostrLegacy = !!body.Legacy;
         if (body.Reset) st.nostrRelays = [];
         else if (body.Relays) st.nostrRelays = cleanRelays(body.Relays);
         save();
