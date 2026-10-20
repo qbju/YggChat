@@ -63,7 +63,7 @@ Wire: {t:"fh", id, nick, text?, ts, ttl?, mime, size, n, sha} then {t:"fc", id, 
 - POST /api/contact {Addr:"g:<id>", Nick?, Accept?} renames locally / accepts an invitation; /api/contact/delete {Addr:"g:<id>"} deletes it locally.
 - Wire: msg + {g, gh}; {t:"gq",g}; {t:"gi",g,gn,gm}; {t:"gl",g}. See groups.go.
 
-## POST /api/nostr: Legacy (v0.13.6)
+## POST /api/nostr: Legacy (v0.13.7)
 - {Legacy: bool} toggles store.nostr_legacy (default off): also publish a pre-v0.13 box (static tag, no back-dating) and fetch the static tag. Response gains "legacy". Removed in v0.20.
 
 ## POST /api/site (v0.13.6, native, beta)

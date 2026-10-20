@@ -1223,7 +1223,7 @@ func main() {
 	fresh := os.IsNotExist(statErr)
 	st.load()
 	if fresh {
-		// v0.13.6: new installs start with Nostr 置き配 on (hardened in v0.13.0).
+		// v0.13.7: new installs start with Nostr 置き配 on (hardened in v0.13.0).
 		// Existing users keep whatever they chose.
 		st.NostrOn = true
 	}
