@@ -66,6 +66,9 @@ Wire: {t:"fh", id, nick, text?, ts, ttl?, mime, size, n, sha} then {t:"fc", id, 
 ## POST /api/nostr: Legacy (v0.13.7)
 - {Legacy: bool} toggles store.nostr_legacy (default off): also publish a pre-v0.13 box (static tag, no back-dating) and fetch the static tag. Response gains "legacy". Removed in v0.20.
 
+## Verified domain (v0.14.0)
+- POST /api/profile accepts Domain (string; "" removes). Saved only when its Yggdrasil AAAA equals our address; else 400 with reason. State gains "domain". prof wire carries "dom". Contacts gain dom, domok (AAAA == their addr), domat (re-checked when a profile arrives and 12h passed).
+
 ## POST /api/resolve (v0.13.8)
 - {Name} -> {addr, name}: first 200::/7 AAAA of a domain via DoH (cloudflare, then google) over netDial (SOCKS-aware); system resolver fallback only when SOCKS is off. 404 when no Yggdrasil AAAA.
 

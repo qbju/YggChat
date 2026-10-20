@@ -213,7 +213,7 @@ func (a *App) sendWire(peer string, w wire) {
 func (a *App) profWire() wire {
 	a.store.mu.Lock()
 	defer a.store.mu.Unlock()
-	return wire{T: "prof", Nick: a.store.Nick, Bio: a.store.Bio, Av: a.store.Avatar, PK: hex.EncodeToString(a.pub())}
+	return wire{T: "prof", Nick: a.store.Nick, Bio: a.store.Bio, Av: a.store.Avatar, Dom: a.store.Domain, PK: hex.EncodeToString(a.pub())}
 }
 
 // sendProf shares our profile with peer (a few times, it is a datagram).
@@ -320,10 +320,18 @@ func (a *App) handleCtl(from string, w wire) bool {
 		c.Bio = cleanText(w.Bio, 140)
 		c.Avatar = cleanText(w.Av, 8)
 		c.HasProf = true
+		dom := cleanDomain(w.Dom)
+		recheck := dom != "" && (dom != c.Dom || time.Since(time.Unix(c.DomAt, 0)) > 12*time.Hour)
+		if dom != c.Dom {
+			c.Dom, c.DomOK, c.DomAt = dom, false, 0
+		}
 		a.store.Contacts[from] = c
 		a.store.save()
 		a.store.mu.Unlock()
 		a.broadcast("contact", c)
+		if recheck {
+			go a.verifyDomain(from, dom)
+		}
 		return true
 	case "ttl":
 		a.store.mu.Lock()
@@ -448,11 +456,35 @@ func (a *App) featureHandlers(mux *http.ServeMux) {
 		w.Write([]byte("{}"))
 	})
 	mux.HandleFunc("/api/profile", func(w http.ResponseWriter, r *http.Request) {
-		var req struct{ Nick, Bio, Avatar string }
+		var req struct {
+			Nick, Bio, Avatar string
+			Domain            *string
+		}
 		if !readJSON(w, r, &req) {
 			return
 		}
+		var dom string
+		if req.Domain != nil {
+			if dom = cleanDomain(*req.Domain); dom == "" && strings.TrimSpace(*req.Domain) != "" {
+				http.Error(w, "ドメイン名ではありません", 400)
+				return
+			}
+			if dom != "" {
+				ad, err := resolveYgg(dom)
+				if err != nil {
+					http.Error(w, err.Error(), 400)
+					return
+				}
+				if ad != a.addr {
+					http.Error(w, dom+" のAAAAは "+ad+" で、あなたのアドレスではありません", 400)
+					return
+				}
+			}
+		}
 		a.store.mu.Lock()
+		if req.Domain != nil {
+			a.store.Domain = dom
+		}
 		a.store.Nick = cleanNick(req.Nick)
 		if a.store.Nick == "" {
 			a.store.Nick = "anon"

@@ -83,6 +83,9 @@ type Contact struct {
 	Req     bool   `json:"req,omitempty"`    // message request not yet accepted
 	Shared  bool   `json:"shared,omitempty"` // we shared our profile with them
 	PK      string `json:"pk,omitempty"`     // full Ed25519 key (verified against addr)
+	Dom     string `json:"dom,omitempty"`    // domain the peer claims in its profile
+	DomOK   bool   `json:"domok,omitempty"`  // its AAAA is this peer's address (checked by us)
+	DomAt   int64  `json:"domat,omitempty"`  // last check
 }
 
 type Store struct {
@@ -95,6 +98,7 @@ type Store struct {
 	Nick     string             `json:"nick"`
 	Bio      string             `json:"bio,omitempty"`
 	Avatar   string             `json:"avatar,omitempty"`
+	Domain   string             `json:"domain,omitempty"` // our verified domain (v0.14)
 	Contacts map[string]Contact `json:"contacts"`
 	Messages []Message          `json:"messages"`
 	Blocked  map[string]bool    `json:"blocked,omitempty"`
@@ -298,6 +302,7 @@ type wire struct {
 	TTL  int    `json:"ttl,omitempty"`
 	Bio  string `json:"bio,omitempty"`
 	Av   string `json:"av,omitempty"`
+	Dom  string `json:"dom,omitempty"`  // claimed domain (prof); verified by its AAAA
 	PK   string `json:"pk,omitempty"`   // sender's full Ed25519 key (hi/hiack/prof)
 	Mime string `json:"mime,omitempty"` // image header (fh)
 	Size int    `json:"size,omitempty"`
@@ -879,7 +884,7 @@ func (a *App) httpHandlers(mux *http.ServeMux) {
 		sort.Strings(blocked)
 		json.NewEncoder(w).Encode(map[string]any{
 			"addr": a.addr, "pubkey": hex.EncodeToString(a.pub()), "system": a.sys, "vpn": a.vpn,
-			"nick": a.store.Nick, "bio": a.store.Bio, "avatar": a.store.Avatar,
+			"nick": a.store.Nick, "bio": a.store.Bio, "avatar": a.store.Avatar, "domain": a.store.Domain,
 			"contacts": a.contactsViewLocked(), "messages": a.visibleMessagesLocked(), "peers": peers, "platform": "native",
 			"locked": false, "haspass": a.store.key != nil, "blocked": blocked,
 			"nostr": a.nostrStateLocked(), "socks": a.socksState(),

@@ -43,7 +43,7 @@
     if (outer.peers && outer.peers.some(p => /workers\.dev|instabox\.tech/.test(p))) outer.peers = null; // old Cloudflare relay / removed entry peer -> defaults
     if (!outer.peers) outer.peers = RECOMMENDED.slice();
     locked = !!outer.enc;
-    if (!locked) { Object.assign(st, { nick: raw.nick || 'anon', bio: raw.bio || '', avatar: raw.avatar || '', contacts: raw.contacts || {}, messages: raw.messages || [], blocked: raw.blocked || {}, nostrOn: raw.key ? !!raw.nostrOn : true, nostrLegacy: !!raw.nostrLegacy, nostrRelays: raw.nostrRelays || [], ctl: raw.ctl || [], groups: raw.groups || {} }); migrate(); }
+    if (!locked) { Object.assign(st, { nick: raw.nick || 'anon', bio: raw.bio || '', avatar: raw.avatar || '', contacts: raw.contacts || {}, messages: raw.messages || [], blocked: raw.blocked || {}, domain: raw.domain || undefined, nostrOn: raw.key ? !!raw.nostrOn : true, nostrLegacy: !!raw.nostrLegacy, nostrRelays: raw.nostrRelays || [], ctl: raw.ctl || [], groups: raw.groups || {} }); migrate(); }
   }
 
   const b64 = u8 => btoa(String.fromCharCode(...new Uint8Array(u8)));
@@ -97,7 +97,7 @@
   }
 
   // ---- profile sharing, disappearing timer ----
-  const profWire = () => ({ t: 'prof', nick: st.nick, bio: st.bio, av: st.avatar, pk: myPK() });
+  const profWire = () => ({ t: 'prof', nick: st.nick, bio: st.bio, av: st.avatar, dom: st.domain || undefined, pk: myPK() });
   function sendProf(p) { const w = profWire(); for (let i = 0; i < 3; i++) setTimeout(() => send(p, w), i * 1500); }
   const profAt = {};
   function maybeProf(p) { const c = st.contacts[p]; if (!c || !c.shared) return; if (Date.now() - (profAt[p] || 0) < 600000) return; profAt[p] = Date.now(); sendProf(p); }
@@ -282,7 +282,13 @@
     if (w.t === 'prof') {
       const c = st.contacts[src]; if (!c) return;
       const n = cleanNick(w.nick); if (n && !c.renamed) c.nick = n;
-      c.bio = cleanText(w.bio, 140); c.avatar = cleanText(w.av, 8); c.hasprof = true; save(); emit('contact', c); return;
+      c.bio = cleanText(w.bio, 140); c.avatar = cleanText(w.av, 8); c.hasprof = true;
+      const dom = cleanDomain(w.dom);
+      const recheck = dom && (dom !== c.dom || Date.now() / 1000 - (c.domat || 0) > 12 * 3600);
+      if (dom !== (c.dom || '')) { c.dom = dom || undefined; c.domok = false; c.domat = 0; }
+      save(); emit('contact', c);
+      if (recheck) resolveYgg(dom).then(r => { const x = st.contacts[src]; if (!x || x.dom !== dom || r.err === 'net') return; x.domok = r.addr === src; x.domat = Math.floor(Date.now() / 1000); save(); emit('contact', x); });
+      return;
     }
     if (w.t === 'ttl') { setTTL(src, w.ttl | 0, false); return; }
     if (w.t === 'fh') { onFileHeader(src, w); return; }
@@ -484,6 +490,17 @@
 
   const norm = a => { try { return new URL('http://[' + a.trim() + ']/').hostname.slice(1, -1) } catch { return null } };
   const isYgg = a => !!a && /^0?[23][0-9a-f]{0,2}:/.test(a);
+  const cleanDomain = d => { d = String(d || '').trim().toLowerCase().replace(/\.$/, ''); return (d.length <= 253 && /^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9-]{2,63}$/.test(d)) ? d : ''; };
+  // First Yggdrasil AAAA of a domain over DNS-over-HTTPS -> {addr} | {err:'none'|'net'}
+  async function resolveYgg(name) {
+    for (const s of ['https://cloudflare-dns.com/dns-query', 'https://dns.google/resolve']) {
+      let j; try { const r = await fetch(s + '?type=AAAA&name=' + encodeURIComponent(name), { headers: { accept: 'application/dns-json' }, referrerPolicy: 'no-referrer', credentials: 'omit' }); j = await r.json(); } catch { continue; }
+      const a = (j.Answer || []).find(x => x.type === 28 && /^[23][0-9a-f]{2}:/i.test(x.data || ''));
+      const n = a && norm(a.data);
+      return n ? { addr: n } : { err: 'none' };
+    }
+    return { err: 'net' };
+  }
   const ok = d => new Response(JSON.stringify(d), { status: 200, headers: { 'Content-Type': 'application/json' } });
   const bad = (msg, code = 400) => new Response(msg, { status: code });
 
@@ -501,7 +518,7 @@
     switch (ep) {
       case 'state':
         if (locked) return ok({ locked: true, addr, peers: yggPeers(), platform: 'web' });
-        return ok({ addr, pubkey: myPK(), nick: st.nick, bio: st.bio, avatar: st.avatar, contacts: Object.assign({}, st.contacts, Object.fromEntries(Object.values(st.groups || {}).map(g => ['g:' + g.id, gView(g)]))), messages: st.messages.filter(m => !m.hid), peers: yggPeers(), platform: 'web', locked: false, haspass: !!aesKey, blocked: Object.keys(st.blocked), nostr: nostrState() });
+        return ok({ addr, pubkey: myPK(), nick: st.nick, bio: st.bio, avatar: st.avatar, domain: st.domain || '', contacts: Object.assign({}, st.contacts, Object.fromEntries(Object.values(st.groups || {}).map(g => ['g:' + g.id, gView(g)]))), messages: st.messages.filter(m => !m.hid), peers: yggPeers(), platform: 'web', locked: false, haspass: !!aesKey, blocked: Object.keys(st.blocked), nostr: nostrState() });
       case 'unlock': {
         if (!locked) return ok({});
         try {
@@ -619,6 +636,12 @@
       }
       case 'nick': st.nick = cleanNick(body.Nick) || 'anon'; save(); for (const p in st.contacts) if (st.contacts[p].shared) sendProf(p); return ok({});
       case 'profile': {
+        if (body.Domain != null) {
+          const d = cleanDomain(body.Domain);
+          if (!d && String(body.Domain).trim()) return bad('ドメイン名ではありません');
+          if (d) { const r = await resolveYgg(d); if (!r.addr) return bad(r.err === 'net' ? 'DNSに問い合わせできませんでした' : d + ' にはYggdrasilアドレス（200::/7）のAAAAレコードがありません'); if (r.addr !== addr) return bad(d + ' のAAAAは ' + r.addr + ' で、あなたのアドレスではありません'); }
+          st.domain = d || undefined;
+        }
         st.nick = cleanNick(body.Nick) || 'anon'; st.bio = cleanText(body.Bio, 140); st.avatar = cleanText(body.Avatar, 8);
         save(); for (const p in st.contacts) if (st.contacts[p].shared) sendProf(p); return ok({});
       }
@@ -639,15 +662,11 @@
         return ok({ peers: peerList(), recommended: RECOMMENDED, up: yggPeers() });
       }
       case 'resolve': {
-        const name = String(body.Name || '').trim().toLowerCase().replace(/\.$/, '');
-        if (!/^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9-]{2,63}$/.test(name) || name.length > 253) return bad('ドメイン名ではありません');
-        for (const s of ['https://cloudflare-dns.com/dns-query', 'https://dns.google/resolve']) {
-          let j; try { const r = await fetch(s + '?type=AAAA&name=' + encodeURIComponent(name), { headers: { accept: 'application/dns-json' }, referrerPolicy: 'no-referrer', credentials: 'omit' }); j = await r.json(); } catch { continue; }
-          const a = (j.Answer || []).find(x => x.type === 28 && /^[23][0-9a-f]{2}:/i.test(x.data || ''));
-          if (a && norm(a.data)) return ok({ addr: norm(a.data), name });
-          return bad(name + ' にはYggdrasilアドレス（200::/7）のAAAAレコードがありません', 404);
-        }
-        return bad('DNSに問い合わせできませんでした', 502);
+        const name = cleanDomain(body.Name);
+        if (!name) return bad('ドメイン名ではありません');
+        const r = await resolveYgg(name);
+        if (r.addr) return ok({ addr: r.addr, name });
+        return r.err === 'net' ? bad('DNSに問い合わせできませんでした', 502) : bad(name + ' にはYggdrasilアドレス（200::/7）のAAAAレコードがありません', 404);
       }
       case 'nostr': {
         const was = !!st.nostrOn;

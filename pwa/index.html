@@ -1045,6 +1045,7 @@ img.emoji { height:1.2em; width:1.2em; margin:0 .05em 0 .1em; vertical-align:-0.
     <div style="text-align:center;">
       <div id="ci-nick" style="font-weight:600; font-size:18px;"></div>
       <div id="ci-addr" style="font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:12px; color:var(--dim); margin-top:4px; word-break:break-all;"></div>
+      <div id="ci-dom" style="font-size:13px; margin-top:6px;"></div>
       <div id="ci-bio" style="font-size:13px; margin-top:8px; white-space:pre-wrap;"></div>
       <div id="ci-keystate" class="row-sub" style="margin-top:6px;"></div>
     </div>
@@ -1134,6 +1135,7 @@ img.emoji { height:1.2em; width:1.2em; margin:0 .05em 0 .1em; vertical-align:-0.
         <div class="row-main">
           <input id="settings-nick" type="text" placeholder="表示名" maxlength="32">
           <input id="settings-bio" type="text" placeholder="自己紹介（任意・140字）" maxlength="140" style="margin-top:6px;">
+          <input id="settings-domain" type="text" placeholder="ドメイン（任意・AAAAに自分のアドレスを登録）" maxlength="253" autocomplete="off" autocapitalize="off" spellcheck="false" style="margin-top:6px;">
           <input id="settings-avatar-emoji" type="text" placeholder="アイコンの絵文字（任意）" maxlength="8" style="margin-top:6px;">
           <div class="row-sub" id="settings-own-addr"></div>
         </div>
@@ -1291,7 +1293,7 @@ img.emoji { height:1.2em; width:1.2em; margin:0 .05em 0 .1em; vertical-align:-0.
       <a class="dl-btn" href="https://yggchat.surge.sh/dl/yggchat-windows-amd64.exe" download>🪟 Windows (exe)</a>
       <a class="dl-btn" href="https://yggchat.surge.sh/dl/yggchat-linux-amd64" download>🐧 Linux (amd64)</a>
       <a class="dl-btn" href="https://yggchat.surge.sh/dl/yggchat-android-arm64" download>⌨️ Termux (arm64)</a>
-      <div class="row-sub" id="dl-ver">最新: v0.13.9 ・ SHA256SUMS で検証できます</div>
+      <div class="row-sub" id="dl-ver">最新: v0.14.0 ・ SHA256SUMS で検証できます</div>
     </div>
     <div class="section">
       <div class="section-title">About</div>
@@ -1763,7 +1765,7 @@ function updateChatHeader(){
   $('chat-avatar').style.border = 'none';
   $('chat-avatar').style.color = '#111';
   $('chat-name').textContent = c.nick || addrShort(curAddr);
-  $('chat-addr').textContent = grp ? (c.left ? '退出済みのグループ' : ((c.members||[]).length + '人: ' + (c.members||[]).map(a => a === state.addr ? 'あなた' : ((state.contacts[a]||{}).nick || addrShort(a))).join('、'))) : curAddr;
+  $('chat-addr').textContent = grp ? (c.left ? '退出済みのグループ' : ((c.members||[]).length + '人: ' + (c.members||[]).map(a => a === state.addr ? 'あなた' : ((state.contacts[a]||{}).nick || addrShort(a))).join('、'))) : (c.dom && c.domok ? '✓ ' + c.dom + ' ・ ' + curAddr : curAddr);
 }
 
 let forceBottom = false;
@@ -1885,6 +1887,9 @@ function openContactInfo(){
   const c = state.contacts[curAddr] || {addr:curAddr, nick:''};
   $('ci-avatar').textContent = avatarText(c, curAddr);
   $('ci-bio').textContent = c.bio || '';
+  $('ci-dom').innerHTML = !c.dom ? '' : c.domok
+    ? '<span style="color:var(--accent);font-weight:600;">✓ ' + escapeHtml(c.dom) + '</span> <span style="color:var(--dim);font-size:11px;">ドメインのAAAAがこの人のアドレスと一致</span>'
+    : '<span style="color:var(--dim);">' + escapeHtml(c.dom) + '（未確認：AAAAがこの人のアドレスと一致しません／確認中）</span>';
   $('ci-keystate').textContent = c.pk ? '🔑 公開鍵を確認済み' : '公開鍵は未取得（一度オンラインで通信すると取得）';
   $('ci-ttl').value = String(c.ttl || 0);
   if(!$('ci-ttl').value) $('ci-ttl').value = '0';
@@ -1984,6 +1989,7 @@ $('settings-back').addEventListener('click', closeSettings);
 function openSettings(){
   $('settings-avatar').textContent = state.avatar || initials(state.nick || state.addr);
   $('settings-bio').value = state.bio || '';
+  $('settings-domain').value = state.domain || '';
   $('settings-avatar-emoji').value = state.avatar || '';
   renderPrivacy();
   $('settings-avatar').style.background = hashColor(state.addr);
@@ -2032,6 +2038,16 @@ function renderShareQR(){
 
 $('settings-nick').addEventListener('change', saveSettingsNick);
 $('settings-bio').addEventListener('change', saveSettingsNick);
+$('settings-domain').addEventListener('change', async () => {
+  const d = $('settings-domain').value.trim().toLowerCase().replace(/\.$/, '');
+  if(d === (state.domain || '')) return;
+  if(d) toast(d + ' を確認しています…');
+  try{
+    await api('/api/profile', {Nick: state.nick || 'anon', Bio: state.bio || '', Avatar: state.avatar || '', Domain: d});
+    state.domain = d; $('settings-domain').value = d;
+    toast(d ? '✓ ' + d + ' を確認してプロフィールに追加しました' : 'ドメインを外しました');
+  }catch(e){ $('settings-domain').value = state.domain || ''; await uiAlert(e.message + '\n\nDNSで ' + (d || 'ドメイン') + ' のAAAAレコードに ' + state.addr + ' を登録してから、もう一度入れてね。'); }
+});
 $('settings-avatar-emoji').addEventListener('change', saveSettingsNick);
 $('settings-nick').addEventListener('keydown', (e) => {
   if(e.key === 'Enter'){
@@ -2045,7 +2061,7 @@ async function saveSettingsNick(){
   const av = $('settings-avatar-emoji').value.trim();
   if(v === state.nick && bio === (state.bio||'') && av === (state.avatar||'')) return;
   try{
-    await api('/api/profile', {Nick: v, Bio: bio, Avatar: av});
+    await api('/api/profile', {Nick: v, Bio: bio, Avatar: av, Domain: state.domain || ''});
     state.nick = v; state.bio = bio; state.avatar = av;
     $('settings-avatar').textContent = av || initials(v);
     renderList();
