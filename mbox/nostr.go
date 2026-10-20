@@ -95,7 +95,7 @@ func NostrPairTag(priv ed25519.PrivateKey, peer []byte, d int64) (string, error)
 // pair tag for the TTL window (plus a day of clock skew either side) and the
 // legacy static tag. Order is shuffled so it says nothing about the contact list.
 func NostrTags(priv ed25519.PrivateKey, peers [][]byte, now int64, legacy bool) []string {
-	var out []string
+	out := []string{}
 	if legacy {
 		out = append(out, NostrTag(priv.Public().(ed25519.PublicKey)))
 	}

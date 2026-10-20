@@ -424,6 +424,7 @@
     nBusy = true;
     try {
       let q; try { q = JSON.parse(yggNostrTags(JSON.stringify(Object.values(st.contacts).map(c => c.pk).filter(Boolean)), !!st.nostrLegacy)); } catch { return; }
+      if (!q || !Array.isArray(q.tags) || !q.tags.length) return;
       const evs = new Map();
       for (const l of await Promise.all(rs.map(r => relayFetch(r, q.tags, q.since)))) for (const e of l) if (e && e.id) evs.set(e.id, e);
       for (const [id, e] of evs) {

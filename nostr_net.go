@@ -177,6 +177,9 @@ func (a *App) nostrFetch() {
 	}
 	a.store.mu.Unlock()
 	tags := mbox.NostrTags(a.privKey(), peers, time.Now().Unix(), legacy)
+	if len(tags) == 0 {
+		return // no contacts with a known key yet: don't even contact the relays
+	}
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	evs := map[string]string{}
