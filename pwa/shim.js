@@ -28,11 +28,14 @@
   const idbPut = (k, v) => idb.then(db => new Promise((res, rej) => { const t = db.transaction('kv', 'readwrite'); t.objectStore('kv').put(v, k); t.oncomplete = res; t.onerror = () => rej(t.error); }));
   let raw = {};
   const outer = { key: '', peers: null, enc: null };
-  const blank = () => ({ nick: 'anon', bio: '', avatar: '', contacts: {}, messages: [], blocked: {}, nostrOn: true, nostrRelays: [], ctl: [], groups: {} });
+  const blank = () => ({ nick: 'anon', bio: '', avatar: '', contacts: {}, messages: [], blocked: {}, nostrOn: true, nostrRelays: [], ctl: [], groups: {}, powStrict: false });
   let st = blank();
   let locked = false;
   let aesKey = null; // CryptoKey while unlocked with a passcode
-  const migrate = () => { for (const m of st.messages) if (m.status === 'sending' || m.status === 'failed') m.status = 'queued'; };
+  const migrate = () => {
+    st.messages = st.messages.filter(m => !(m.hid && m.status === 'sent')); // delivered group copies (kept before v0.19)
+    for (const m of st.messages) if (m.status === 'sending' || m.status === 'failed') m.status = 'queued';
+  };
   async function loadStore() {
     raw = (await idbGet('state').catch(() => null)) || null;
     if (!raw) {
@@ -43,7 +46,7 @@
     if (outer.peers && outer.peers.some(p => /workers\.dev|instabox\.tech/.test(p))) outer.peers = null; // old Cloudflare relay / removed entry peer -> defaults
     if (!outer.peers) outer.peers = RECOMMENDED.slice();
     locked = !!outer.enc;
-    if (!locked) { Object.assign(st, { nick: raw.nick || 'anon', bio: raw.bio || '', avatar: raw.avatar || '', contacts: raw.contacts || {}, messages: raw.messages || [], blocked: raw.blocked || {}, domain: raw.domain || undefined, nostrOn: raw.key ? !!raw.nostrOn : true, nostrLegacy: !!raw.nostrLegacy, nostrRelays: raw.nostrRelays || [], ctl: raw.ctl || [], groups: raw.groups || {} }); migrate(); }
+    if (!locked) { Object.assign(st, { nick: raw.nick || 'anon', bio: raw.bio || '', avatar: raw.avatar || '', contacts: raw.contacts || {}, messages: raw.messages || [], blocked: raw.blocked || {}, domain: raw.domain || undefined, nostrOn: raw.key ? !!raw.nostrOn : true, nostrLegacy: !!raw.nostrLegacy, nostrRelays: raw.nostrRelays || [], ctl: raw.ctl || [], groups: raw.groups || {}, powStrict: !!raw.powStrict }); migrate(); }
   }
 
   const b64 = u8 => btoa(String.fromCharCode(...new Uint8Array(u8)));
@@ -67,12 +70,15 @@
       await idbPut('state', rec);
     }).catch(e => console.error('save', e));
   }
+  let saveT = null;
+  const saveSoon = () => { if (!saveT) saveT = setTimeout(() => { saveT = null; save(); }, 500); }; // many group-copy updates at once
   const saveOuter = () => { saving = saving.then(() => { raw = Object.assign({}, raw, { key: outer.key, peers: outer.peers }); return idbPut('state', raw); }).catch(e => console.error('save', e)); };
 
   let addr = '';
   const subs = new Set();
   const emit = (type, data) => { const s = JSON.stringify({ type, data }); subs.forEach(f => f(s)); };
-  const acks = new Map();
+  const acks = new Map(), ackFrom = new Map(); // id -> resolver, id -> the peer whose ack counts
+  const waitAck = (peer, id) => new Promise(r => { acks.set(id, r); ackFrom.set(id, peer); });
   const cleanNick = n => String(n || '').replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069]/g, '').trim().slice(0, 32);
   const cleanText = (s, n) => String(s || '').replace(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g, '').trim().slice(0, n);
   const send = (peer, w) => { try { yggSend(peer, JSON.stringify(w)); } catch {} };
@@ -90,8 +96,8 @@
   }
 
   function setStatus(peer, id, status) {
-    const m = st.messages.find(x => x.peer === peer && x.id === id);
-    if (m) { m.status = status; save(); }
+    const i = st.messages.findIndex(x => x.peer === peer && x.id === id), m = i >= 0 ? st.messages[i] : null;
+    if (m) { m.status = status; if (m.hid) { if (status === 'sent') st.messages.splice(i, 1); saveSoon(); } else save(); }
     if (m && m.hid) { groupStatus(m.grp, m.of); return; }
     emit('status', { id, peer, status });
   }
@@ -133,7 +139,7 @@
     if (ctlBusy.has(p)) return; ctlBusy.add(p);
     try {
       for (const c of (st.ctl || []).filter(x => x.peer === p)) {
-        const acked = new Promise(r => acks.set(c.w.id, r));
+        const acked = waitAck(p, c.w.id);
         let ok = false;
         for (let i = 0; i < 6 && !ok; i++) { send(p, c.w); ok = await Promise.race([acked.then(() => true), new Promise(r => setTimeout(() => r(false), 2500))]); }
         acks.delete(c.w.id);
@@ -149,7 +155,7 @@
     if (i >= 0) {
       if (w.t === 'edit') {
         const t = String(w.text || '');
-        if (t.trim() && t.length <= 8000) { st.messages[i].text = t; st.messages[i].edited = true; save(); emit('msg_upd', st.messages[i]); }
+        if (t.trim() && u8len(t) <= MAXRECV) { st.messages[i].text = t; st.messages[i].edited = true; save(); emit('msg_upd', st.messages[i]); }
       } else { st.messages.splice(i, 1); save(); emit('msg_del', { peer: src, id: w.ref }); }
     }
     return true;
@@ -159,9 +165,10 @@
 
   const handleMsg = (src, w) => w.g ? onGroupMsg(src, w) : Promise.resolve(!!w.text && acceptMsg(src, w, ''));
   function acceptMsg(src, w, img) {
-    if ((!w.text && !img) || String(w.text || '').length > 8000 || !/^[0-9A-Za-z_-]{1,40}$/.test(String(w.id))) return false;
+    if ((!w.text && !img) || u8len(w.text) > MAXRECV || !/^[0-9A-Za-z_-]{1,40}$/.test(String(w.id))) return false;
     if (locked || st.blocked[src]) return false;
     if (st.messages.some(m => m.peer === src && m.id === w.id)) return true;
+    if (!powCheck(src, w)) return false;
     let ttl = w.ttl | 0; if (ttl < 0 || ttl > MAXTTL) ttl = 0;
     if (st.contacts[src] && (st.contacts[src].ttl || 0) !== ttl) setTTL(src, ttl, false);
     const m = { id: w.id, peer: src, from: src, nick: cleanNick(w.nick), text: w.text || '', ts: w.ts || now(), out: false };
@@ -175,11 +182,10 @@
   // A group message goes to every member as its own acked "msg" with g (group id)
   // and gh (hash of name+members); the copies are hidden, the "g:<id>" message shows.
   const isG = k => String(k || '').startsWith('g:');
-  const MAXG = 20;
-  const gView = g => { const v = { addr: 'g:' + g.id, nick: g.name, avatar: '👥', group: true, members: g.members, req: !!g.req, left: !!g.left, owner: g.owner || '', set: g.set || {} }; if (g.set && g.set.ttl) v.ttl = g.set.ttl; if (g.pend && g.pend.length) v.pend = g.pend; return v; };
+  const gView = g => { const v = { addr: 'g:' + g.id, nick: g.name, avatar: '👥', group: true, members: g.members, req: !!g.req, left: !!g.left, owner: g.owner || '', set: g.set || {}, admins: g.admins || [], max: gMax(g) }; if (g.set && g.set.ttl) v.ttl = g.set.ttl; if (g.pend && g.pend.length) v.pend = g.pend; return v; };
   // ---- group settings (v0.18, see groupset.go) ----
   const GTTLS = [0, 300, 3600, 86400, 604800, 2419200];
-  const cleanSet = s => { s = s || {}; const o = {}; if (s.nf) o.nf = true; if (s.ap) o.ap = true; if (s.hi) o.hi = true; if (s.pw) o.pw = true; if (GTTLS.includes(s.ttl | 0) && s.ttl) o.ttl = s.ttl | 0; return o; };
+  const cleanSet = s => { s = s || {}; const o = {}; if (s.nf) o.nf = true; if (s.ap) o.ap = true; if (s.hi) o.hi = true; if (s.pw) o.pw = true; if (GTTLS.includes(s.ttl | 0) && s.ttl) o.ttl = s.ttl | 0; if (GMAXES.includes(s.mx | 0) && (s.mx | 0) !== GDEF) o.mx = s.mx | 0; if (GPOWS.includes(s.pb | 0) && s.pb) o.pb = s.pb | 0; return o; };
   const ttlText = s => ({ 0: 'オフ', 300: '5分', 3600: '1時間', 86400: '1日', 604800: '1週間', 2419200: '4週間' })[s] || 'オン';
   const onOff = b => b ? 'オン' : 'オフ';
   function setDiff(a, b) {
@@ -189,6 +195,8 @@
     if (!!a.hi !== !!b.hi) o.push('新メンバーへの履歴共有を' + onOff(b.hi) + 'にしました');
     if ((a.ttl | 0) !== (b.ttl | 0)) o.push('消えるメッセージを「' + ttlText(b.ttl | 0) + '」にしました');
     if (!!a.pw !== !!b.pw) o.push('参加パスワードを' + onOff(b.pw) + 'にしました');
+    if (gMax({ set: a }) !== gMax({ set: b })) o.push('人数の上限を' + gMax({ set: b }) + '人にしました');
+    if (gPow({ set: a }) !== gPow({ set: b })) o.push(gPow({ set: b }) ? '投稿のPoWを' + gPow({ set: b }) + 'ビットにしました' : '投稿のPoWをなしにしました');
     return o;
   }
   const PWITER = 100000;
@@ -199,7 +207,8 @@
     const want = hexBytes(x[2]); const got = await pbk(p, hexBytes(x[1]), want.length);
     let d = got.length ^ want.length; for (let i = 0; i < want.length; i++) d |= got[i] ^ want[i]; return d === 0;
   }
-  const pwFails = {};
+  const pwFails = {}, pwG = { n: 0, at: 0 };
+  function pwGlobalOK() { const t = Date.now(); if (t - pwG.at > 60000) { pwG.n = 0; pwG.at = t; } return ++pwG.n <= 20; }
   function pwLimited(a, failed) { const t = Date.now(); let f = pwFails[a]; if (!f || t - f.at > 600000) f = pwFails[a] = { n: 0, at: t }; if (failed) f.n++; return f.n >= 5; }
   function historyOf(gid) {
     const t = now(), out = [];
@@ -208,21 +217,26 @@
   }
   function sendHistory(to, gid, hist) {
     const t = now();
-    const ws = hist.map(m => {
+    const ws = [];
+    for (const m of hist) {
       let text = m.img ? (m.text ? '📷 ' + m.text : '📷 写真') : m.text;
       if (u8len(text) > 700) { while (u8len(text) > 700) text = text.slice(0, -1); text += '…（省略）'; }
-      const w = { t: 'ghs', g: gid, id: m.id, by: m.from, nick: m.nick, text, ts: m.ts }; if (m.exp) w.ttl = m.exp - t; return w;
-    });
+      const w = { t: 'ghs', g: gid, id: m.id, by: m.from, nick: m.nick, text, ts: m.ts };
+      if (m.exp) { const r = m.exp - t - 20; if (r <= 0) continue; w.ttl = r; } // it takes a few seconds to send
+      while (goLen(w) > DGRAM && w.text.length > 12) w.text = w.text.slice(0, -12 - 6) + '…（省略）';
+      if (goLen(w) <= DGRAM) ws.push(w);
+    }
     let d = 3000; for (let r = 0; r < 2; r++) { for (const w of ws) { setTimeout(() => send(to, w), d); d += 60; } d += 4000; }
   }
   function admit(g, src, nick, how) {
     g.members = cleanMembers(g.members.concat([src]), addr); g.pend = (g.pend || []).filter(p => p.addr !== src); if (!g.pend.length) delete g.pend;
-    save(); emit('contact', gView(g)); gSys(g, (nick || nameOf(src)) + ' が' + how); gInfo(g);
+    g.v = (g.v | 0) + 1;
+    save(); emit('contact', gView(g)); gSys(g, (nick || nameOf(src)) + ' が' + how); gMembers(g, [src], []);
     if (g.set && g.set.hi) { const h = historyOf(g.id); if (h.length) sendHistory(src, g.id, h); }
   }
   function onHistory(src, w) {
     const g = st.groups[w.g], by = norm(String(w.by || ''));
-    if (!g || g.left || !g.owner || g.owner !== src || !(g.set && g.set.hi) || !by || !isYgg(by) || by === addr || !w.text || String(w.text).length > 2000 || !/^[0-9A-Za-z_-]{1,40}$/.test(String(w.id)) || (w.ttl | 0) < 0) return;
+    if (!g || g.left || !canMng(g, src) || !(g.set && g.set.hi) || !by || !isYgg(by) || by === addr || !w.text || String(w.text).length > 2000 || !/^[0-9A-Za-z_-]{1,40}$/.test(String(w.id)) || (w.ttl | 0) < 0) return;
     const key = 'g:' + g.id; if (st.messages.some(m => m.peer === key && m.from === by && m.id === w.id)) return;
     const m = { id: w.id, peer: key, from: by, nick: cleanNick(w.nick), text: String(w.text), ts: w.ts || now(), out: false, hist: true };
     if (w.ttl | 0) m.exp = now() + (w.ttl | 0);
@@ -232,26 +246,230 @@
   function cleanMembers(list, must) {
     const out = [];
     for (const x of [must].concat(list || [])) { const a = norm(String(x || '')); if (a && isYgg(a) && !out.includes(a)) out.push(a); }
-    return out.slice(0, MAXG).sort();
+    return out.slice(0, GCAP).sort();
   }
   const gHash = async g => hexOf(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(g.name + '\n' + g.members.slice().sort().join(',')))).slice(0, 8);
   const hasM = (g, a) => g.members.includes(a);
   const nameOf = a => a === addr ? 'あなた' : ((st.contacts[a] && st.contacts[a].nick) || a.slice(0, 9) + '…');
   function gSys(g, text) { addMessage({ id: 's' + Date.now().toString(16) + Math.random().toString(16).slice(2, 5), peer: 'g:' + g.id, from: addr, ts: now(), sys: text, out: true }); }
-  const giWire = g => { const w = { t: 'gi', g: g.id, gn: g.name, gm: g.members, go: g.owner || undefined }; if (g.owner) w.gs = cleanSet(g.set); return w; };
-  function gInfo(g, extra) { const w = giWire(g); for (let i = 0; i < 3; i++) setTimeout(() => { for (const m of g.members.concat(extra || [])) if (m !== addr) send(m, w); }, i * 2000); }
+  const giWire = g => { const w = { t: 'gi', g: g.id, gn: g.name, gm: g.members, go: g.owner || undefined, gv: g.v || undefined, gsv: g.sv || undefined, gad: (g.admins && g.admins.length) ? g.admins : undefined }; if (g.owner) w.gs = cleanSet(g.set); return w; };
+  // ---- v0.19: large groups, co-admins, member-list versions (see groupadmin.go) ----
+  const GCAP = 1024, GDEF = 24, MAXADM = 10, GIMAX = 1180, PARTN = 40, NOSTRG = 64, DGRAM = 1200;
+  const GMAXES = [24, 32, 50, 64, 100, 128, 256, 512, 1024];
+  const GPOWS = [-1, 0, 6, 8, 10, 12, 16];
+  const gMax = g => { const x = (g.set && g.set.mx) | 0; return x >= GDEF && x <= GCAP ? x : GDEF; };
+  const isAdm = (g, a) => (g.admins || []).includes(a);
+  const canMng = (g, a) => !!g.owner && (a === g.owner || isAdm(g, a));
+  const cleanAdmins = (list, g) => [...new Set((list || []).map(x => norm(String(x || ''))).filter(a => a && isYgg(a) && a !== g.owner && g.members.includes(a)))].sort().slice(0, MAXADM);
+  const jlen = w => u8len(JSON.stringify(w));
+  function addrBytes(a) {
+    const full = norm(a).split(':'), i = full.indexOf(''), p = i < 0 ? full : full.slice(0, i).concat(Array(8 - full.length + 1).fill('0'), full.slice(i + 1));
+    const b = new Uint8Array(16); p.forEach((x, k) => { const v = parseInt(x || '0', 16); b[k * 2] = v >> 8; b[k * 2 + 1] = v & 255; }); return b;
+  }
+  const bytesAddr = b => { const p = []; for (let k = 0; k < 8; k++) p.push(((b[k * 2] << 8) | b[k * 2 + 1]).toString(16)); return norm(p.join(':')); };
+  const packAddrs = as => { const b = new Uint8Array(16 * as.length); as.forEach((a, i) => b.set(addrBytes(a), i * 16)); return b64(b).replace(/=+$/, ''); };
+  function unpackAddrs(s) {
+    let b; try { b = unb64(String(s || '')); } catch { return null; }
+    if (b.length % 16 || b.length > 16 * PARTN) return null;
+    const out = []; for (let i = 0; i < b.length; i += 16) { const a = bytesAddr(b.subarray(i, i + 16)); if (a && isYgg(a)) out.push(a); } return out;
+  }
+  const chunkAddrs = as => { const o = []; for (let i = 0; i < as.length; i += PARTN) o.push(as.slice(i, i + PARTN)); return o.length ? o : [[]]; };
+  const gHashS = (name, ms) => hexOf(sha256s(new TextEncoder().encode(name + '\n' + ms.slice().sort().join(',')))).slice(0, 8);
+  function infoPackets(g) {
+    const w = giWire(g);
+    if (jlen(w) <= GIMAX) return [w];
+    delete w.gm; w.gc = g.members.length; w.gh = gHashS(g.name, g.members);
+    const parts = chunkAddrs(g.members);
+    return [w].concat(parts.map((p, i) => ({ t: 'gp', g: g.id, gv: g.v || undefined, gh: w.gh, i: i || undefined, n: parts.length, gmb: packAddrs(p) })));
+  }
+  function sendPackets(to, ps) {
+    to = to.filter(m => m !== addr); if (!to.length || !ps.length) return;
+    for (let r = 0; r < 3; r++) setTimeout(async () => { let n = 0; for (const m of to) for (const p of ps) { send(m, p); if (++n % 64 === 0) await sleep(20); } }, r * 2000);
+  }
+  function gInfo(g, extra) {
+    const ps = infoPackets(g);
+    if (ps.length === 1) { sendPackets(g.members.concat(extra || []), ps); return; }
+    sendPackets(g.members, ps.slice(0, 1)); sendPackets(extra || [], ps);
+  }
+  function gMembers(g, added, removed) {
+    const ps = infoPackets(g);
+    if (ps.length === 1) { sendPackets(g.members.concat(removed), ps); return; }
+    const old = g.members.filter(m => !added.includes(m)), gh = gHashS(g.name, g.members), ds = [];
+    for (const c of chunkAddrs(added)) if (c.length) ds.push({ t: 'gd', g: g.id, gv: g.v, ga: packAddrs(c), gh });
+    for (const c of chunkAddrs(removed)) if (c.length) ds.push({ t: 'gd', g: g.id, gv: g.v, gr: packAddrs(c), gh });
+    sendPackets(old.concat(removed), ds); sendPackets(added, ps);
+  }
+  const qAt = {}, rAt = {}, pbufs = {};
+  function askInfo(peer, gid) { const k = gid + '|' + peer; if (Date.now() - (qAt[k] || 0) < 15000) return; qAt[k] = Date.now(); send(peer, { t: 'gq', g: gid }); }
+  function answerInfo(peer, g) { const k = g.id + '|' + peer; if (Date.now() - (rAt[k] || 0) < 10000) return; rAt[k] = Date.now(); for (const p of infoPackets(g)) send(peer, p); }
+  function pbuf(src, gid, v, gh) {
+    const k = gid + '|' + src; let b = pbufs[k];
+    if (!b || b.v !== (v | 0) || b.gh !== gh || Date.now() - b.at > 60000) {
+      b = pbufs[k] = { v: v | 0, gh, n: 0, parts: {}, hdr: null, at: Date.now() };
+      for (const [kk, x] of Object.entries(pbufs)) if (Date.now() - x.at > 120000) delete pbufs[kk];
+    }
+    return b;
+  }
+  function partsDone(src, b) {
+    if (!b.hdr || !b.n || Object.keys(b.parts).length < b.n) return null;
+    let ms = []; for (let i = 0; i < b.n; i++) ms = ms.concat(b.parts[i]);
+    const w = Object.assign({}, b.hdr);
+    if (ms.length !== (w.gc | 0) || gHashS(cleanNick(w.gn) || 'グループ', ms) !== w.gh) return null;
+    w.gm = ms; delete w.gc;
+    for (const [k, x] of Object.entries(pbufs)) if (x === b) delete pbufs[k];
+    return w;
+  }
+  function onInfoHeader(src, w) {
+    const gc = w.gc | 0; if (gc <= 0 || gc > GCAP || !w.gh) return;
+    const g = st.groups[w.g];
+    if (g && gHashS(cleanNick(w.gn) || 'グループ', g.members) === w.gh) { onGroupCtl(src, Object.assign({}, w, { gm: g.members.slice(), gc: undefined })); return; }
+    const b = pbuf(src, w.g, w.gv, w.gh); b.hdr = w;
+    const full = partsDone(src, b); if (full) { onGroupCtl(src, full); return; }
+    setTimeout(() => { if (pbufs[w.g + '|' + src] === b) askInfo(src, w.g); }, 5000);
+  }
+  function onInfoPart(src, w) {
+    const n = w.n | 0, i = w.i | 0;
+    if (!okGID(w.g) || n <= 0 || n > Math.ceil(GCAP / PARTN) || i < 0 || i >= n) return;
+    const as = unpackAddrs(w.gmb); if (!as) return;
+    const b = pbuf(src, w.g, w.gv, w.gh); if (!b.n) b.n = n; if (b.n !== n) return;
+    b.parts[i] = as;
+    const full = partsDone(src, b); if (full) onGroupCtl(src, full);
+  }
+  function memberSys(g, by, added, removed) {
+    const who = by === addr ? 'あなた' : nameOf(by);
+    const line = (list, verb) => { const o = list.filter(m => m !== addr && m !== by); if (o.length > 5) { gSys(g, who + ' が ' + o.length + '人を' + verb + 'ました'); return; } for (const m of o) gSys(g, who + ' が ' + nameOf(m) + ' を' + verb + 'ました'); };
+    line(added, '追加し'); line(removed, '外し');
+  }
+  function adminSys(g, by, old, now_) {
+    const who = nameOf(by);
+    for (const x of now_) if (!(old || []).includes(x)) gSys(g, who + ' が ' + nameOf(x) + ' を副管理者にしました');
+    for (const x of old || []) if (!now_.includes(x) && g.members.includes(x)) gSys(g, who + ' が ' + nameOf(x) + ' を副管理者から外しました');
+  }
+  function onDelta(src, w) {
+    const g = st.groups[w.g];
+    if (!g || g.left || !canMng(g, src) || !g.members.includes(addr) || (w.gv | 0) < (g.v | 0)) return;
+    const add = unpackAddrs(w.ga) || [], rm = unpackAddrs(w.gr) || [], byHost = src === g.owner;
+    const added = [], removed = [];
+    let ms = g.members.slice();
+    for (const x of add) if (!ms.includes(x) && ms.length < GCAP) { ms.push(x); added.push(x); }
+    ms = ms.filter(m => { const d = rm.includes(m) && (byHost || (m !== g.owner && !isAdm(g, m))); if (d) removed.push(m); return !d; });
+    g.members = ms.sort(); g.admins = cleanAdmins(g.admins, g); g.v = w.gv | 0;
+    if (g.pend) { g.pend = g.pend.filter(p => !added.includes(p.addr)); if (!g.pend.length) delete g.pend; }
+    const out = removed.includes(addr); if (out) g.left = true;
+    save(); emit('contact', gView(g));
+    if (out) { gSys(g, 'グループから外されました'); return; }
+    memberSys(g, src, added, removed);
+    if (g.owner === addr && !byHost && (added.length || removed.length)) { const ps = infoPackets(g); if (ps.length === 1) sendPackets(g.members.concat(removed), ps); }
+    const v = w.gv | 0, gh = w.gh;
+    setTimeout(() => { const x = st.groups[w.g]; if (x && !x.left && (x.v | 0) === v && gHashS(x.name, x.members) !== gh) askInfo(src, w.g); }, 6000);
+  }
+  function sendKey(g, to) { sendPackets(to, [g.pwh ? { t: 'gk', g: g.id, pw: g.pwh } : { t: 'gk', g: g.id, k: 'none' }]); }
+  function onKey(src, w) {
+    const g = st.groups[w.g];
+    if (!g || g.left || !g.owner || src !== g.owner || !isAdm(g, addr) || String(w.pw || '').length > 200) return;
+    if (!w.pw || w.k === 'none') delete g.pwh; else g.pwh = String(w.pw);
+    save();
+  }
+  // Limit how many member copies are being delivered at once.
+  let gBusy = 0; const gWait = [];
+  async function deliverCopy(c) {
+    if (gBusy >= 48) await new Promise(r => gWait.push(r));
+    gBusy++;
+    try { return await deliver(c); } finally { gBusy--; const n = gWait.shift(); if (n) n(); }
+  }
+  function dropCopy(peer, id) {
+    const i = st.messages.findIndex(m => m.hid && m.peer === peer && m.id === id); if (i < 0) return;
+    const m = st.messages[i]; st.messages.splice(i, 1); saveSoon(); groupStatus(m.grp, m.of);
+  }
+
+  // ---- v0.19: light proof of work on posts (see pow.go) ----
+  const POWDEF = 3, POWREQ = 8, POWMAX = 20;
+  const gPow = g => { const p = (g && g.set && g.set.pb) | 0; return p < 0 ? 0 : p === 0 ? POWDEF : p; };
+  const K256 = new Uint32Array([0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2]);
+  const W256 = new Uint32Array(64);
+  function sha256s(msg) { // synchronous SHA-256 (WebCrypto is async-only; PoW needs many small hashes)
+    const l = msg.length, nb = ((l + 9 + 63) >> 6) << 6, p = new Uint8Array(nb); p.set(msg); p[l] = 0x80;
+    const bits = l * 8; p[nb - 4] = bits >>> 24; p[nb - 3] = bits >>> 16; p[nb - 2] = bits >>> 8; p[nb - 1] = bits; p[nb - 5] = Math.floor(l / 0x20000000);
+    let h0 = 0x6a09e667, h1 = 0xbb67ae85, h2 = 0x3c6ef372, h3 = 0xa54ff53a, h4 = 0x510e527f, h5 = 0x9b05688c, h6 = 0x1f83d9ab, h7 = 0x5be0cd19;
+    const W = W256;
+    for (let o = 0; o < nb; o += 64) {
+      for (let i = 0; i < 16; i++) W[i] = (p[o + i * 4] << 24) | (p[o + i * 4 + 1] << 16) | (p[o + i * 4 + 2] << 8) | p[o + i * 4 + 3];
+      for (let i = 16; i < 64; i++) { const a = W[i - 15], b = W[i - 2]; W[i] = (((a >>> 7) | (a << 25)) ^ ((a >>> 18) | (a << 14)) ^ (a >>> 3)) + W[i - 16] + (((b >>> 17) | (b << 15)) ^ ((b >>> 19) | (b << 13)) ^ (b >>> 10)) + W[i - 7]; }
+      let a = h0, b = h1, c = h2, d = h3, e = h4, f = h5, g = h6, h = h7;
+      for (let i = 0; i < 64; i++) {
+        const t1 = (h + (((e >>> 6) | (e << 26)) ^ ((e >>> 11) | (e << 21)) ^ ((e >>> 25) | (e << 7))) + ((e & f) ^ (~e & g)) + K256[i] + W[i]) | 0;
+        const t2 = ((((a >>> 2) | (a << 30)) ^ ((a >>> 13) | (a << 19)) ^ ((a >>> 22) | (a << 10))) + ((a & b) ^ (a & c) ^ (b & c))) | 0;
+        h = g; g = f; f = e; e = (d + t1) | 0; d = c; c = b; b = a; a = (t1 + t2) | 0;
+      }
+      h0 = (h0 + a) | 0; h1 = (h1 + b) | 0; h2 = (h2 + c) | 0; h3 = (h3 + d) | 0; h4 = (h4 + e) | 0; h5 = (h5 + f) | 0; h6 = (h6 + g) | 0; h7 = (h7 + h) | 0;
+    }
+    const out = new Uint8Array(32); [h0, h1, h2, h3, h4, h5, h6, h7].forEach((x, i) => { out[i * 4] = x >>> 24; out[i * 4 + 1] = x >>> 16; out[i * 4 + 2] = x >>> 8; out[i * 4 + 3] = x; });
+    return out;
+  }
+  const zbits = h => { let n = 0; for (const b of h) { if (!b) { n += 8; continue; } return n + Math.clz32(b) - 24; } return n; };
+  const powPrefix = (scope, id, ts, text, sh) => new TextEncoder().encode('ygg-pow1\n' + scope + '\n' + id + '\n' + Math.trunc(Number(ts) || 0) + '\n' + hexOf(sha256s(new TextEncoder().encode(String(text || '') + '\0' + (sh || '')))) + '\n');
+  function powBits(scope, id, ts, text, sh, nonce) {
+    nonce = String(nonce || ''); if (!nonce || nonce.length > 20) return -1;
+    const p = powPrefix(scope, id, ts, text, sh), n = new TextEncoder().encode(nonce), b = new Uint8Array(p.length + n.length); b.set(p); b.set(n, p.length);
+    return zbits(sha256s(b));
+  }
+  function powSolve(scope, id, ts, text, sh, need) {
+    if (need <= 0) return '';
+    const p = powPrefix(scope, id, ts, text, sh), b = new Uint8Array(p.length + 20); b.set(p);
+    for (let n = 0; ; n++) {
+      const s = n.toString(36); for (let i = 0; i < s.length; i++) b[p.length + i] = s.charCodeAt(i);
+      if (zbits(sha256s(b.subarray(0, p.length + s.length))) >= need) return s;
+    }
+  }
+  const postID = id => { const i = String(id).lastIndexOf('g'); return i > 0 ? String(id).slice(0, i) : String(id); };
+  const powScope = (from, w, to) => w.g ? from + '>g:' + w.g : from + '>' + to;
+  const powNeed = {};
+  function onPowNeed(src, w) { const n = w.n | 0; if (n <= 0 || n > POWMAX || !/^[0-9A-Za-z_-]{1,40}$/.test(String(w.id))) return; const k = src + '/' + w.id; if (Object.keys(powNeed).length > 4096) for (const x in powNeed) delete powNeed[x]; if (n > (powNeed[k] | 0)) powNeed[k] = n; }
+  function sendBits(m) {
+    let need = POWDEF;
+    if (m.grp) need = gPow(st.groups[m.grp]);
+    else { const c = st.contacts[m.peer]; if (!c || !c.hasprof) need = POWREQ; }
+    return Math.max(need, powNeed[m.peer + '/' + m.id] | 0);
+  }
+  function withPow(m, w, sh) {
+    const need = sendBits(m); if (need <= 0) return;
+    const scope = powScope(addr, w, m.peer), id = m.grp ? postID(m.id) : m.id, text = m.textFile ? '' : m.text;
+    if (m.pn && powBits(scope, id, m.ts, text, sh, m.pn) >= need) { w.pn = m.pn; return; }
+    w.pn = powSolve(scope, id, m.ts, text, sh, need);
+    const x = st.messages.find(y => y.peer === m.peer && y.id === m.id); if (x) { x.pn = w.pn; saveSoon(); }
+  }
+  function recvBits(src, w) {
+    if (w.g) { const g = st.groups[w.g]; if (!g) return [POWREQ, false]; return [gPow(g), !((g.set && g.set.pb) | 0)]; }
+    const c = st.contacts[src]; if (c && !c.req) return [POWDEF, true];
+    return [POWREQ, !st.powStrict];
+  }
+  function powCheck(src, w) {
+    if (w._checked) return true;
+    const [need, legacyOK] = recvBits(src, w); if (need <= 0) return true;
+    if (!w.pn && legacyOK) return true; // pre-v0.19 sender
+    if (powBits(powScope(src, w, addr), w.g ? postID(w.id) : w.id, w.ts, w.text, w.sha, w.pn) >= need) return true;
+    send(src, { t: 'pow', id: w.id, n: need }); return false;
+  }
+  const joinPow = (from, gid, tok) => powSolve(from + '>j:' + gid, tok, 0, '', '', POWREQ);
+  const joinPowOK = (from, gid, tok, nonce) => powBits(from + '>j:' + gid, tok, 0, '', '', nonce) >= POWREQ;
+
   function groupStatus(gid, id) {
     const cs = st.messages.filter(m => m.hid && m.grp === gid && m.of === id);
     const n = cs.length, sent = cs.filter(m => m.status === 'sent').length, sending = cs.filter(m => m.status === 'sending').length, stored = cs.filter(m => m.status === 'stored').length;
     const s = (!n || sent === n) ? 'sent' : sending ? 'sending' : (sent + stored === n) ? 'stored' : 'queued';
     const v = st.messages.find(m => m.peer === 'g:' + gid && m.id === id);
-    if (v && v.status !== s) { v.status = s; save(); emit('status', { id, peer: v.peer, status: s }); }
+    if (v && v.status !== s) { v.status = s; saveSoon(); emit('status', { id, peer: v.peer, status: s }); }
   }
-  async function msgPkt(m) {
+  function msgPktBare(m) {
     const w = { t: 'msg', id: m.id, nick: m.nick, text: m.text, ts: m.ts, ttl: m.ttl || undefined };
-    if (m.grp) { w.g = m.grp; const g = st.groups[m.grp]; if (g) w.gh = await gHash(g); }
+    if (m.grp) { w.g = m.grp; const g = st.groups[m.grp]; if (g) w.gh = gHashS(g.name, g.members); }
     return w;
   }
+  async function msgPkt(m) { const w = msgPktBare(m); withPow(m, w, ''); return w; }
+  // Go's encoder escapes <>& as \u003c etc.: count like it so both sides agree on sizes.
+  const goLen = w => jlen(w) + 5 * (JSON.stringify(w).match(/[<>&\u2028\u2029]/g) || []).length;
+  const longText = m => !m.img && !m.gimg && goLen(msgPktBare(m)) > DGRAM - 40;
+  const MAXSEND = 12288, MAXRECV = 16384, TEXTMIME = 'text/plain';
   function sendGroup(gid, text, img) {
     const g = st.groups[gid];
     if (!g || g.left) return null;
@@ -262,27 +480,35 @@
     const v = Object.assign({ id, peer: 'g:' + gid, from: addr, nick: st.nick, text, ts, out: true, status: 'sending' }, tx);
     if (img) v.img = img;
     // The photo stays on the visible message only (gimg on the copies).
-    const cs = g.members.filter(a => a !== addr).map((a, i) => Object.assign({ id: id + 'g' + i, peer: a, from: addr, nick: st.nick, text, ts, out: true, status: 'sending', grp: gid, of: id, hid: true, gimg: img ? true : undefined }, tx));
+    const cs = g.members.map((a, i) => [a, i]).filter(([a]) => a !== addr).map(([a, i]) => Object.assign({ id: id + 'g' + i, peer: a, from: addr, nick: st.nick, text, ts, out: true, status: 'sending', grp: gid, of: id, hid: true, gimg: img ? true : undefined }, tx));
     if (!cs.length) v.status = 'sent';
+    const need = gPow(g);
+    if (need && cs.length) {
+      // One nonce for the post, shared by every member copy.
+      let sh = ''; if (img) { const pi = parseImg(img); if (pi) sh = hexOf(sha256s(pi.bytes)); }
+      const pn = powSolve(addr + '>g:' + gid, id, ts, text, sh, need);
+      for (const c of cs) c.pn = pn;
+    }
     st.messages.push(...cs);
     addMessage(v);
-    for (const c of cs) deliver(c);
+    for (const c of cs) deliverCopy(c);
     return v;
   }
   async function onGroupMsg(src, w, img) {
-    if (!okGID(w.g) || (!w.text && !img) || String(w.text).length > 8000 || !/^[0-9A-Za-z_-]{1,40}$/.test(String(w.id))) return false;
+    if (!okGID(w.g) || (!w.text && !img) || u8len(w.text) > MAXRECV || !/^[0-9A-Za-z_-]{1,40}$/.test(String(w.id))) return false;
     if (locked || st.blocked[src]) return false;
     let g = st.groups[w.g], ask = false;
     const known = !!g;
     if (!g) {
       const c = st.contacts[src];
-      g = st.groups[w.g] = { id: w.g, name: 'グループ', members: cleanMembers([src], addr), req: !(c && c.shared && !c.req) };
+      g = st.groups[w.g] = { id: w.g, name: 'グループ', members: cleanMembers([src], addr), req: !(c && c.shared && !c.req), stub: true };
       ask = true; save(); emit('contact', gView(g));
-    } else if (g.left || !hasM(g, src)) { send(src, { t: 'gq', g: w.g }); return false; }
-    else if (w.gh && w.gh !== await gHash(g)) ask = true;
-    if (ask) send(src, { t: 'gq', g: w.g });
+    } else if (g.left || !hasM(g, src)) { askInfo(src, w.g); return false; }
+    else if (w.gh && w.gh !== gHashS(g.name, g.members)) ask = true;
+    if (ask) askInfo(src, w.g);
     const key = 'g:' + w.g;
     if (st.messages.some(m => m.peer === key && m.from === src && m.id === w.id)) return true;
+    if (!powCheck(src, w)) return false;
     const nf = !!(g.set && g.set.nf);
     if (img && nf) { if (!w.text) return true; img = ''; } // photos off: ack and drop
     let ttl = w.ttl | 0; const gt = (g.set && g.set.ttl) | 0;
@@ -315,12 +541,15 @@
   }
   async function onJoin(src, w) {
     const g = st.groups[w.g];
-    if (!g || g.left || g.owner !== addr || !g.tok || w.tok !== g.tok || st.blocked[src]) { send(src, { t: 'gjn', g: w.g, text: 'この招待リンクは使えません（リセットされたか、グループがなくなりました）' }); return; }
-    if (hasM(g, src)) { send(src, giWire(g)); return; }
-    if (g.members.length >= MAXG) { send(src, { t: 'gjn', g: w.g, text: 'グループが満員です（最大' + MAXG + '人）' }); return; }
+    if (!g || g.left || !canMng(g, addr) || !g.tok || w.tok !== g.tok || st.blocked[src]) { send(src, { t: 'gjn', g: w.g, text: 'この招待リンクは使えません（リセットされたか、グループがなくなりました）' }); return; }
+    if (hasM(g, src)) { answerInfo(src, g); return; }
+    if (g.members.length >= gMax(g)) { send(src, { t: 'gjn', g: w.g, text: 'グループが満員です（最大' + gMax(g) + '人）' }); return; }
     const nick = cleanNick(w.nick);
+    if ((w.pn || st.powStrict) && !joinPowOK(src, w.g, String(w.tok || ''), w.pn)) { send(src, { t: 'gjn', g: w.g, text: '参加にはYggChat v0.19.0以上が必要です（PoW）' }); return; }
+    if (g.set && g.set.pw && !g.pwh) { send(src, { t: 'gjn', g: w.g, text: 'いまは参加を受け付けられません。少ししてからもう一度開いてね' }); send(g.owner, { t: 'gkq', g: g.id }); return; }
     if (g.pwh) {
       if (pwLimited(src, false)) { send(src, { t: 'gjn', g: w.g, text: 'パスワードを何度も間違えたので、しばらく参加できません' }); return; }
+      if (w.pw && !pwGlobalOK()) { send(src, { t: 'gjn', g: w.g, text: 'いま参加が混み合っています。少ししてからもう一度開いてね' }); return; }
       if (!await checkPass(g.pwh, String(w.pw || ''))) { if (w.pw) pwLimited(src, true); send(src, { t: 'gjn', g: w.g, k: 'pw', text: w.pw ? 'パスワードが違います' : 'このグループに入るにはパスワードが必要です' }); return; }
     }
     if (g.set && g.set.ap) {
@@ -338,32 +567,68 @@
     if (w.t === 'gj') { onJoin(src, w); return; }
     if (w.t === 'gjn') { if (joins[w.g] === src) { if (w.k !== 'wait') delete joins[w.g]; emit('notice', { text: cleanText(w.text, 200), k: w.k || '', g: w.g }); } return; }
     if (w.t === 'ghs') { onHistory(src, w); return; }
-    if (w.t === 'gq') { if (g && !g.left && hasM(g, src) && hasM(g, addr)) send(src, giWire(g)); return; }
+    if (w.t === 'gd') { onDelta(src, w); return; }
+    if (w.t === 'gk') { onKey(src, w); return; }
+    if (w.t === 'gkq') { if (g && !g.left && g.owner === addr && isAdm(g, src)) sendKey(g, [src]); return; }
+    if (w.t === 'gp') { onInfoPart(src, w); return; }
+    if (w.t === 'gq') { if (g && !g.left && hasM(g, src) && hasM(g, addr)) answerInfo(src, g); return; }
     if (w.t === 'gl') {
       if (!g || !hasM(g, src)) return;
-      g.members = g.members.filter(a => a !== src); save(); emit('contact', gView(g)); gSys(g, nameOf(src) + ' が退出しました'); return;
+      g.members = g.members.filter(a => a !== src); g.admins = cleanAdmins(g.admins, g); save(); emit('contact', gView(g)); gSys(g, nameOf(src) + ' が退出しました'); return;
     }
     if (w.t === 'gi') {
+      if ((!Array.isArray(w.gm) || !w.gm.length) && (w.gc | 0) > 0) { onInfoHeader(src, w); return; } // split list (v0.19)
       if (!Array.isArray(w.gm) || !w.gm.length) return;
-      if (g && (g.left || !hasM(g, src))) return;
-      let ms = cleanMembers(w.gm, src), inG = ms.includes(addr);
-      if (g && g.owner && src !== g.owner) { ms = g.members.slice(); inG = true; } // only the host changes members
-      if (!g) {
-        if (!inG) return; const c = st.contacts[src]; g = st.groups[w.g] = { id: w.g, name: '', members: [], req: !(c && c.shared && !c.req) };
-        const o = norm(String(w.go || '')); if (o && isYgg(o) && ms.includes(o)) g.owner = o;
-        if (joins[w.g] === src && g.owner === src) g.req = false; // we asked through the host's link
+      const stubReq = g ? !!g.req : false;
+      if (g && g.stub && !g.left) g = null; // a placeholder made from a message: take this as the first info
+      const gv = w.gv | 0;
+      // The host's settings/name/admins carry their own version (gsv): a late repeat of older info must not undo a change.
+      const staleSet = !!(g && g.owner && (w.gsv | 0) < (g.sv | 0));
+      let ms = cleanMembers(w.gm, src), inG = ms.includes(addr), rejoined = false;
+      if (g && !g.left && !hasM(g, src)) return;
+      if (g && g.left) {
+        // Only the host (or an admin) adding us back with a newer list brings us back.
+        if (!inG || !canMng(g, src) || (gv && gv <= (g.v | 0))) return;
+        g.left = false; g.req = true; rejoined = true;
       }
-      if (joins[w.g] === src && g.owner === src) delete joins[w.g];
-      const old = { name: g.name, members: g.members.slice() }, known = !!old.name;
-      g.name = cleanNick(w.gn) || 'グループ'; g.members = ms; if (!inG) g.left = true;
-      let diffs = [];
-      if (w.gs && typeof w.gs === 'object' && g.owner && src === g.owner) { const ns = cleanSet(w.gs); if (known) diffs = setDiff(g.set, ns); g.set = ns; }
+      const byHost = !!(g && g.owner && src === g.owner);
+      if (g && g.owner) {
+        if (byHost && (!gv || gv >= (g.v | 0))) { /* the host's list */ }
+        else if (!byHost && isAdm(g, src) && gv > (g.v | 0)) { for (const x of [g.owner].concat(g.admins || [])) if (g.members.includes(x) && !ms.includes(x)) ms.push(x); ms.sort(); inG = ms.includes(addr); }
+        else { ms = g.members.slice(); inG = true; } // only the host (or an admin) changes members
+      }
+      let known = !!g;
+      if (!g) {
+        if (!inG) return; const c = st.contacts[src];
+        const prev = st.groups[w.g];
+        g = st.groups[w.g] = { id: w.g, name: '', members: [], req: prev && prev.stub ? stubReq : !(c && c.shared && !c.req) };
+        const o = norm(String(w.go || '')); if (o && isYgg(o) && ms.includes(o)) { g.owner = o; g.admins = cleanAdmins(w.gad, { owner: o, members: ms }); }
+        if (joins[w.g] === src && canMng(g, src)) g.req = false; // we asked through this host's/admin's link
+      }
+      if (joins[w.g] === src && g.owner && canMng(g, src) && inG) delete joins[w.g];
+      const old = { name: g.name, members: g.members.slice(), admins: (g.admins || []).slice(), set: g.set }, wasAdm = isAdm(g, addr);
+      known = known && !!old.name;
+      if (!staleSet) g.name = cleanNick(w.gn) || 'グループ';
+      g.members = ms; if (!inG) g.left = true;
+      if (gv > (g.v | 0) && (byHost || old.admins.includes(src) || !known)) g.v = gv;
+      let diffs = [], handed = '';
+      if (g.owner && src === g.owner && !staleSet) {
+        if ((w.gsv | 0) > (g.sv | 0)) g.sv = w.gsv | 0;
+        const o = norm(String(w.go || '')); if (o && isYgg(o) && o !== g.owner && g.members.includes(o)) { g.owner = o; handed = o; } // the host handed the group over
+        if (w.gs && typeof w.gs === 'object') { const ns = cleanSet(w.gs); if (known) diffs = setDiff(g.set, ns); g.set = ns; }
+        g.admins = cleanAdmins(w.gad, g);
+      } else g.admins = cleanAdmins(g.admins, g);
+      if ((wasAdm || !isAdm(g, addr)) && !isAdm(g, addr) && g.owner !== addr) { delete g.tok; delete g.pend; delete g.pwh; }
+      if (g.pend) { g.pend = g.pend.filter(p => !g.members.includes(p.addr)); if (!g.pend.length) delete g.pend; }
+      if (!g.admins.length) delete g.admins;
       save(); emit('contact', gView(g));
-      if (inG) for (const t of diffs) gSys(g, nameOf(src) + ' が' + t);
-      if (!inG) gSys(g, 'グループから外されました');
+      if (isAdm(g, addr) && g.set && g.set.pw && !g.pwh) send(g.owner, { t: 'gkq', g: g.id });
+      if (rejoined) gSys(g, nameOf(src) + ' があなたをグループに戻しました');
+      else if (!inG) gSys(g, 'グループから外されました');
       else if (known && old.name !== g.name && old.name !== 'グループ') gSys(g, nameOf(src) + ' がグループ名を「' + g.name + '」にしました');
-      if (known && inG) for (const m of ms) if (!old.members.includes(m) && m !== addr) gSys(g, nameOf(src) + ' が ' + nameOf(m) + ' を追加しました');
-      if (known && inG) for (const m of old.members) if (!ms.includes(m) && m !== src) gSys(g, nameOf(src) + ' が ' + nameOf(m) + ' を外しました');
+      if (inG) for (const t of diffs) gSys(g, nameOf(src) + ' が' + t);
+      if (handed) gSys(g, nameOf(src) + ' が ' + nameOf(handed) + ' をホストにしました');
+      if (known && inG) { memberSys(g, src, ms.filter(m => !old.members.includes(m) && m !== addr), old.members.filter(m => !ms.includes(m) && m !== src)); adminSys(g, src, old.admins, g.admins || []); }
     }
   }
 
@@ -391,8 +656,9 @@
     }
     if (w.t === 'mh' || w.t === 'mc') { if (!(st.blocked && st.blocked[src])) onMoveIn(src, w); return; }
     if (w.t === 'mha' || w.t === 'mca' || w.t === 'mok' || w.t === 'mng') { onMoveAck(src, w); return; }
-    if (w.t === 'fca') { const g = chunkAcks.get(w.id); if (g) g.add(w.i | 0); return; }
-    if (w.t === 'ack') { const f = acks.get(w.id); if (f) { acks.delete(w.id); f(); } askPK(src); return; }
+    if (w.t === 'fca') { const g = chunkAcks.get(w.id); if (g && ackFrom.get(w.id) === src) g.add(w.i | 0); return; }
+    if (w.t === 'ack') { const f = acks.get(w.id); if (f && ackFrom.get(w.id) === src) { acks.delete(w.id); ackFrom.delete(w.id); f(); } askPK(src); return; }
+    if (w.t === 'pow') { onPowNeed(src, w); return; }
     if (locked || st.blocked[src]) return; // stay silent: the sender keeps it queued
     if (w.pk) learnPK(src, String(w.pk));
     if (w.t === 'hi' || w.t === 'hiack') { if (w.t === 'hi') send(src, { t: 'hiack', pk: myPK() }); maybeProf(src); flush(src); return; }
@@ -411,7 +677,7 @@
     if (w.t === 'fh') { onFileHeader(src, w); return; }
     if (w.t === 'fc') { onFileChunk(src, w); return; }
     if ((w.t === 'edit' || w.t === 'del') && onCtl(src, w)) { send(src, { t: 'ack', id: w.id }); return; }
-    if (w.t === 'gq' || w.t === 'gi' || w.t === 'gl' || w.t === 'gj' || w.t === 'gjn' || w.t === 'ghs') { onGroupCtl(src, w); return; }
+    if (['gq', 'gi', 'gl', 'gj', 'gjn', 'ghs', 'gd', 'gp', 'gk', 'gkq'].includes(w.t)) { onGroupCtl(src, w); return; }
     if (w.t === 'msg') handleMsg(src, w).then(okm => { if (okm) { send(src, { t: 'ack', id: w.id }); askPK(src); if (queuedFor(src).length) flush(src); } });
   }
 
@@ -438,7 +704,7 @@
   const mvIn = { on: false, id: '', from: '', hdr: null, chunks: null, got: 0, at: 0, done: false, busy: false };
   const mvOut = { id: '', acks: null, res: null };
   function moveBundle(history) {
-    const s = { nick: st.nick, bio: st.bio || undefined, avatar: st.avatar || undefined, domain: st.domain || undefined, contacts: st.contacts, blocked: st.blocked, groups: st.groups, nostr_on: !!st.nostrOn, nostr_relays: st.nostrRelays && st.nostrRelays.length ? st.nostrRelays : undefined, nostr_legacy: !!st.nostrLegacy };
+    const s = { nick: st.nick, bio: st.bio || undefined, avatar: st.avatar || undefined, domain: st.domain || undefined, contacts: st.contacts, blocked: st.blocked, groups: st.groups, nostr_on: !!st.nostrOn, nostr_relays: st.nostrRelays && st.nostrRelays.length ? st.nostrRelays : undefined, nostr_legacy: !!st.nostrLegacy, pow_strict: !!st.powStrict || undefined };
     if (history) { s.messages = st.messages; s.ctl = st.ctl; }
     return JSON.stringify({ v: 1, key: outer.key, store: s });
   }
@@ -447,7 +713,7 @@
     if (!b || b.v !== 1) throw new Error('対応していない移行データです（アプリを更新してください）');
     if (!/^[0-9a-f]{128}$/.test(String(b.key))) throw new Error('鍵が壊れています');
     const s = b.store || {};
-    st = Object.assign(blank(), { nick: s.nick || 'anon', bio: s.bio || '', avatar: s.avatar || '', domain: s.domain || undefined, contacts: s.contacts || {}, messages: s.messages || [], blocked: s.blocked || {}, groups: s.groups || {}, ctl: s.ctl || [], nostrOn: !!s.nostr_on, nostrLegacy: !!s.nostr_legacy, nostrRelays: s.nostr_relays || [] });
+    st = Object.assign(blank(), { nick: s.nick || 'anon', bio: s.bio || '', avatar: s.avatar || '', domain: s.domain || undefined, contacts: s.contacts || {}, messages: s.messages || [], blocked: s.blocked || {}, groups: s.groups || {}, ctl: s.ctl || [], nostrOn: !!s.nostr_on, nostrLegacy: !!s.nostr_legacy, nostrRelays: s.nostr_relays || [], powStrict: !!s.pow_strict });
     migrate(); outer.key = b.key; save(); saveOuter(); await saving;
     setTimeout(() => location.reload(), 700);
   }
@@ -515,16 +781,21 @@
     }
   }
   async function deliverImg(m, tries) {
-    const p = parseImg(m.img); if (!p) { setStatus(m.peer, m.id, 'failed'); return false; }
+    let p;
+    if (m.img) { p = parseImg(m.img); if (!p) { setStatus(m.peer, m.id, 'failed'); return false; } }
+    else p = { mime: TEXTMIME, bytes: new TextEncoder().encode(m.text || '') }; // a long text goes chunked (v0.19)
+    const isText = p.mime === TEXTMIME, mm = isText ? Object.assign({}, m, { textFile: true }) : m;
     const n = Math.ceil(p.bytes.length / CHUNK);
-    const hdr = { t: 'fh', id: m.id, nick: m.nick, text: m.text || undefined, ts: m.ts, ttl: m.ttl || undefined, mime: p.mime, size: p.bytes.length, n, sha: await sha(p.bytes) };
-    if (m.grp) { const gw = await msgPkt(m); hdr.ttl = gw.ttl; hdr.g = gw.g; hdr.gh = gw.gh; }
+    const hdr = { t: 'fh', id: m.id, nick: m.nick, text: isText ? undefined : (m.text || undefined), ts: m.ts, ttl: m.ttl || undefined, mime: p.mime, size: p.bytes.length, n, sha: await sha(p.bytes) };
+    if (m.grp) { const gw = msgPktBare(m); hdr.g = gw.g; hdr.gh = gw.gh; }
+    withPow(mm, hdr, hdr.sha); let asked = powNeed[m.peer + '/' + m.id] | 0;
     const got = new Set(); chunkAcks.set(m.id, got);
-    const acked = new Promise(r => acks.set(m.id, r));
+    const acked = waitAck(m.peer, m.id);
     let done = false; acked.then(() => done = true);
     try {
       let idle = 0, last = -1;
       while (idle < tries) {
+        if ((powNeed[m.peer + '/' + m.id] | 0) > asked) { asked = powNeed[m.peer + '/' + m.id] | 0; mm.pn = ''; withPow(mm, hdr, hdr.sha); }
         send(m.peer, hdr);
         if (got.size === last) idle++; else { idle = 0; last = got.size; }
         await new Promise(r => setTimeout(r, 30));
@@ -532,16 +803,19 @@
         const ok = await Promise.race([acked.then(() => true), new Promise(r => setTimeout(() => r(false), 2500))]);
         if (ok) { setStatus(m.peer, m.id, 'sent'); return true; }
       }
-      acks.delete(m.id);
+      acks.delete(m.id); ackFrom.delete(m.id);
       setStatus(m.peer, m.id, 'queued'); // images don't go through the mailbox
+      if (isText) nostrPark(m); // a long text can (one Nostr event holds it)
       probeSoon(m.peer);
       return false;
     } finally { chunkAcks.delete(m.id); }
   }
   function onFileHeader(src, w) {
     const n = w.n | 0, size = w.size | 0;
-    if (!/^[0-9A-Za-z_-]{1,40}$/.test(String(w.id)) || !MIMES.has(w.mime) || n < 1 || n > MAXN || size < 1 || size > IMGMAX || Math.ceil(size / CHUNK) !== n || !/^[0-9a-f]{64}$/.test(String(w.sha)) || u8len(w.text) > CAPMAX || u8len(w.nick) > 120) return;
-    if (st.messages.some(m => (m.peer === src || (w.g && m.peer === 'g:' + w.g && m.from === src)) && m.id === w.id) || (w.g && !w.text && st.groups[w.g] && st.groups[w.g].set && st.groups[w.g].set.nf)) { send(src, { t: 'ack', id: w.id }); return; }
+    const isText = w.mime === TEXTMIME;
+    if (!/^[0-9A-Za-z_-]{1,40}$/.test(String(w.id)) || !(MIMES.has(w.mime) || isText) || n < 1 || n > MAXN || size < 1 || size > (isText ? MAXRECV : IMGMAX) || Math.ceil(size / CHUNK) !== n || !/^[0-9a-f]{64}$/.test(String(w.sha)) || u8len(w.text) > CAPMAX || (isText && w.text) || u8len(w.nick) > 120) return;
+    if (st.messages.some(m => (m.peer === src || (w.g && m.peer === 'g:' + w.g && m.from === src)) && m.id === w.id) || (w.g && !w.text && !isText && st.groups[w.g] && st.groups[w.g].set && st.groups[w.g].set.nf)) { send(src, { t: 'ack', id: w.id }); return; }
+    if (locked || st.blocked[src] || !powCheck(src, w)) return;
     const t = Date.now();
     for (const [k, f] of inFiles) if (t - f.at > 180000) inFiles.delete(k);
     const key = src + '/' + w.id;
@@ -562,10 +836,12 @@
     const all = new Uint8Array(f.hdr.size); let off = 0;
     for (const c of f.chunks) { if (off + c.length > all.length) return; all.set(c, off); off += c.length; }
     if (off !== f.hdr.size || await sha(all) !== f.hdr.sha) return;
-    let s = ''; for (let j = 0; j < all.length; j += 0x8000) s += String.fromCharCode(...all.subarray(j, j + 0x8000));
-    const img = 'data:' + f.hdr.mime + ';base64,' + btoa(s);
-    if (f.hdr.g) { if (await onGroupMsg(src, f.hdr, img)) send(src, { t: 'ack', id: w.id }); return; }
-    if (acceptMsg(src, f.hdr, img)) send(src, { t: 'ack', id: w.id });
+    const h = Object.assign({}, f.hdr, { _checked: true }); // the header's proof of work was checked
+    let img = '';
+    if (h.mime === TEXTMIME) { try { h.text = new TextDecoder('utf-8', { fatal: true }).decode(all); } catch { return; } }
+    else { let s = ''; for (let j = 0; j < all.length; j += 0x8000) s += String.fromCharCode(...all.subarray(j, j + 0x8000)); img = 'data:' + h.mime + ';base64,' + btoa(s); }
+    if (h.g) { if (await onGroupMsg(src, h, img)) send(src, { t: 'ack', id: w.id }); return; }
+    if (acceptMsg(src, h, img)) send(src, { t: 'ack', id: w.id });
   }
 
   // After a miss, greet the peer at 3, 5 and 10 s so the message goes out as
@@ -582,21 +858,26 @@
       }
     } finally { probing.delete(peer); }
   }
-  async function deliver(m, tries = 12) {
+  async function deliver(m, tries = 8) {
     if (inflight.has(m.id)) return false;
     inflight.add(m.id);
     if (m.status !== 'sending') setStatus(m.peer, m.id, 'sending');
-    if (m.gimg && !m.img) { const v = st.messages.find(x => x.peer === 'g:' + m.grp && x.id === m.of); if (v && v.img) m = Object.assign({}, m, { img: v.img }); }
-    if (m.img) { try { return await deliverImg(m, tries); } finally { inflight.delete(m.id); } }
-    const pkt = JSON.stringify(await msgPkt(m));
-    const acked = new Promise(r => acks.set(m.id, r));
+    if (m.gimg && !m.img) {
+      const v = st.messages.find(x => x.peer === 'g:' + m.grp && x.id === m.of);
+      if (v && v.img) m = Object.assign({}, m, { img: v.img });
+      else { inflight.delete(m.id); dropCopy(m.peer, m.id); return true; } // the photo was deleted here before this copy went out
+    }
+    if (m.img || longText(m)) { try { return await deliverImg(m, tries); } finally { inflight.delete(m.id); } }
+    let pkt = JSON.stringify(await msgPkt(m)), asked = powNeed[m.peer + '/' + m.id] | 0;
+    const acked = waitAck(m.peer, m.id);
     try {
       for (let i = 0; i < tries; i++) {
+        if ((powNeed[m.peer + '/' + m.id] | 0) > asked) { asked = powNeed[m.peer + '/' + m.id] | 0; pkt = JSON.stringify(await msgPkt(Object.assign({}, m, { pn: '' }))); } // the receiver wants more work
         yggSend(m.peer, pkt);
         const got = await Promise.race([acked.then(() => true), new Promise(r => setTimeout(() => r(false), 2500))]);
         if (got) { setStatus(m.peer, m.id, 'sent'); return true; }
       }
-      acks.delete(m.id);
+      acks.delete(m.id); ackFrom.delete(m.id);
       setStatus(m.peer, m.id, m.nostr ? 'stored' : 'queued');
       if (!m.nostr) nostrPark(m);
       probeSoon(m.peer);
@@ -666,6 +947,7 @@
   }
   async function nostrPark(m) {
     const rs = nRelays(); if (!rs || m.img || m.nostr) return;
+    if (m.grp && st.groups[m.grp] && st.groups[m.grp].members.length > NOSTRG) return; // don't flood relays for a big group
     const c = st.contacts[m.peer]; if (!c || !c.pk) return;
     const ev = yggNostrWrap(c.pk, JSON.stringify(await msgPkt(m)));
     let ok = !!ev && await nostrPublish(rs, ev);
@@ -753,7 +1035,7 @@
     switch (ep) {
       case 'state':
         if (locked) return ok({ locked: true, addr, peers: yggPeers(), platform: 'web' });
-        return ok({ addr, pubkey: myPK(), nick: st.nick, bio: st.bio, avatar: st.avatar, domain: st.domain || '', contacts: Object.assign({}, st.contacts, Object.fromEntries(Object.values(st.groups || {}).map(g => ['g:' + g.id, gView(g)]))), messages: st.messages.filter(m => !m.hid), peers: yggPeers(), platform: 'web', locked: false, haspass: !!aesKey, blocked: Object.keys(st.blocked), nostr: nostrState() });
+        return ok({ addr, pubkey: myPK(), nick: st.nick, bio: st.bio, avatar: st.avatar, domain: st.domain || '', contacts: Object.assign({}, st.contacts, Object.fromEntries(Object.values(st.groups || {}).map(g => ['g:' + g.id, gView(g)]))), messages: st.messages.filter(m => !m.hid), peers: yggPeers(), platform: 'web', locked: false, haspass: !!aesKey, blocked: Object.keys(st.blocked), nostr: nostrState(), powstrict: !!st.powStrict });
       case 'unlock': {
         if (!locked) return ok({});
         try {
@@ -791,10 +1073,13 @@
           const gid = String(body.To).slice(2);
           if (body.Retry) {
             const v = st.messages.find(x => x.peer === body.To && x.id === body.Retry && x.out); if (!v) return bad('no such message', 404);
-            for (const c of st.messages.filter(m => m.hid && m.grp === gid && m.of === v.id && m.status !== 'sent')) { setStatus(c.peer, c.id, 'sending'); deliver(c); }
+            const cs = st.messages.filter(m => m.hid && m.grp === gid && m.of === v.id && m.status !== 'sent');
+            if (!cs.length) { groupStatus(gid, v.id); return ok(v); }
+            for (const c of cs) { setStatus(c.peer, c.id, 'sending'); deliverCopy(c); }
             return ok(v);
           }
-          const t = String(body.Text || ''); if ((!t && !body.Img) || t.length > 4000) return bad('message empty or too long');
+          const t = String(body.Text || ''); if ((!t && !body.Img) || u8len(t) > MAXSEND) return bad('message empty or too long');
+          if (body.Img && goLen(t) - 2 > CAPMAX) return bad('写真の説明が長すぎます（日本語でおよそ260文字まで）');
           if (body.Img && !parseImg(body.Img)) return bad('unsupported or too large image (max 600KB)');
           const gg = st.groups[gid]; if (body.Img && gg && gg.set && gg.set.nf) return bad('このグループでは写真を送れません（ホストの設定）');
           const v = sendGroup(gid, t, body.Img || ''); return v ? ok(v) : bad('このグループには送れません');
@@ -806,9 +1091,9 @@
         }
         const dst = norm(body.To || '');
         if (!isYgg(dst)) return bad('not a Yggdrasil address: ' + body.To);
-        if ((!body.Text && !body.Img) || String(body.Text || '').length > 8000) return bad('message empty or too long');
+        if ((!body.Text && !body.Img) || u8len(body.Text) > MAXSEND) return bad('message empty or too long');
         if (body.Img && !parseImg(body.Img)) return bad('unsupported or too large image (max 600KB)');
-        if (body.Img && u8len(body.Text) > CAPMAX) return bad('写真に添える文章が長すぎます（約260文字まで）');
+        if (body.Img && goLen(String(body.Text || '')) - 2 > CAPMAX) return bad('写真の説明が長すぎます（日本語でおよそ260文字まで）');
         const c = st.contacts[dst];
         const share = !c || !c.shared;
         if (c && (c.req || !c.shared)) { c.req = false; c.shared = true; emit('contact', c); }
@@ -826,37 +1111,47 @@
       }
       case 'group/update': {
         const g = st.groups[body.ID]; if (!g || g.left) return bad('no such group');
-        const old = { name: g.name, members: g.members.slice() };
-        if (body.Name != null && cleanNick(body.Name)) g.name = cleanNick(body.Name);
-        const rmReq = Array.isArray(body.Remove) && body.Remove.length;
-        const oldSet = Object.assign({}, g.set || {}), hadPw = !!g.pwh;
-        if ((body.Set || body.Pass != null) && (!g.owner || g.owner !== addr)) return bad('設定を変えられるのはホストだけです', 403);
-        if (body.Pass != null) {
-          const p = String(body.Pass);
-          if (p && ([...p].length < 4 || [...p].length > 64)) return bad('パスワードは4〜64文字にしてください');
-          if (p) g.pwh = await hashPass(p); else delete g.pwh;
-        }
-        if (body.Set) g.set = cleanSet(body.Set);
-        if (body.Set || body.Pass != null) { g.set = cleanSet(Object.assign({}, g.set || {}, { pw: !!g.pwh })); }
-        if (((body.Add || []).length || rmReq) && g.owner && g.owner !== addr) return bad('メンバーを追加・削除できるのはホストだけです', 403);
+        const host = !!g.owner && g.owner === addr;
+        const rmReq = Array.isArray(body.Remove) && body.Remove.length, addReq = Array.isArray(body.Add) && body.Add.length;
+        // Permission checks first, so a refused request changes nothing.
+        if ((addReq || rmReq) && g.owner && !canMng(g, addr)) return bad('メンバーを追加・削除できるのはホストと副管理者だけです', 403);
+        if ((body.Set || body.Pass != null || body.Admins) && !host) return bad('設定を変えられるのはホストだけです', 403);
         if (rmReq && !g.owner) return bad('このグループにはホストがいないので外せません（v0.16.0より前に作ったグループ）');
-        g.members = cleanMembers(g.members.concat(body.Add || []), addr);
-        let removed = [];
-        if (rmReq) {
-          const rm = body.Remove.map(x => norm(String(x || ''))).filter(x => x && x !== addr);
-          removed = g.members.filter(m => rm.includes(m)); g.members = g.members.filter(m => !rm.includes(m));
-        }
+        if (body.Pass != null) { const p = String(body.Pass); if (p && ([...p].length < 4 || [...p].length > 64)) return bad('パスワードは4〜64文字にしてください'); }
+        const ns = body.Set ? cleanSet(body.Set) : null;
+        if (ns && gMax({ set: ns }) < g.members.length) return bad('今のメンバー（' + g.members.length + '人）より少ない上限にはできません');
+        const added = [...new Set((body.Add || []).map(x => norm(String(x || ''))).filter(a => a && isYgg(a) && !g.members.includes(a)))];
+        if (g.members.length + added.length > gMax(ns ? { set: ns } : g)) return bad('このグループの上限は' + gMax(ns ? { set: ns } : g) + '人です（グループ設定で変えられます）');
+        const rm = rmReq ? body.Remove.map(x => norm(String(x || ''))).filter(x => x && x !== addr) : [];
+        if (!host && rm.some(x => x === g.owner || isAdm(g, x))) return bad('ホストと副管理者は外せません', 403);
+        if (body.Admins && body.Admins.length > MAXADM) return bad('副管理者は' + MAXADM + '人までです');
+        const old = { name: g.name, members: g.members.slice(), admins: (g.admins || []).slice() };
+        const oldSet = Object.assign({}, g.set || {}), hadPw = !!g.pwh;
+        if (body.Name != null && cleanNick(body.Name)) g.name = cleanNick(body.Name);
+        let pwChanged = false;
+        if (body.Pass != null) { const p = String(body.Pass); if (p) g.pwh = await hashPass(p); else delete g.pwh; pwChanged = true; }
+        if (ns) g.set = ns;
+        if (ns || pwChanged) g.set = cleanSet(Object.assign({}, g.set || {}, { pw: !!g.pwh }));
+        g.members = cleanMembers(g.members.concat(added), addr);
+        const removed = g.members.filter(m => rm.includes(m)); g.members = g.members.filter(m => !rm.includes(m));
+        if (body.Admins) g.admins = cleanAdmins(body.Admins, g);
+        g.admins = cleanAdmins(g.admins, g); if (!g.admins.length) delete g.admins;
+        if (added.length || removed.length) g.v = (g.v | 0) + 1;
+        if (host && (ns || pwChanged || body.Admins || g.name !== old.name)) g.sv = (g.sv | 0) + 1; // a late repeat of the old info can't undo this
+        if (g.pend) { g.pend = g.pend.filter(p => !added.includes(p.addr)); if (!g.pend.length) delete g.pend; }
         g.req = false;
         save(); emit('contact', gView(g));
         if (g.name !== old.name) gSys(g, 'グループ名を「' + g.name + '」にしました');
         for (const t of setDiff(oldSet, g.set || {})) gSys(g, 'あなたが' + t);
         if (body.Pass && hadPw) gSys(g, 'あなたが参加パスワードを変更しました');
-        for (const m of g.members) if (!old.members.includes(m)) gSys(g, nameOf(m) + ' を追加しました');
-        for (const m of removed) gSys(g, nameOf(m) + ' を外しました');
-        gInfo(g, removed); return ok(gView(g));
+        memberSys(g, addr, added, removed); adminSys(g, addr, old.admins, g.admins || []);
+        if (added.length || removed.length) gMembers(g, added, removed);
+        if (g.name !== old.name || ns || pwChanged || body.Admins) gInfo(g);
+        if (host) { const na = (g.admins || []).filter(x => !old.admins.includes(x) || pwChanged); if (na.length) sendKey(g, na); }
+        return ok(gView(g));
       }
       case 'group/invite': {
-        const g = st.groups[body.ID]; if (!g || g.left || g.owner !== addr) return bad('招待リンクを作れるのはホストだけです', 403);
+        const g = st.groups[body.ID]; if (!g || g.left || !canMng(g, addr)) return bad('招待リンクを作れるのはホストと副管理者だけです', 403);
         if (!g.tok || body.Reset) { g.tok = hexOf(crypto.getRandomValues(new Uint8Array(8))); save(); }
         const code = encodeJoin(addr, g.id, g.tok);
         return ok({ code, link: 'https://yggchat.surge.sh/#j=' + code });
@@ -868,21 +1163,27 @@
         if (g0 && !g0.left && !g0.req && hasM(g0, addr)) return ok({ already: true, addr: 'g:' + j.gid });
         if (g0 && g0.left) { delete st.groups[j.gid]; save(); }
         joins[j.gid] = j.host;
-        const jw = { t: 'gj', g: j.gid, tok: j.tok, nick: st.nick, pw: body.Pw ? String(body.Pw) : undefined };
-        let wait = 0; for (let i = 0; i < 4; i++) { setTimeout(() => { if (joins[j.gid]) send(j.host, jw); }, wait * 1000); wait += 2 + i * 2; }
+        const jw = { t: 'gj', g: j.gid, tok: j.tok, nick: st.nick, pw: body.Pw ? String(body.Pw) : undefined, pn: joinPow(addr, j.gid, j.tok) };
+        hello(j.host); // the first packets to a new peer often go nowhere while its route is looked up
+        let wait = 0; for (const d of [1, 2, 2, 3, 4, 5, 6]) { wait += d; setTimeout(() => { if (joins[j.gid]) send(j.host, jw); }, wait * 1000); }
         return ok({ addr: 'g:' + j.gid });
       }
       case 'group/approve': {
-        const g = st.groups[body.ID]; if (!g || g.left || g.owner !== addr) return bad('承認できるのはホストだけです', 403);
+        const g = st.groups[body.ID]; if (!g || g.left || !canMng(g, addr)) return bad('承認できるのはホストと副管理者だけです', 403);
         const a = norm(String(body.Addr || '')), p = (g.pend || []).find(x => x.addr === a); if (!p) return bad('その申請はありません');
         if (!body.OK) { g.pend = g.pend.filter(x => x.addr !== a); if (!g.pend.length) delete g.pend; save(); emit('contact', gView(g)); send(a, { t: 'gjn', g: g.id, text: '参加は承認されませんでした' }); return ok(gView(g)); }
-        if (g.members.length >= MAXG) return bad('グループが満員です');
+        if (g.members.length >= gMax(g)) return bad('グループが満員です');
         admit(g, a, p.nick, '参加しました（承認）'); return ok(gView(g));
       }
       case 'group/leave': {
         const g = st.groups[body.ID]; if (!g) return bad('no such group');
-        const was = g.left; g.left = true; g.req = false; save(); emit('contact', gView(g));
-        if (!was) { for (let i = 0; i < 3; i++) setTimeout(() => { for (const m of g.members) if (m !== addr) send(m, { t: 'gl', g: g.id }); }, i * 2000); gSys(g, 'グループを退出しました'); }
+        const was = g.left;
+        // A leaving host hands the group to the first co-admin, so it can still be run.
+        let heir = '';
+        if (!was && g.owner === addr && (g.admins || []).length) { heir = g.admins[0]; g.owner = heir; g.admins = cleanAdmins(g.admins, g); if (!g.admins.length) delete g.admins; g.v = (g.v | 0) + 1; g.sv = (g.sv | 0) + 1; }
+        g.left = true; g.req = false; save(); emit('contact', gView(g));
+        if (heir) { gInfo(g); gSys(g, nameOf(heir) + ' をホストにしました'); }
+        if (!was) { const d = heir ? 5000 : 0; for (let i = 0; i < 3; i++) setTimeout(() => { for (const m of g.members) if (m !== addr) send(m, { t: 'gl', g: g.id }); }, d + i * 2000); gSys(g, 'グループを退出しました'); }
         return ok(gView(g));
       }
       case 'contact': {
@@ -955,7 +1256,8 @@
       }
       case 'identity/reset': {
         if (!body.Confirm) return bad('confirm required');
-        outer.key = ''; st.contacts = {}; st.messages = []; save(); saveOuter(); await saving;
+        // Everything tied to the old address goes (chats, groups, pending edits, the verified domain).
+        outer.key = ''; st.contacts = {}; st.messages = []; st.groups = {}; st.ctl = []; st.blocked = {}; delete st.domain; save(); saveOuter(); await saving;
         setTimeout(() => location.reload(), 300);
         return ok({});
       }
@@ -986,11 +1288,16 @@
         if (st.nostrOn && !was) { nostrFetch(); for (const m of st.messages.filter(x => x.out && x.status === 'queued' && !x.nostr)) nostrPark(m); }
         return ok(nostrState());
       }
+      case 'pow': {
+        if (body.Strict != null) { st.powStrict = !!body.Strict; save(); }
+        return ok({ strict: !!st.powStrict });
+      }
       case 'message/edit': {
         const m = st.messages.find(x => x.peer === body.Peer && x.id === body.ID && x.out && !x.sys);
         const t = String(body.Text || '');
         if (!m || m.img) return bad('編集できるのは自分の文章メッセージだけです', 400);
-        if (!t.trim() || t.length > 8000) return bad('bad request', 400);
+        if (!t.trim() || u8len(t) > 8000) return bad('bad request', 400);
+        if (goLen({ t: 'edit', id: ctlID(), ref: m.id, text: t }) > DGRAM) return bad('長すぎて編集できません（日本語でおよそ350文字まで）。送り直してね', 400);
         m.text = t; const remote = isSent(m); if (remote) m.edited = true; save();
         if (remote) queueCtl(m.peer, { t: 'edit', id: ctlID(), ref: m.id, text: t });
         emit('msg_upd', m);

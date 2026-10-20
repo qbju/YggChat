@@ -139,7 +139,11 @@ func (a *App) nostrPut(m Message) bool {
 	a.store.mu.Lock()
 	c := a.store.Contacts[m.Peer]
 	legacy := a.store.NostrLegacy
+	big := m.Grp != "" && len(a.store.Groups[m.Grp].Members) > nostrGroupMax
 	a.store.mu.Unlock()
+	if big {
+		return false // don't flood the relays with one copy per member of a big group
+	}
 	pk, err := hex.DecodeString(c.PK)
 	if err != nil || len(pk) != 32 {
 		return false

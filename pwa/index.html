@@ -1114,15 +1114,23 @@ img.emoji { height:1.2em; width:1.2em; margin:0 .05em 0 .1em; vertical-align:-0.
     <div class="section" id="gi-set-sec" style="width:100%; max-width:420px;">
       <div class="section-title">グループ設定</div>
       <div class="toggle"><div class="toggle-label">写真を送れる</div><div class="switch gi-sw" data-k="files" id="gi-sw-files"><div class="switch-handle"></div></div></div>
-      <div class="toggle"><div class="toggle-label">参加にホストの承認が必要</div><div class="switch gi-sw" data-k="ap" id="gi-sw-ap"><div class="switch-handle"></div></div></div>
+      <div class="toggle"><div class="toggle-label">参加に承認が必要（ホスト・副管理者）</div><div class="switch gi-sw" data-k="ap" id="gi-sw-ap"><div class="switch-handle"></div></div></div>
       <div class="toggle"><div class="toggle-label">新しい人に過去のメッセージを見せる</div><div class="switch gi-sw" data-k="hi" id="gi-sw-hi"><div class="switch-handle"></div></div></div>
       <div class="row"><div class="row-main"><div class="row-title">消えるメッセージ</div></div>
         <select id="gi-ttl" style="max-width:140px;">
           <option value="0">オフ</option><option value="300">5分</option><option value="3600">1時間</option><option value="86400">1日</option><option value="604800">1週間</option><option value="2419200">4週間</option>
         </select></div>
+      <div class="row"><div class="row-main"><div class="row-title">人数の上限</div></div>
+        <select id="gi-max" style="max-width:140px;">
+          <option value="24">24人</option><option value="32">32人</option><option value="50">50人</option><option value="64">64人</option><option value="100">100人</option><option value="128">128人</option><option value="256">256人</option><option value="512">512人</option><option value="1024">1024人</option>
+        </select></div>
+      <div class="row"><div class="row-main"><div class="row-title">投稿の計算コスト（PoW）</div></div>
+        <select id="gi-pow" style="max-width:140px;">
+          <option value="-1">なし</option><option value="0">3ビット（標準）</option><option value="6">6ビット</option><option value="8">8ビット</option><option value="10">10ビット</option><option value="12">12ビット</option><option value="16">16ビット</option>
+        </select></div>
       <div class="row"><div class="row-main"><div class="row-title">参加パスワード</div><div class="row-sub" id="gi-pw-state">なし</div></div><button id="gi-pw" class="row-action">設定</button></div>
       <div class="row-sub" id="gi-set-note"></div>
-      <div class="row-sub info">変えられるのはホストだけ。設定はメンバーの端末それぞれが守る仕組みなので、古いバージョンのメンバーには効きません。承認・パスワードは招待リンクから入る人に使います。過去のメッセージはホストの端末にある最新30件（写真は「📷」の文字だけ）をホストが送ります。消えるメッセージは送ってからこの時間で全員の端末から消えます。</div>
+      <div class="row-sub info">変えられるのはホストだけ。設定はメンバーの端末それぞれが守る仕組みなので、古いバージョンのメンバーには効きません。承認・パスワードは招待リンクから入る人に使います（ホストか副管理者がオンラインなら参加できます）。過去のメッセージは参加を受け付けた人の端末にある最新30件（写真は「📷」の文字だけ）が届きます。消えるメッセージは送ってからこの時間で全員の端末から消えます。上限を25人以上にすると、全員v0.19.0以上が必要です。PoWは投稿ごとに端末が少し計算する仕組みで、ビット数を上げるほど大量投稿（スパム）がしにくくなり、そのぶん送信が遅くなります。</div>
     </div>
     <div style="display:flex; gap:8px; flex-wrap:wrap; justify-content:center;">
       <button id="gi-link">🔗 招待リンク</button>
@@ -1147,7 +1155,7 @@ img.emoji { height:1.2em; width:1.2em; margin:0 .05em 0 .1em; vertical-align:-0.
       <button id="gl-share">共有</button>
       <button id="gl-reset" style="color:var(--error);">リセット</button>
     </div>
-    <div class="row-sub" style="max-width:420px; text-align:center;">リンクを開いた人は、あなた（ホスト）がオンラインのときに参加できます。</div>
+    <div class="row-sub" style="max-width:420px; text-align:center;">リンクを開いた人は、あなたがオンラインのときに参加できます。リンクはホスト・副管理者それぞれ別で、リセットしても他の人のリンクはそのままです。</div>
   </div>
 </div>
 
@@ -1161,7 +1169,7 @@ img.emoji { height:1.2em; width:1.2em; margin:0 .05em 0 .1em; vertical-align:-0.
     <div class="section-title">連絡先から選ぶ</div>
     <div id="gp-list"></div>
     <input id="gp-addr" type="text" placeholder="アドレスで追加（任意・カンマ区切り）" autocomplete="off" spellcheck="false">
-    <div class="row-sub">メンバーは最大20人。メンバー全員に、グループ名とメンバーのアドレスが共有されます。</div>
+    <div class="row-sub">人数の上限は最初24人（ホストがグループ設定で1024人まで広げられます）。メンバー全員に、グループ名とメンバーのアドレスが共有されます。</div>
     <button id="gp-ok" style="background:var(--accent); color:#111; border:none;">作成</button>
   </div>
 </div>
@@ -1286,6 +1294,11 @@ img.emoji { height:1.2em; width:1.2em; margin:0 .05em 0 .1em; vertical-align:-0.
         <div class="toggle-label">通知に内容を表示しない</div>
         <div class="switch" id="hide-notif-switch"><div class="switch-handle"></div></div>
       </div>
+      <div class="toggle">
+        <div class="toggle-label">リクエストと参加にPoWを必須にする</div>
+        <div class="switch" id="pow-strict-switch"><div class="switch-handle"></div></div>
+      </div>
+      <div class="row-sub info">オンにすると、知らない人からのメッセージリクエストと、あなたの招待リンクからの参加に、送る側の端末での計算（8ビットのPoW）を必ず求めます。大量のスパムを送りにくくなりますが、v0.18.0以前のYggChatからは届かなくなります。オフでもv0.19.0以上同士は計算を付けて送ります。</div>
       <div class="toggle" id="secure-row" style="display:none;">
         <div class="toggle-label">画面のセキュリティ（スクショ防止）</div>
         <div class="switch" id="secure-switch"><div class="switch-handle"></div></div>
@@ -1329,10 +1342,10 @@ img.emoji { height:1.2em; width:1.2em; margin:0 .05em 0 .1em; vertical-align:-0.
         <div class="switch" id="nostr-switch"><div class="switch-handle"></div></div>
       </div>
       <div class="toggle">
-        <div class="toggle-label">旧式の置き配も通す（v0.12以前の相手用・v0.20まで）</div>
+        <div class="toggle-label">旧式の置き配も通す（v0.12以前の相手用・v0.24まで）</div>
         <div class="switch" id="nostr-legacy-switch"><div class="switch-handle"></div></div>
       </div>
-      <div class="row-sub info">旧式をオンにすると、v0.12以前のYggChatとも置き配をやり取りできます。そのぶん、旧式の箱には相手ごとに変わらない宛先タグが付くので、リレーから「同じ人あての箱」だと分かります。v0.20で旧式は廃止します。</div>
+      <div class="row-sub info">旧式をオンにすると、v0.12以前のYggChatとも置き配をやり取りできます。そのぶん、旧式の箱には相手ごとに変わらない宛先タグが付くので、リレーから「同じ人あての箱」だと分かります。v0.24で旧式は廃止します。</div>
       <div class="row"><div class="row-main"><div class="row-title">リレー</div><div class="row-sub" id="nostr-relays" style="font-family:ui-monospace,monospace;font-size:11px;word-break:break-all;"></div></div></div>
       <div class="row-btns">
         <button id="nostr-edit">リレーを編集</button>
@@ -1358,7 +1371,7 @@ img.emoji { height:1.2em; width:1.2em; margin:0 .05em 0 .1em; vertical-align:-0.
       <a class="dl-btn" href="https://yggchat.surge.sh/dl/yggchat-windows-amd64.exe" download>🪟 Windows (exe)</a>
       <a class="dl-btn" href="https://yggchat.surge.sh/dl/yggchat-linux-amd64" download>🐧 Linux (amd64)</a>
       <a class="dl-btn" href="https://yggchat.surge.sh/dl/yggchat-android-arm64" download>⌨️ Termux (arm64)</a>
-      <div class="row-sub" id="dl-ver">最新: v0.18.0 ・ SHA256SUMS で検証できます</div>
+      <div class="row-sub" id="dl-ver">最新: v0.19.0 ・ SHA256SUMS で検証できます</div>
     </div>
     <div class="section">
       <div class="section-title">About</div>
@@ -1435,7 +1448,22 @@ function $(id){ return document.getElementById(id); }
 let state = { addr:'', nick:'', platform:'web', peers:0, contacts:{}, messages:[] };
 let curAddr = null;
 let eventSource = null;
-let esRetry = 1000;
+let esRetry = 1000, esLost = false;
+// After the event stream dropped (backgrounded app, node restart) events may
+// have been missed: reload the state once it is back.
+async function resyncState(){
+  try{
+    const s = await api('/api/state');
+    if(s.locked){ if(!state.locked){ state.locked = true; showLock(); } return; }
+    const keepMsgs = {};
+    for(const m of state.messages || []) if(m && m.id) keepMsgs[m.peer + '/' + m.id] = m;
+    state = Object.assign(state, s);
+    state.messages = (s.messages || []).map(m => Object.assign(keepMsgs[m.peer + '/' + m.id] || {}, m));
+    state.contacts = s.contacts || {};
+    updateConn(); renderList();
+    if(curAddr){ updateChatHeader(); renderMessages(); }
+  }catch(e){}
+}
 let readMap = {};
 let notifEnabled = false;
 let peerRefreshTimer = null;
@@ -2514,7 +2542,7 @@ function renderPublicPeers(){
       + '<div class="dot ' + dot + '"></div>'
       + '<div class="peer-info">'
       + '<div class="peer-uri" title="' + escapeHtml(p.uri||'') + '">' + escapeHtml(p.label || p.uri || '') + '</div>'
-      + '<div class="peer-meta">' + escapeHtml(p.region||'') + (proto? ' · ' + proto[1].toLowerCase():'') + (p.reliability!=null? ' · ' + p.reliability + '%':'') + '</div>'
+      + '<div class="peer-meta">' + escapeHtml(p.region||'') + (proto? ' · ' + proto[1].toLowerCase():'') + (p.reliability!=null? ' · ' + Math.round(p.reliability <= 1 ? p.reliability * 100 : p.reliability) + '%':'') + '</div>'
       + '</div>'
       + '<div class="peer-actions">'
       + '<button data-act="addpub" data-uri="' + escapeHtml(p.uri||'') + '">追加</button>'
@@ -2695,7 +2723,7 @@ function setupNotifications(){
 }
 
 function notifyIncoming(m){
-  if(!notifEnabled || andNotif) return;
+  if(!notifEnabled || andNotif || m.hist) return; // shared history isn't new
   const c = state.contacts[m.peer] || {};
   if(c.req) return; // no notifications for message requests
   if(localStorage.getItem('yggchat_hide_notif') === '1'){
@@ -2763,6 +2791,7 @@ function connectEvents(){
     eventSource.close();
   }
   eventSource = new EventSource('/api/events');
+  eventSource.onopen = () => { if(esLost){ esLost = false; resyncState(); } };
   eventSource.onmessage = (ev) => {
     try{
       const d = JSON.parse(ev.data);
@@ -2859,6 +2888,7 @@ function connectEvents(){
     }catch(e){}
   };
   eventSource.onerror = () => {
+    esLost = true;
     if(eventSource){
       eventSource.close();
       eventSource = null;
@@ -2944,6 +2974,7 @@ function renderPrivacy(){
   $('pass-remove').style.display = has ? '' : 'none';
   $('lock-now').style.display = has ? '' : 'none';
   setSwitch('hide-notif-switch', localStorage.getItem('yggchat_hide_notif') === '1');
+  setSwitch('pow-strict-switch', !!state.powstrict);
   const andr = window.YggAndroid && typeof window.YggAndroid.setSecure === 'function';
   $('secure-row').style.display = andr ? '' : 'none';
   setSwitch('secure-switch', localStorage.getItem('yggchat_secure') === '1');
@@ -3020,6 +3051,10 @@ $('socks-edit').addEventListener('click', async () => {
   socksSet({Addr: v.trim()}, 'プロキシを変更しました');
 });
 $('nostr-reset').addEventListener('click', async () => { if(await nostrSet({Reset: true})) toast('既定のリレーに戻しました'); });
+$('pow-strict-switch').addEventListener('click', async () => {
+  const on = !state.powstrict;
+  try{ const r = await api('/api/pow', {Strict: on}); state.powstrict = !!r.strict; renderPrivacy(); toast(r.strict ? 'リクエストと参加にPoWを求めます' : 'PoWなしのリクエストも受け取ります'); }catch(e){ toast(e.message); }
+});
 $('hide-notif-switch').addEventListener('click', () => {
   const on = localStorage.getItem('yggchat_hide_notif') !== '1';
   localStorage.setItem('yggchat_hide_notif', on ? '1' : '0'); androidNotifSync(); renderPrivacy();
@@ -3358,23 +3393,34 @@ document.querySelectorAll('#theme-seg button').forEach(b => b.addEventListener('
 function openGroupInfo(){
   const c = state.contacts[curAddr]; if(!c) return;
   $('gi-name').textContent = c.nick || 'グループ';
-  $('gi-count').textContent = c.left ? '退出済み' : ((c.members||[]).length + '人');
+  $('gi-count').textContent = c.left ? '退出済み' : ((c.members||[]).length + '人' + (c.owner ? '（上限' + (c.max || 24) + '人）' : ''));
   const host = c.owner === state.addr && !c.left;
-  $('gi-members').innerHTML = (c.members||[]).map(a => '<div class="row" style="padding:6px 0;"><div><div>' + escapeHtml(a === state.addr ? 'あなた' : ((state.contacts[a]||{}).nick || 'anon')) + (a === c.owner ? ' <span class="ttl-badge">ホスト</span>' : '') + '</div><div class="row-sub" style="font-family:ui-monospace,monospace;">' + escapeHtml(a) + '</div></div>' + (host && a !== state.addr ? '<button class="gi-kick" data-addr="' + escapeHtml(a) + '" style="color:var(--error);">外す</button>' : '') + '</div>').join('');
+  const admins = c.admins || [];
+  const isAdm = a => admins.includes(a);
+  const manage = !c.left && !!c.owner && (host || isAdm(state.addr));
+  $('gi-members').innerHTML = (c.members||[]).map(a => {
+    const special = a === c.owner || isAdm(a);
+    let btns = '';
+    if(host && a !== state.addr) btns += '<button class="gi-adm" data-addr="' + escapeHtml(a) + '">' + (isAdm(a) ? '副管理者を外す' : '副管理者に') + '</button>';
+    if(manage && a !== state.addr && (host || !special)) btns += '<button class="gi-kick" data-addr="' + escapeHtml(a) + '" style="color:var(--error);">外す</button>';
+    return '<div class="row" style="padding:6px 0; gap:6px;"><div style="flex:1; min-width:0;"><div>' + escapeHtml(a === state.addr ? 'あなた' : ((state.contacts[a]||{}).nick || 'anon')) + (a === c.owner ? ' <span class="ttl-badge">ホスト</span>' : '') + (isAdm(a) ? ' <span class="ttl-badge">副管理者</span>' : '') + '</div><div class="row-sub" style="font-family:ui-monospace,monospace; word-break:break-all;">' + escapeHtml(a) + '</div></div>' + btns + '</div>';
+  }).join('');
   $('gi-add').style.display = $('gi-leave').style.display = $('gi-rename').style.display = c.left ? 'none' : '';
-  if(c.owner && c.owner !== state.addr) $('gi-add').style.display = 'none';
-  $('gi-link').style.display = host ? '' : 'none';
+  if(c.owner && !manage) $('gi-add').style.display = 'none';
+  $('gi-link').style.display = manage ? '' : 'none';
   const set = c.set || {};
   setSwitch('gi-sw-files', !set.nf); setSwitch('gi-sw-ap', !!set.ap); setSwitch('gi-sw-hi', !!set.hi);
   $('gi-ttl').value = String(set.ttl || 0); if(!$('gi-ttl').value) $('gi-ttl').value = '0';
+  $('gi-max').value = String(c.max || 24); if(!$('gi-max').value) $('gi-max').value = '24';
+  $('gi-pow').value = String(set.pb || 0); if(!$('gi-pow').value) $('gi-pow').value = '0';
   $('gi-pw-state').textContent = set.pw ? 'あり' : 'なし';
   $('gi-pw').textContent = set.pw ? '変更' : '設定';
   const canSet = host && !!c.owner;
   $('gi-set-sec').style.display = (c.owner && !c.left) ? '' : 'none';
   $('gi-set-sec').classList.toggle('ro', !canSet);
-  $('gi-ttl').disabled = !canSet; $('gi-pw').style.display = canSet ? '' : 'none';
+  $('gi-ttl').disabled = $('gi-max').disabled = $('gi-pow').disabled = !canSet; $('gi-pw').style.display = canSet ? '' : 'none';
   $('gi-set-note').textContent = canSet ? '' : 'ホストが決めた設定です';
-  const pend = host ? (c.pend || []) : [];
+  const pend = manage ? (c.pend || []) : [];
   $('gi-pend-sec').style.display = pend.length ? '' : 'none';
   $('gi-pend').innerHTML = pend.map(p => '<div class="row" style="padding:6px 0;"><div class="row-main"><div class="row-title">' + escapeHtml(p.nick || 'anon') + '</div><div class="row-sub" style="font-family:ui-monospace,monospace;">' + escapeHtml(p.addr) + '</div></div><button class="gi-ok" data-addr="' + escapeHtml(p.addr) + '">承認</button><button class="gi-no" data-addr="' + escapeHtml(p.addr) + '" style="color:var(--error);">拒否</button></div>').join('');
   $('group-info-screen').classList.add('active');
@@ -3394,6 +3440,16 @@ $('gi-ttl').addEventListener('change', () => {
   const c = state.contacts[curAddr]; if(!c) return;
   groupSet({Set: Object.assign({}, c.set || {}, {ttl: parseInt($('gi-ttl').value, 10) || 0})});
 });
+$('gi-max').addEventListener('change', async () => {
+  const c = state.contacts[curAddr]; if(!c) return;
+  const n = parseInt($('gi-max').value, 10) || 24;
+  if(n > 24 && (c.max || 24) <= 24 && !(await uiDialog('上限を25人以上にすると、メンバー全員がv0.19.0以上でないと正しく動きません。変えますか？', {okText:'変える'}))){ openGroupInfo(); return; }
+  groupSet({Set: Object.assign({}, c.set || {}, {mx: n})});
+});
+$('gi-pow').addEventListener('change', () => {
+  const c = state.contacts[curAddr]; if(!c) return;
+  groupSet({Set: Object.assign({}, c.set || {}, {pb: parseInt($('gi-pow').value, 10) || 0})});
+});
 $('gi-pw').addEventListener('click', async () => {
   const c = state.contacts[curAddr]; if(!c) return;
   const v = await uiPrompt('参加パスワード（4〜64文字）' + ((c.set||{}).pw ? '\n空にすると解除します' : ''), ''); if(v === null) return;
@@ -3407,6 +3463,16 @@ $('gi-pend').addEventListener('click', async (e) => {
 });
 $('gi-back').addEventListener('click', () => $('group-info-screen').classList.remove('active'));
 $('gi-members').addEventListener('click', async (e) => {
+  const adm = e.target.closest && e.target.closest('.gi-adm');
+  if(adm){
+    const c = state.contacts[curAddr]; if(!c) return;
+    const a = adm.getAttribute('data-addr'), cur = c.admins || [];
+    const on = !cur.includes(a);
+    if(on && cur.length >= 10){ toast('副管理者は10人までです'); return; }
+    if(on && !(await uiDialog(((state.contacts[a]||{}).nick || addrShort(a)) + ' を副管理者にしますか？\n参加の承認・招待リンク・メンバーの追加と削除ができるようになります（設定の変更はホストだけ）。', {okText:'副管理者にする'}))) return;
+    if(await groupSet({Admins: on ? cur.concat([a]) : cur.filter(x => x !== a)})) toast(on ? '副管理者にしました' : '副管理者から外しました');
+    return;
+  }
   const b = e.target.closest && e.target.closest('.gi-kick'); if(!b) return;
   const a = b.getAttribute('data-addr');
   const ok = await uiDialog(((state.contacts[a]||{}).nick || addrShort(a)) + ' をグループから外しますか？', {okText:'外す', danger:true});

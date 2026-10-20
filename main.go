@@ -73,6 +73,7 @@ type Message struct {
 	// GImg: a hidden group copy whose photo is on the visible message (Of).
 	GImg bool `json:"gimg,omitempty"`
 	Hist bool `json:"hist,omitempty"` // relayed by the group host as history for a new member (v0.18)
+	Pn   string `json:"pn,omitempty"`  // proof-of-work nonce (pow.go)
 }
 
 type Contact struct {
@@ -98,6 +99,8 @@ type Store struct {
 	key      []byte
 	salt     []byte
 	env      *envelope
+	dirty    bool
+	saveT    *time.Timer
 	Nick     string             `json:"nick"`
 	Bio      string             `json:"bio,omitempty"`
 	Avatar   string             `json:"avatar,omitempty"`
@@ -108,21 +111,40 @@ type Store struct {
 	// Park undeliverable messages on public Nostr relays (on by default for new installs since v0.13.6).
 	NostrOn     bool     `json:"nostr_on,omitempty"`
 	NostrRelays []string `json:"nostr_relays,omitempty"`
-	// Also send/receive pre-v0.13 boxes with the static tag (until v0.20).
+	// Also send/receive pre-v0.13 boxes with the static tag (until v0.24).
 	NostrLegacy bool `json:"nostr_legacy,omitempty"`
 	// Edits / unsends of our messages not yet acked by the peer.
 	Ctl []ctlItem `json:"ctl,omitempty"`
 	// Group chats (groups.go), keyed by group id.
 	Groups map[string]Group `json:"groups,omitempty"`
+	// Refuse message requests and invite-link joins without proof of work (v0.19, opt-in).
+	PowStrict bool `json:"pow_strict,omitempty"`
 }
 
 func (s *Store) save() {
+	s.dirty = false
 	if s.locked {
 		return
 	}
 	if b, err := s.encode(); err == nil {
 		_ = writeAtomic(s.path, b)
 	}
+}
+
+// saveSoon coalesces many saves into one within half a second. Caller holds s.mu.
+func (s *Store) saveSoon() {
+	s.dirty = true
+	if s.saveT != nil {
+		return
+	}
+	s.saveT = time.AfterFunc(500*time.Millisecond, func() {
+		s.mu.Lock()
+		s.saveT = nil
+		if s.dirty {
+			s.save()
+		}
+		s.mu.Unlock()
+	})
 }
 
 // writeAtomic writes via a 0600 temp file + fsync + rename so a crash never
@@ -246,12 +268,14 @@ type App struct {
 	udp      net.PacketConn
 	ackMu    sync.Mutex
 	acks     map[string]chan struct{}
+	ackFrom  map[string]string // id -> the peer whose ack counts (ackMu)
 	joins    map[string]string // group id -> host, while our invite-link join is pending (guarded by store.mu)
 	pwMu     sync.Mutex
 	pwFails  map[string]*pwFail // wrong group passwords per address (groupset.go)
 	flMu     sync.Mutex
 	inflight map[string]bool
 	probing  map[string]bool // peers with a quick re-probe running (flMu)
+	ctlBusy  map[string]bool // peers with flushCtl running (flMu)
 	fsOnce   sync.Once
 	fs       *fileState
 	seenMu   sync.Mutex
@@ -330,6 +354,17 @@ type wire struct {
 	Pw string    `json:"pw,omitempty"` // join password (gj)
 	K  string    `json:"k,omitempty"`  // gjn kind: "pw" (password needed/wrong), "wait" (approval pending)
 	By string    `json:"by,omitempty"` // ghs: original sender of a history message
+	// v0.19 large groups / co-admins (groupadmin.go)
+	GV  int      `json:"gv,omitempty"`  // member-list version
+	GAD []string `json:"gad,omitempty"` // co-admins (gi)
+	GSV int      `json:"gsv,omitempty"` // version of name/settings/admins (gi)
+	GC  int      `json:"gc,omitempty"`  // member count of a split gi
+	GMB string   `json:"gmb,omitempty"` // packed members (gp)
+	GA  string   `json:"ga,omitempty"`  // packed members added (gd)
+	GR  string   `json:"gr,omitempty"`  // packed members removed (gd)
+	PN  string   `json:"pn,omitempty"`  // proof-of-work nonce (msg, fh, gj)
+
+	checked bool // local only: proof of work already verified (file header)
 }
 
 func (a *App) serveChat() {
@@ -361,14 +396,19 @@ func (a *App) serveChat() {
 		}
 		from := rip.String()
 		if w.T == "fca" {
-			a.onFileAck(w)
+			a.onFileAck(from, w)
+			continue
+		}
+		if w.T == "pow" {
+			a.onPowNeed(from, w)
 			continue
 		}
 		if w.T == "ack" {
 			a.ackMu.Lock()
-			if ch, ok := a.acks[w.ID]; ok {
+			if ch, ok := a.acks[w.ID]; ok && a.ackFrom[w.ID] == from {
 				close(ch)
 				delete(a.acks, w.ID)
+				delete(a.ackFrom, w.ID)
 			}
 			a.ackMu.Unlock()
 			a.askPK(from)
@@ -414,7 +454,7 @@ func (a *App) serveChat() {
 			a.onFileChunk(from, w)
 		case "prof", "ttl":
 			a.handleCtl(from, w)
-		case "gq", "gi", "gl", "gj", "gjn", "ghs":
+		case "gq", "gi", "gl", "gj", "gjn", "ghs", "gd", "gp", "gk", "gkq":
 			a.onGroupCtl(from, w)
 		case "edit", "del":
 			if a.onCtl(from, w) {
@@ -443,7 +483,7 @@ func (a *App) handleMsg(from string, w wire) bool {
 }
 
 func (a *App) acceptMsg(from string, w wire, img string) bool {
-	if (w.Text == "" && img == "") || len(w.Text) > 8000 || !msgIDRe.MatchString(w.ID) {
+	if (w.Text == "" && img == "") || len(w.Text) > maxRecvText || !msgIDRe.MatchString(w.ID) {
 		return false
 	}
 	a.store.mu.Lock()
@@ -467,6 +507,12 @@ func (a *App) acceptMsg(from string, w wire, img string) bool {
 	}
 	if w.TTL < 0 || w.TTL > 4*7*86400 {
 		w.TTL = 0
+	}
+	if !a.powCheck(from, w) {
+		a.seenMu.Lock()
+		delete(a.seen, key) // let the recomputed one in
+		a.seenMu.Unlock()
+		return false
 	}
 	if known && c.TTL != w.TTL {
 		a.setTTL(from, w.TTL, false)
@@ -506,11 +552,20 @@ func (a *App) setStatus(peer, id, status string) {
 			m.Status = status
 			if m.Hid {
 				grp, of = m.Grp, m.Of
+				if status == "sent" {
+					// A delivered group copy is no longer needed (the visible
+					// message's status counts the copies still pending).
+					a.store.Messages = append(a.store.Messages[:i], a.store.Messages[i+1:]...)
+				}
 			}
 			break
 		}
 	}
-	a.store.save()
+	if grp != "" {
+		a.store.saveSoon() // a big group changes many copies at once
+	} else {
+		a.store.save()
+	}
 	a.store.mu.Unlock()
 	if grp != "" {
 		a.groupStatus(grp, of)
@@ -528,15 +583,15 @@ func (a *App) send(to, text, img string) (Message, error) {
 	if ip == nil || len(ip) != 16 || (ip[0]&0xfe) != 0x02 {
 		return Message{}, fmt.Errorf("not a Yggdrasil address: %s", to)
 	}
-	if (text == "" && img == "") || len(text) > 8000 {
+	if (text == "" && img == "") || len(text) > maxSendText {
 		return Message{}, fmt.Errorf("message empty or too long")
 	}
 	if img != "" {
 		if _, _, err := parseImg(img); err != nil {
 			return Message{}, err
 		}
-		if len(text) > capMax {
-			return Message{}, fmt.Errorf("caption too long (max %d bytes, about 260 Japanese characters)", capMax)
+		if escLen(text) > capMax {
+			return Message{}, fmt.Errorf("写真の説明が長すぎます（日本語でおよそ260文字まで）")
 		}
 	}
 	peer := ip.String()
@@ -605,27 +660,39 @@ func (a *App) deliverN(m Message, tries int) bool {
 		a.setStatus(m.Peer, m.ID, "sending")
 	}
 	if m.GImg && m.Img == "" {
-		m.Img = a.groupImg(m.Grp, m.Of)
+		if m.Img = a.groupImg(m.Grp, m.Of); m.Img == "" {
+			// The photo was deleted (or expired) here before this copy went out.
+			a.dropCopy(m.Peer, m.ID)
+			return true
+		}
 	}
-	if m.Img != "" {
-		ok := a.deliverImg(m, tries)
+	if m.Img != "" || a.longText(m) {
+		var ok bool
+		if m.Img != "" {
+			ok = a.deliverImg(m, tries)
+		} else {
+			ok = a.deliverFile(m, textMime, []byte(m.Text), tries)
+		}
 		if !ok {
 			go a.probeSoon(m.Peer)
 		}
 		return ok
 	}
 	b, _ := json.Marshal(a.msgWire(m))
-	ch := make(chan struct{})
-	a.ackMu.Lock()
-	a.acks[m.ID] = ch
-	a.ackMu.Unlock()
-	defer func() { a.ackMu.Lock(); delete(a.acks, m.ID); a.ackMu.Unlock() }()
+	asked := powAsked(m.Peer, m.ID)
+	ch := a.waitAck(m.Peer, m.ID)
+	defer a.doneAck(m.ID, ch)
 	for a.udp == nil {
 		time.Sleep(200 * time.Millisecond)
 	}
 	dst := &net.UDPAddr{IP: net.ParseIP(m.Peer), Port: chatPort}
 	// First packet to a new key triggers a key lookup, so retry a few times.
 	for i := 0; i < tries; i++ {
+		if x := powAsked(m.Peer, m.ID); x > asked {
+			asked = x // the receiver wants more work
+			m.Pn = ""
+			b, _ = json.Marshal(a.msgWire(m))
+		}
 		_, _ = a.udp.WriteTo(b, dst)
 		select {
 		case <-ch:
@@ -674,15 +741,22 @@ func (a *App) nostrPark(m Message) {
 		return
 	}
 	a.store.mu.Lock()
-	st := ""
+	st, grp, of := "", "", ""
 	for i := range a.store.Messages {
 		x := &a.store.Messages[i]
 		if x.Peer == m.Peer && x.ID == m.ID && x.Status == "queued" {
 			x.Nostr, x.Status, st = true, "stored", "stored"
+			if x.Hid {
+				grp, of = x.Grp, x.Of
+			}
 			a.store.save()
 		}
 	}
 	a.store.mu.Unlock()
+	if grp != "" {
+		a.groupStatus(grp, of) // the visible group message shows the combined status
+		return
+	}
 	if st != "" {
 		a.broadcast("status", map[string]string{"id": m.ID, "peer": m.Peer, "status": st})
 	}
@@ -936,7 +1010,7 @@ func (a *App) httpHandlers(mux *http.ServeMux) {
 			"nick": a.store.Nick, "bio": a.store.Bio, "avatar": a.store.Avatar, "domain": a.store.Domain,
 			"contacts": a.contactsViewLocked(), "messages": a.visibleMessagesLocked(), "peers": peers, "platform": "native",
 			"locked": false, "haspass": a.store.key != nil, "blocked": blocked,
-			"nostr": a.nostrStateLocked(), "socks": a.socksState(),
+			"nostr": a.nostrStateLocked(), "socks": a.socksState(), "powstrict": a.store.PowStrict,
 		})
 	})
 	mux.HandleFunc("/api/send", func(w http.ResponseWriter, r *http.Request) {
@@ -1133,7 +1207,7 @@ func (a *App) httpHandlers(mux *http.ServeMux) {
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
-		ch := make(chan []byte, 32)
+		ch := make(chan []byte, 512)
 		a.subMu.Lock()
 		a.subs[ch] = struct{}{}
 		a.subMu.Unlock()
@@ -1365,6 +1439,7 @@ func main() {
 	a.groupHandlers(mux)
 	a.inviteHandlers(mux)
 	a.groupSetHandlers(mux)
+	a.powHandlers(mux)
 	a.socksHandlers(mux)
 	a.siteHandlers(mux)
 	a.resolveHandlers(mux)

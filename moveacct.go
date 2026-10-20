@@ -84,7 +84,7 @@ func (a *App) importBundle(b []byte) error {
 	if err != nil || len(key) != ed25519.PrivateKeySize || string(ed25519.NewKeyFromSeed(key[:32])) != string(key) {
 		return errors.New("鍵が壊れています")
 	}
-	var ns Store
+	var ns map[string]any
 	if json.Unmarshal(mb.Store, &ns) != nil {
 		return errors.New("データが壊れています")
 	}
@@ -94,15 +94,7 @@ func (a *App) importBundle(b []byte) error {
 		return errors.New("ロックを解除してください")
 	}
 	s := a.store
-	s.Nick, s.Bio, s.Avatar, s.Domain = ns.Nick, ns.Bio, ns.Avatar, ns.Domain
-	s.Contacts, s.Messages, s.Blocked, s.Groups, s.Ctl = ns.Contacts, ns.Messages, ns.Blocked, ns.Groups, ns.Ctl
-	s.NostrOn, s.NostrRelays, s.NostrLegacy = ns.NostrOn, ns.NostrRelays, ns.NostrLegacy
-	if s.Contacts == nil {
-		s.Contacts = map[string]Contact{}
-	}
-	if s.Nick == "" {
-		s.Nick = "anon"
-	}
+	_ = s.loadData(mb.Store) // includes fix(): no nil maps before the restart
 	s.save()
 	a.store.mu.Unlock()
 	a.cfg.PrivateKey = key

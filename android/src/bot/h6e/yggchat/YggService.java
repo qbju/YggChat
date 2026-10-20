@@ -107,7 +107,7 @@ public class YggService extends Service {
             JSONObject ev = new JSONObject(s);
             if (!"message".equals(ev.optString("type"))) return;
             JSONObject m = ev.getJSONObject("data");
-            if (m.optBoolean("out") || m.has("sys") && !m.optString("sys").isEmpty()) return;
+            if (m.optBoolean("out") || m.optBoolean("hist") || m.has("sys") && !m.optString("sys").isEmpty()) return;
             android.content.SharedPreferences sp = getSharedPreferences("ygg", 0);
             if (!sp.getBoolean("notif", false) || MainActivity.visible) return;
             NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);

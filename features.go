@@ -105,6 +105,7 @@ func (s *Store) fix() {
 	if s.Groups == nil {
 		s.Groups = map[string]Group{}
 	}
+	s.pruneSentCopies()
 	if s.Nick == "" {
 		s.Nick = "anon"
 	}
@@ -126,12 +127,9 @@ func (s *Store) unlock(pass string) error {
 	if err != nil {
 		return errors.New("パスコードが違います")
 	}
-	var fresh Store
-	if err := json.Unmarshal(plain, &fresh); err != nil {
+	if err := s.loadData(plain); err != nil {
 		return err
 	}
-	s.Nick, s.Bio, s.Avatar, s.Contacts, s.Messages, s.Blocked = fresh.Nick, fresh.Bio, fresh.Avatar, fresh.Contacts, fresh.Messages, fresh.Blocked
-	s.fix()
 	s.key, s.salt, s.locked, s.env = key, s.env.Salt, false, nil
 	for i := range s.Messages {
 		if s.Messages[i].Status == "sending" || s.Messages[i].Status == "failed" {
@@ -189,9 +187,25 @@ func (s *Store) lockNow() error {
 		return err
 	}
 	s.env, s.locked, s.key = &env, true, nil
-	s.Contacts, s.Messages, s.Blocked = map[string]Contact{}, nil, map[string]bool{}
-	s.Nick, s.Bio, s.Avatar = "", "", ""
+	s.resetData()
+	s.Contacts, s.Blocked, s.Groups = map[string]Contact{}, map[string]bool{}, map[string]Group{}
 	return nil
+}
+
+// resetData clears every saved (exported) field.
+func (s *Store) resetData() {
+	s.Nick, s.Bio, s.Avatar, s.Domain = "", "", "", ""
+	s.Contacts, s.Messages, s.Blocked, s.Groups, s.Ctl = nil, nil, nil, nil, nil
+	s.NostrOn, s.NostrRelays, s.NostrLegacy, s.PowStrict = false, nil, false, false
+}
+
+// loadData replaces all saved fields with the JSON b (every field, so new
+// ones can't be forgotten here).
+func (s *Store) loadData(b []byte) error {
+	s.resetData()
+	err := json.Unmarshal(b, s)
+	s.fix()
+	return err
 }
 
 func (s *Store) isLocked() bool {
@@ -369,8 +383,15 @@ func (a *App) resetIdentity() error {
 	a.cfg.Certificate = nil
 	a.saveCfg()
 	a.store.mu.Lock()
+	// Everything tied to the old address goes: chats, groups (we were host
+	// or member under the old address), pending edits, our verified domain.
 	a.store.Contacts = map[string]Contact{}
 	a.store.Messages = nil
+	a.store.Groups = map[string]Group{}
+	a.store.Ctl = nil
+	a.store.Domain = ""
+	a.store.Blocked = map[string]bool{}
+	a.joins = nil
 	a.store.save()
 	a.store.mu.Unlock()
 	go func() {
@@ -501,7 +522,11 @@ func (a *App) featureHandlers(mux *http.ServeMux) {
 			Addr  string
 			Block bool
 		}
-		if !readJSON(w, r, &req) || net.ParseIP(req.Addr) == nil {
+		if !readJSON(w, r, &req) {
+			return
+		}
+		if net.ParseIP(req.Addr) == nil {
+			http.Error(w, "bad address", 400)
 			return
 		}
 		addr := net.ParseIP(req.Addr).String()

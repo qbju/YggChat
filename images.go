@@ -11,11 +11,13 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"regexp"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 // Every datagram must fit the 1280-byte IPv6 MTU without fragmentation:
@@ -27,7 +29,28 @@ const (
 	capMax     = 800 // caption bytes (UTF-8): the header must also fit one packet
 )
 
-var mimeOK = map[string]bool{"image/jpeg": true, "image/png": true, "image/webp": true, "image/gif": true}
+var mimeOK = map[string]bool{"image/jpeg": true, "image/png": true, "image/webp": true, "image/gif": true, textMime: true}
+
+// textMime: a text too long for one datagram goes the same way as a photo
+// (header + chunks), as UTF-8 bytes (v0.19).
+const textMime = "text/plain"
+
+const dgramMax = 1200 // any single JSON datagram we send
+
+func wireLen(w wire) int { b, _ := json.Marshal(w); return len(b) }
+
+// escLen is how many bytes s takes inside a JSON string (Go escapes <>& etc.).
+func escLen(s string) int { b, _ := json.Marshal(s); return len(b) - 2 }
+
+// longText: m's text has to go chunked.
+func (a *App) longText(m Message) bool {
+	return m.Img == "" && !m.GImg && wireLen(a.msgWireBare(m)) > dgramMax-40 // room for the nonce
+}
+
+const (
+	maxSendText = 12288 // bytes we let the UI send (about 4096 Japanese characters)
+	maxRecvText = 16384
+)
 var shaRe = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 // parseImg checks a data: URL and returns its mime type and bytes.
@@ -61,10 +84,14 @@ type fileState struct {
 	mu   sync.Mutex
 	in   map[string]*inFile      // from/id -> partial download
 	acks map[string]map[int]bool // id -> chunk acks (outgoing)
+	// id -> receiver: only its chunk acks count
+	ackFrom map[string]string
 }
 
 func (a *App) files() *fileState {
-	a.fsOnce.Do(func() { a.fs = &fileState{in: map[string]*inFile{}, acks: map[string]map[int]bool{}} })
+	a.fsOnce.Do(func() {
+		a.fs = &fileState{in: map[string]*inFile{}, acks: map[string]map[int]bool{}, ackFrom: map[string]string{}}
+	})
 	return a.fs
 }
 
@@ -74,28 +101,43 @@ func (a *App) deliverImg(m Message, tries int) bool {
 		a.setStatus(m.Peer, m.ID, "failed")
 		return false
 	}
+	return a.deliverFile(m, mime, raw, tries)
+}
+
+func (a *App) deliverFile(m Message, mime string, raw []byte, tries int) bool {
 	sum := sha256.Sum256(raw)
 	n := (len(raw) + imgChunk - 1) / imgChunk
 	hdr := wire{T: "fh", ID: m.ID, Nick: m.Nick, Text: m.Text, TS: m.TS, TTL: m.TTL, Mime: mime, Size: len(raw), N: n, Sha: hex.EncodeToString(sum[:])}
-	if m.Grp != "" {
-		gw := a.msgWire(m)
-		hdr.TTL, hdr.G, hdr.GH = gw.TTL, gw.G, gw.GH
+	if mime == textMime {
+		hdr.Text, m.Text = "", "" // the text is the payload
 	}
+	if m.Grp != "" {
+		hdr.G = m.Grp
+		a.store.mu.Lock()
+		if g, ok := a.store.Groups[m.Grp]; ok {
+			hdr.GH = groupHash(g.Name, g.Members)
+		}
+		a.store.mu.Unlock()
+	}
+	a.withPow(m, &hdr, hdr.Sha)
+	asked := powAsked(m.Peer, m.ID)
 	fs := a.files()
 	fs.mu.Lock()
 	fs.acks[m.ID] = map[int]bool{}
+	fs.ackFrom[m.ID] = m.Peer
 	fs.mu.Unlock()
-	defer func() { fs.mu.Lock(); delete(fs.acks, m.ID); fs.mu.Unlock() }()
-	ch := make(chan struct{})
-	a.ackMu.Lock()
-	a.acks[m.ID] = ch
-	a.ackMu.Unlock()
-	defer func() { a.ackMu.Lock(); delete(a.acks, m.ID); a.ackMu.Unlock() }()
+	defer func() { fs.mu.Lock(); delete(fs.acks, m.ID); delete(fs.ackFrom, m.ID); fs.mu.Unlock() }()
+	ch := a.waitAck(m.Peer, m.ID)
+	defer a.doneAck(m.ID, ch)
 	for a.udp == nil {
 		time.Sleep(200 * time.Millisecond)
 	}
 	idle, last := 0, -1
 	for idle < tries {
+		if x := powAsked(m.Peer, m.ID); x > asked {
+			asked, m.Pn = x, ""
+			a.withPow(m, &hdr, hdr.Sha)
+		}
 		a.sendWire(m.Peer, hdr)
 		fs.mu.Lock()
 		done := len(fs.acks[m.ID])
@@ -127,13 +169,17 @@ func (a *App) deliverImg(m Message, tries int) bool {
 		}
 	}
 	a.setStatus(m.Peer, m.ID, "queued") // images don't go through the mailbox
+	if mime == textMime {
+		m.Text = string(raw)
+		go a.nostrPark(m) // a long text can (one Nostr event holds it)
+	}
 	return false
 }
 
-func (a *App) onFileAck(w wire) {
+func (a *App) onFileAck(from string, w wire) {
 	fs := a.files()
 	fs.mu.Lock()
-	if m, ok := fs.acks[w.ID]; ok {
+	if m, ok := fs.acks[w.ID]; ok && fs.ackFrom[w.ID] == from && w.I >= 0 && w.I < imgMaxN {
 		m[w.I] = true
 	}
 	fs.mu.Unlock()
@@ -144,8 +190,14 @@ func (a *App) onFileHeader(from string, w wire) {
 		(w.Size+imgChunk-1)/imgChunk != w.N || !shaRe.MatchString(w.Sha) || len(w.Text) > capMax || len(w.Nick) > 120 {
 		return
 	}
-	if a.hasMsg(from, w.ID) || (w.G != "" && validGID(w.G) && (a.hasGroupMsg(w.G, from, w.ID) || (w.Text == "" && a.groupNoFiles(w.G)))) {
+	if a.hasMsg(from, w.ID) || (w.G != "" && validGID(w.G) && (a.hasGroupMsg(w.G, from, w.ID) || (w.Text == "" && w.Mime != textMime && a.groupNoFiles(w.G)))) {
 		a.sendWire(from, wire{T: "ack", ID: w.ID})
+		return
+	}
+	if !a.powCheck(from, w) {
+		return // told the sender how much work we want
+	}
+	if w.Mime == textMime && (w.Size > maxRecvText || w.Text != "") {
 		return
 	}
 	fs := a.files()
@@ -201,7 +253,14 @@ func (a *App) onFileChunk(from string, w wire) {
 	}
 	h := f.hdr
 	h.T = "msg"
+	h.checked = true // the header's proof of work was checked
 	img := "data:" + h.Mime + ";base64," + base64.StdEncoding.EncodeToString(raw)
+	if h.Mime == textMime {
+		if !utf8.Valid(raw) {
+			return
+		}
+		h.Text, img = string(raw), ""
+	}
 	if h.G != "" {
 		if a.onGroupMsg(from, h, img) {
 			a.sendWire(from, wire{T: "ack", ID: w.ID})

@@ -64,12 +64,18 @@ Wire: {t:"fh", id, nick, text?, ts, ttl?, mime, size, n, sha} then {t:"fc", id, 
 - POST /api/send {To:"g:<id>", Text} (text only) / {To:"g:<id>", Retry:id}
 - POST /api/group/create {Name, Members:[addr]} -> group view
 - POST /api/group/update {ID, Name?, Add?:[addr]} -> group view (pushed to all members)
+  - v0.18+: Remove?:[addr], Set?:{nf,ap,hi,ttl,pw,mx,pb}, Pass?:string (host only for Set/Pass).
+  - v0.19: Admins?:[addr] (host only, max 10). Add/Remove allowed for host and admins (admins can't remove the host or admins). Set.mx = member limit (24,32,50,64,100,128,256,512,1024; omitted = 24), Set.pb = post PoW (0 = 3 bits, -1 = none, 6/8/10/12/16). Group view gains "admins" and "max".
+- POST /api/group/approve, /api/group/invite: host or admin (v0.19). Each admin's invite link carries its own address and token.
+
+## POST /api/pow (v0.19)
+- {Strict?: bool} -> {strict}. Strict = refuse message requests and invite-link joins without an 8-bit proof of work (default off). /api/state has "powstrict".
 - POST /api/group/leave {ID} -> group view (members are told)
 - POST /api/contact {Addr:"g:<id>", Nick?, Accept?} renames locally / accepts an invitation; /api/contact/delete {Addr:"g:<id>"} deletes it locally.
 - Wire: msg + {g, gh}; {t:"gq",g}; {t:"gi",g,gn,gm}; {t:"gl",g}. See groups.go.
 
 ## POST /api/nostr: Legacy (v0.13.7)
-- {Legacy: bool} toggles store.nostr_legacy (default off): also publish a pre-v0.13 box (static tag, no back-dating) and fetch the static tag. Response gains "legacy". Removed in v0.20.
+- {Legacy: bool} toggles store.nostr_legacy (default off): also publish a pre-v0.13 box (static tag, no back-dating) and fetch the static tag. Response gains "legacy". Removed in v0.24.
 
 ## Verified domain (v0.14.0)
 - POST /api/profile accepts Domain (string; "" removes). Saved only when its Yggdrasil AAAA equals our address; else 400 with reason. State gains "domain". prof wire carries "dom". Contacts gain dom, domok (AAAA == their addr), domat (re-checked when a profile arrives and 12h passed).

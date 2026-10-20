@@ -58,17 +58,17 @@ func (a *App) onJoin(from string, w wire, g Group, known bool) {
 		a.store.mu.Unlock()
 		a.sendWire(from, wire{T: "gjn", G: w.G, Text: text})
 	}
-	if !known || g.Left || g.Owner != a.addr || g.Tok == "" || len(w.Tok) != len(g.Tok) || subtle.ConstantTimeCompare([]byte(w.Tok), []byte(g.Tok)) != 1 {
+	if !known || g.Left || !canManage(g, a.addr) || g.Tok == "" || len(w.Tok) != len(g.Tok) || subtle.ConstantTimeCompare([]byte(w.Tok), []byte(g.Tok)) != 1 {
 		no("この招待リンクは使えません（リセットされたか、グループがなくなりました）")
 		return
 	}
 	if hasMember(g, from) {
 		a.store.mu.Unlock()
-		a.sendWire(from, a.infoWire(g))
+		a.answerInfo(from, g)
 		return
 	}
-	if len(g.Members) >= maxGroupMembers {
-		no(fmt.Sprintf("グループが満員です（最大%d人）", maxGroupMembers))
+	if len(g.Members) >= groupMax(g) {
+		no(fmt.Sprintf("グループが満員です（最大%d人）", groupMax(g)))
 		return
 	}
 	if a.store.Blocked[from] {
@@ -76,12 +76,45 @@ func (a *App) onJoin(from string, w wire, g Group, known bool) {
 		return
 	}
 	nick := cleanNick(w.Nick)
+	if (w.PN != "" || a.store.PowStrict) && !joinPowOK(from, w.G, w.Tok, w.PN) {
+		no("参加にはYggChat v0.19.0以上が必要です（PoW）")
+		return
+	}
+	if g.Set.Pass && g.PwH == "" {
+		// an admin that hasn't got the password hash from the host yet
+		owner := g.Owner
+		no("いまは参加を受け付けられません。少ししてからもう一度開いてね")
+		a.sendWire(owner, wire{T: "gkq", G: w.G})
+		return
+	}
 	if g.PwH != "" {
 		if a.pwLimited(from, false) {
 			no("パスワードを何度も間違えたので、しばらく参加できません")
 			return
 		}
-		if !checkGroupPass(g.PwH, w.Pw) {
+		good := false
+		if w.Pw != "" {
+			if !pwGlobalOK() {
+				no("いま参加が混み合っています。少ししてからもう一度開いてね")
+				return
+			}
+			// PBKDF2 is slow: check without holding the store.
+			h := g.PwH
+			a.store.mu.Unlock()
+			good = checkGroupPass(h, w.Pw)
+			a.store.mu.Lock()
+			var ok bool
+			if g, ok = a.store.Groups[w.G]; !ok || g.Left || !canManage(g, a.addr) || a.store.locked {
+				a.store.mu.Unlock()
+				return
+			}
+			if hasMember(g, from) {
+				a.store.mu.Unlock()
+				a.answerInfo(from, g)
+				return
+			}
+		}
+		if !good {
 			text := "このグループに入るにはパスワードが必要です"
 			if w.Pw != "" {
 				a.pwLimited(from, true)
@@ -133,9 +166,9 @@ func (a *App) inviteHandlers(mux *http.ServeMux) {
 		}
 		a.store.mu.Lock()
 		g, ok := a.store.Groups[req.ID]
-		if !ok || g.Left || a.store.locked || g.Owner != a.addr {
+		if !ok || g.Left || a.store.locked || !canManage(g, a.addr) {
 			a.store.mu.Unlock()
-			http.Error(w, "招待リンクを作れるのはホストだけです", 403)
+			http.Error(w, "招待リンクを作れるのはホストと副管理者だけです", 403)
 			return
 		}
 		if g.Tok == "" || req.Reset {
@@ -181,9 +214,11 @@ func (a *App) inviteHandlers(mux *http.ServeMux) {
 		a.joins[gid] = host
 		nick := a.store.Nick
 		a.store.mu.Unlock()
-		jw := wire{T: "gj", G: gid, Tok: tok, Nick: nick, Pw: req.Pw}
+		jw := wire{T: "gj", G: gid, Tok: tok, Nick: nick, Pw: req.Pw, PN: joinPow(a.addr, gid, tok)}
 		go func() {
-			for i := 0; i < 4; i++ {
+			a.hello(host) // the first packets to a new peer often go nowhere while its route is looked up
+			for _, d := range []time.Duration{1, 2, 2, 3, 4, 5, 6} {
+				time.Sleep(d * time.Second)
 				a.store.mu.Lock()
 				_, waiting := a.joins[gid]
 				a.store.mu.Unlock()
@@ -191,7 +226,6 @@ func (a *App) inviteHandlers(mux *http.ServeMux) {
 					return
 				}
 				a.sendWire(host, jw)
-				time.Sleep(time.Duration(2+i*2) * time.Second)
 			}
 		}()
 		json.NewEncoder(w).Encode(map[string]any{"addr": gKey(gid)})

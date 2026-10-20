@@ -20,23 +20,26 @@ import org.json.JSONObject;
 public class YggVpn extends VpnService {
     static final String STOP = "bot.h6e.yggchat.VPN_STOP";
     private static volatile boolean running;
+    private static volatile int gen; // a loop runs only while its generation is current
     private static Thread loop;
     private ParcelFileDescriptor tun;
     private String tunAddr = "";
 
     @Override public int onStartCommand(Intent intent, int flags, int startId) {
         if (intent != null && STOP.equals(intent.getAction())) { shutdown(); stopSelf(); return START_NOT_STICKY; }
-        running = true;
-        if (loop == null || !loop.isAlive()) {
-            loop = new Thread(new Runnable() { public void run() { work(); } });
+        // A loop still winding down after a quick off->on must not keep the VPN off.
+        if (!running || loop == null || !loop.isAlive()) {
+            running = true;
+            final int my = ++gen;
+            loop = new Thread(new Runnable() { public void run() { work(my); } });
             loop.setDaemon(true);
             loop.start();
         }
         return START_STICKY;
     }
 
-    private void work() {
-        while (running) {
+    private void work(int my) {
+        while (running && my == gen) {
             try {
                 HttpURLConnection c = YggService.api(this, "/api/vpn");
                 c.setConnectTimeout(2000); c.setReadTimeout(3000);
@@ -45,10 +48,13 @@ public class YggVpn extends VpnService {
                 JSONObject st = new JSONObject(sc.hasNext() ? sc.next() : "{}");
                 c.disconnect();
                 String addr = st.optString("addr");
-                if (st.optBoolean("on") && !addr.isEmpty()) {
-                    if (tun == null || !addr.equals(tunAddr)) establish(addr, st.optInt("mtu", 1280));
-                    if (tun != null && !st.optBoolean("tun")) handOver();
-                } else if (tun != null) { closeTun(); }
+                synchronized (this) {
+                    if (my != gen) return;
+                    if (st.optBoolean("on") && !addr.isEmpty()) {
+                        if (tun == null || !addr.equals(tunAddr)) establish(addr, st.optInt("mtu", 1280));
+                        if (tun != null && !st.optBoolean("tun")) handOver();
+                    } else if (tun != null) { closeTun(); }
+                }
             } catch (Exception e) { }
             try { Thread.sleep(3000); } catch (InterruptedException e) { return; }
         }
@@ -76,13 +82,14 @@ public class YggVpn extends VpnService {
         } finally { s.close(); }
     }
 
-    private void closeTun() {
+    private synchronized void closeTun() {
         if (tun != null) { try { tun.close(); } catch (Exception e) { } }
         tun = null; tunAddr = "";
     }
 
     private void shutdown() {
         running = false;
+        gen++;
         if (loop != null) loop.interrupt();
         closeTun();
     }

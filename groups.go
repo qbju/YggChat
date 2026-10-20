@@ -34,7 +34,6 @@ import (
 	"time"
 )
 
-const maxGroupMembers = 20
 
 type Group struct {
 	ID      string   `json:"id"`
@@ -46,7 +45,11 @@ type Group struct {
 	Tok     string   `json:"tok,omitempty"`   // invite-link token (host only, v0.17)
 	Set     GroupSet `json:"set,omitempty"`   // host's settings (v0.18)
 	PwH     string   `json:"pwh,omitempty"`   // join password hash (host only, v0.18)
-	Pend    []Pend   `json:"pend,omitempty"`  // join requests waiting for approval (host only)
+	Pend    []Pend   `json:"pend,omitempty"`  // join requests waiting for approval (host/admin)
+	Admins  []string `json:"admins,omitempty"` // co-admins (v0.19, set by the host)
+	Stub    bool     `json:"stub,omitempty"`   // made from a message before any group info arrived
+	V       int      `json:"v,omitempty"`      // member-list version (v0.19)
+	SV      int      `json:"sv,omitempty"`     // version of the host's name/settings/admins (v0.19)
 }
 
 // GroupSet are the host's group settings (v0.18), sent in gi as "gs".
@@ -58,6 +61,8 @@ type GroupSet struct {
 	Hist    bool `json:"hi,omitempty"`  // new members get the recent history from the host
 	TTL     int  `json:"ttl,omitempty"` // disappearing messages (seconds)
 	Pass    bool `json:"pw,omitempty"`  // the invite link needs a password
+	Max     int  `json:"mx,omitempty"`  // member limit 24..1024 (v0.19; 0 = 24)
+	PoW     int  `json:"pb,omitempty"`  // proof-of-work bits per post (v0.19; 0 = 3, -1 = none)
 }
 
 type Pend struct {
@@ -96,8 +101,8 @@ func cleanMembers(in []string, must string) []string {
 			out = append(out, a)
 		}
 	}
-	if len(out) > maxGroupMembers {
-		out = out[:maxGroupMembers]
+	if len(out) > maxGroupCap {
+		out = out[:maxGroupCap]
 	}
 	sort.Strings(out)
 	return out
@@ -121,7 +126,7 @@ func hasMember(g Group, addr string) bool {
 
 // groupView is how a group appears in the UI's contact list.
 func groupView(g Group) map[string]any {
-	v := map[string]any{"addr": gKey(g.ID), "nick": g.Name, "avatar": "👥", "group": true, "members": g.Members, "req": g.Req, "left": g.Left, "owner": g.Owner, "set": g.Set}
+	v := map[string]any{"addr": gKey(g.ID), "nick": g.Name, "avatar": "👥", "group": true, "members": g.Members, "req": g.Req, "left": g.Left, "owner": g.Owner, "set": g.Set, "admins": g.Admins, "max": groupMax(g)}
 	if g.Set.TTL > 0 {
 		v["ttl"] = g.Set.TTL
 	}
@@ -159,28 +164,12 @@ func (a *App) groupSys(g Group, text string) {
 }
 
 func (a *App) infoWire(g Group) wire {
-	w := wire{T: "gi", G: g.ID, GN: g.Name, GM: g.Members, GO: g.Owner}
+	w := wire{T: "gi", G: g.ID, GN: g.Name, GM: g.Members, GO: g.Owner, GV: g.V, GSV: g.SV, GAD: g.Admins}
 	if g.Owner != "" {
 		set := g.Set
 		w.GS = &set
 	}
 	return w
-}
-
-// sendInfo pushes the group info to every other member (datagrams, repeated).
-func (a *App) sendInfo(g Group, extra ...string) {
-	w := a.infoWire(g)
-	to := append(append([]string{}, g.Members...), extra...)
-	go func() {
-		for i := 0; i < 3; i++ {
-			for _, m := range to {
-				if m != a.addr {
-					a.sendWire(m, w)
-				}
-			}
-			time.Sleep(2 * time.Second)
-		}
-	}()
 }
 
 func (a *App) createGroup(name string, members []string) (Group, error) {
@@ -194,7 +183,15 @@ func (a *App) createGroup(name string, members []string) (Group, error) {
 	}
 	b := make([]byte, 8)
 	_, _ = rand.Read(b)
-	g := Group{ID: hex.EncodeToString(b), Name: name, Members: ms, Owner: a.addr}
+	g := Group{ID: hex.EncodeToString(b), Name: name, Members: ms, Owner: a.addr, V: 1}
+	for _, c := range groupMaxChoices {
+		if c >= len(ms) {
+			if c > defaultGroupMax {
+				g.Set.Max = c
+			}
+			break
+		}
+	}
 	a.store.mu.Lock()
 	if a.store.locked {
 		a.store.mu.Unlock()
@@ -205,21 +202,21 @@ func (a *App) createGroup(name string, members []string) (Group, error) {
 	a.store.mu.Unlock()
 	a.broadcast("contact", groupView(g))
 	a.groupSys(g, "グループ「"+g.Name+"」を作りました")
-	a.sendInfo(g)
+	a.sendPackets(g.Members, a.infoPackets(g))
 	return g, nil
 }
 
 // sendGroup stores the visible message and one hidden copy per member, then delivers them.
 func (a *App) sendGroup(gid, text, img string) (Message, error) {
-	if (text == "" && img == "") || len(text) > 4000 {
+	if (text == "" && img == "") || len(text) > maxSendText {
 		return Message{}, fmt.Errorf("message empty or too long")
 	}
 	if img != "" {
 		if _, _, err := parseImg(img); err != nil {
 			return Message{}, err
 		}
-		if len(text) > capMax {
-			return Message{}, fmt.Errorf("caption too long (max %d bytes, about 260 Japanese characters)", capMax)
+		if escLen(text) > capMax {
+			return Message{}, fmt.Errorf("写真の説明が長すぎます（日本語でおよそ260文字まで）")
 		}
 	}
 	a.store.mu.Lock()
@@ -259,10 +256,32 @@ func (a *App) sendGroup(gid, text, img string) (Message, error) {
 		vis.Status = "sent"
 	}
 	a.store.Messages = append(a.store.Messages, copies...)
+	need := groupPow(g)
 	a.store.mu.Unlock()
+	if need > 0 && len(copies) > 0 {
+		// One nonce for the post, shared by every member copy.
+		sha := ""
+		if img != "" {
+			if _, raw, err := parseImg(img); err == nil {
+				s := sha256.Sum256(raw)
+				sha = hex.EncodeToString(s[:])
+			}
+		}
+		pn := powSolve(a.addr+">g:"+gid, id, vis.TS, text, sha, need)
+		a.store.mu.Lock()
+		for i := len(a.store.Messages) - 1; i >= 0; i-- {
+			if x := &a.store.Messages[i]; x.Hid && x.Of == id && x.Grp == gid {
+				x.Pn = pn
+			}
+		}
+		a.store.mu.Unlock()
+		for i := range copies {
+			copies[i].Pn = pn
+		}
+	}
 	a.addMessage(vis)
 	for _, c := range copies {
-		go a.deliver(c)
+		go a.deliverCopy(c)
 	}
 	return vis, nil
 }
@@ -302,7 +321,7 @@ func (a *App) groupStatus(gid, id string) {
 		}
 	}
 	if changed {
-		a.store.save()
+		a.store.saveSoon()
 	}
 	a.store.mu.Unlock()
 	if changed {
@@ -327,10 +346,14 @@ func (a *App) retryGroup(gid, id string) (Message, error) {
 	if vis == nil {
 		return Message{}, fmt.Errorf("no such message")
 	}
+	if len(copies) == 0 {
+		a.groupStatus(gid, id)
+		return *vis, nil
+	}
 	for _, c := range copies {
 		c.Status = "sending"
 		a.setStatus(c.Peer, c.ID, "sending")
-		go a.deliver(c)
+		go a.deliverCopy(c)
 	}
 	vis.Status = "sending"
 	return *vis, nil
@@ -338,7 +361,7 @@ func (a *App) retryGroup(gid, id string) (Message, error) {
 
 // onGroupMsg stores an incoming group message. Returns true when it should be acked.
 func (a *App) onGroupMsg(from string, w wire, img string) bool {
-	if !validGID(w.G) || (w.Text == "" && img == "") || len(w.Text) > 8000 || !msgIDRe.MatchString(w.ID) {
+	if !validGID(w.G) || (w.Text == "" && img == "") || len(w.Text) > maxRecvText || !msgIDRe.MatchString(w.ID) {
 		return false
 	}
 	a.store.mu.Lock()
@@ -351,12 +374,12 @@ func (a *App) onGroupMsg(from string, w wire, img string) bool {
 	if !known {
 		// First we hear of it: keep it as an invitation until we know more.
 		c, ok := a.store.Contacts[from]
-		g = Group{ID: w.G, Name: "グループ", Members: cleanMembers([]string{from}, a.addr), Req: !(ok && c.Shared && !c.Req)}
+		g = Group{ID: w.G, Name: "グループ", Members: cleanMembers([]string{from}, a.addr), Req: !(ok && c.Shared && !c.Req), Stub: true}
 		a.store.Groups[w.G] = g
 		ask = true
 	} else if g.Left || !hasMember(g, from) {
 		a.store.mu.Unlock()
-		a.sendWire(from, wire{T: "gq", G: w.G})
+		a.askInfo(from, w.G)
 		return false
 	} else if w.GH != "" && w.GH != groupHash(g.Name, g.Members) {
 		ask = true
@@ -385,10 +408,13 @@ func (a *App) onGroupMsg(from string, w wire, img string) bool {
 		a.broadcast("contact", groupView(g))
 	}
 	if ask {
-		a.sendWire(from, wire{T: "gq", G: w.G})
+		a.askInfo(from, w.G)
 	}
 	if dup || drop {
 		return true
+	}
+	if !a.powCheck(from, w) {
+		return false
 	}
 	m := Message{ID: w.ID, Peer: key, From: from, Nick: cleanNick(w.Nick), Text: w.Text, TS: w.TS, Img: img, TTL: ttl}
 	if ttl > 0 {
@@ -456,10 +482,26 @@ func (a *App) onGroupCtl(from string, w wire) {
 	case "ghs":
 		a.onHistory(from, w, g, known)
 		return
+	case "gd":
+		a.onDelta(from, w, g, known)
+		return
+	case "gk":
+		a.onKey(from, w, g, known)
+		return
+	case "gkq":
+		a.store.mu.Unlock()
+		if known && !g.Left && g.Owner == a.addr && isAdmin(g, from) {
+			a.sendKey(g, []string{from})
+		}
+		return
+	case "gp":
+		a.store.mu.Unlock()
+		a.onInfoPart(from, w)
+		return
 	case "gq":
 		a.store.mu.Unlock()
 		if known && !g.Left && hasMember(g, from) && hasMember(g, a.addr) {
-			a.sendWire(from, a.infoWire(g))
+			a.answerInfo(from, g)
 		}
 		return
 	case "gl":
@@ -474,6 +516,7 @@ func (a *App) onGroupCtl(from string, w wire) {
 			}
 		}
 		g.Members = ms
+		g.Admins = cleanAdmins(g.Admins, g)
 		a.store.Groups[w.G] = g
 		a.store.save()
 		a.store.mu.Unlock()
@@ -481,29 +524,55 @@ func (a *App) onGroupCtl(from string, w wire) {
 		a.groupSys(g, a.nameOf(from)+" が退出しました")
 		return
 	case "gi":
+		if len(w.GM) == 0 && w.GC > 0 {
+			a.store.mu.Unlock()
+			a.onInfoHeader(from, w) // split list (v0.19)
+			return
+		}
 		ms := cleanMembers(w.GM, from)
+		stubReq := g.Req
+		if known && g.Stub && !g.Left {
+			known = false // a placeholder from a message: take this info as the first one
+		}
 		if len(w.GM) == 0 || (known && !g.Left && !hasMember(g, from)) {
 			a.store.mu.Unlock()
 			return
-		}
-		if known && g.Left {
-			a.store.mu.Unlock()
-			return
-		}
-		if known && a.joins[w.G] == from && g.Owner == from {
-			delete(a.joins, w.G)
 		}
 		in := false
 		for _, m := range ms {
 			in = in || m == a.addr
 		}
-		name := cleanNick(w.GN)
-		if name == "" {
-			name = "グループ"
+		// The host's settings/name/admins carry their own version (gsv): a late
+		// repeat of older info (it is sent 3 times) must not undo a change.
+		staleSet := known && g.Owner != "" && w.GSV < g.SV
+		rejoined := false
+		if known && g.Left {
+			// Only the host (or an admin) adding us back with a newer list brings us back in.
+			if !in || !canManage(g, from) || (w.GV != 0 && w.GV <= g.V) {
+				a.store.mu.Unlock()
+				return
+			}
+			g.Left, g.Req, rejoined = false, true, true
 		}
-		if known && g.Owner != "" && from != g.Owner {
-			// Not the host: only the host changes who is in the group.
-			ms, in = g.Members, true
+		name := cleanNickOr(w.GN)
+		byHost := known && g.Owner != "" && from == g.Owner
+		if known && g.Owner != "" {
+			switch {
+			case byHost && (w.GV == 0 || w.GV >= g.V):
+				// the host's list (a pre-v0.19 host sends no version)
+			case !byHost && isAdmin(g, from) && w.GV > g.V:
+				// an admin's newer list; the host and admins stay in it
+				for _, x := range append([]string{g.Owner}, g.Admins...) {
+					if hasMember(g, x) && !hasMember(Group{Members: ms}, x) {
+						ms = append(ms, x)
+					}
+				}
+				sort.Strings(ms)
+				in = hasMember(Group{Members: ms}, a.addr)
+			default:
+				// Not the host (or an older list): members stay as they are.
+				ms, in = g.Members, true
+			}
 		}
 		if !known {
 			if !in {
@@ -511,31 +580,72 @@ func (a *App) onGroupCtl(from string, w wire) {
 				return
 			}
 			c, ok := a.store.Contacts[from]
+			wasStub := g.Stub
 			g = Group{ID: w.G, Req: !(ok && c.Shared && !c.Req)}
+			if wasStub {
+				g.Req = stubReq
+			}
 			if o, ok := yggAddr(w.GO); ok && hasMember(Group{Members: ms}, o) {
 				g.Owner = o
+				g.Admins = cleanAdmins(w.GAD, Group{Owner: o, Members: ms})
 			}
-			if a.joins[w.G] == from && g.Owner == from {
-				g.Req = false // we asked to join through the host's link
-				delete(a.joins, w.G)
+			if a.joins[w.G] == from && canManage(g, from) {
+				g.Req = false // we asked to join through this host's/admin's link
 			}
 		}
+		if a.joins[w.G] == from && g.Owner != "" && canManage(g, from) && in {
+			delete(a.joins, w.G)
+		}
 		old := g
-		g.Name, g.Members = name, ms
+		g.Members = ms
+		if !staleSet {
+			g.Name = name
+		}
+		if w.GV > g.V && (byHost || isAdmin(old, from) || !known) {
+			g.V = w.GV
+		}
 		if !in {
 			g.Left = true
 		}
-		setChanged := false
-		if w.GS != nil && g.Owner != "" && from == g.Owner {
-			ns := cleanSet(*w.GS)
-			setChanged = known && ns != g.Set
-			g.Set = ns
+		setChanged, handed := false, ""
+		if g.Owner != "" && from == g.Owner && !staleSet {
+			if w.GSV > g.SV {
+				g.SV = w.GSV
+			}
+			if o, ok := yggAddr(w.GO); ok && o != g.Owner && hasMember(g, o) {
+				g.Owner = o // the host handed the group over
+				handed = o
+			}
+			if w.GS != nil {
+				ns := cleanSet(*w.GS)
+				setChanged = known && ns != g.Set
+				g.Set = ns
+			}
+			g.Admins = cleanAdmins(w.GAD, g)
+		} else {
+			g.Admins = cleanAdmins(g.Admins, g)
 		}
+		lostAdmin := isAdmin(old, a.addr) && !isAdmin(g, a.addr)
+		if (lostAdmin || !isAdmin(g, a.addr)) && g.Owner != a.addr {
+			g.Tok, g.Pend = "", nil
+			if g.Owner != a.addr {
+				g.PwH = ""
+			}
+		}
+		for _, m := range g.Members {
+			g.Pend = dropPend(g.Pend, m)
+		}
+		needKey := isAdmin(g, a.addr) && g.Set.Pass && g.PwH == ""
 		a.store.Groups[w.G] = g
 		a.store.save()
 		a.store.mu.Unlock()
 		a.broadcast("contact", groupView(g))
+		if needKey {
+			a.sendWire(g.Owner, wire{T: "gkq", G: g.ID})
+		}
 		switch {
+		case rejoined:
+			a.groupSys(g, a.nameOf(from)+" があなたをグループに戻しました")
 		case !in:
 			a.groupSys(g, "グループから外されました")
 		case known && old.Name != g.Name && old.Name != "グループ":
@@ -546,17 +656,23 @@ func (a *App) onGroupCtl(from string, w wire) {
 				a.groupSys(g, a.nameOf(from)+" が"+t)
 			}
 		}
+		if handed != "" {
+			a.groupSys(g, a.nameOf(from)+" が "+a.nameOf(handed)+" をホストにしました")
+		}
 		if known && in {
+			var added, removed []string
 			for _, m := range g.Members {
 				if !hasMember(old, m) && m != a.addr {
-					a.groupSys(g, a.nameOf(from)+" が "+a.nameOf(m)+" を追加しました")
+					added = append(added, m)
 				}
 			}
 			for _, m := range old.Members {
 				if !hasMember(g, m) && m != from {
-					a.groupSys(g, a.nameOf(from)+" が "+a.nameOf(m)+" を外しました")
+					removed = append(removed, m)
 				}
 			}
+			a.memberSys(g, from, added, removed)
+			a.adminSys(g, from, old.Admins, g.Admins)
 		}
 		return
 	}
@@ -572,7 +688,10 @@ func (a *App) nameOf(addr string) string {
 	if c, ok := a.store.Contacts[addr]; ok && c.Nick != "" {
 		return c.Nick
 	}
-	return addr[:9] + "…"
+	if len(addr) > 9 {
+		return addr[:9] + "…"
+	}
+	return addr
 }
 
 func (a *App) groupHandlers(mux *http.ServeMux) {
@@ -598,7 +717,8 @@ func (a *App) groupHandlers(mux *http.ServeMux) {
 			Add    []string
 			Remove []string
 			Set    *GroupSet
-			Pass   *string // join password ("" removes it)
+			Pass   *string   // join password ("" removes it)
+			Admins *[]string // co-admins (host only, v0.19)
 		}
 		if !readJSON(w, r, &req) {
 			return
@@ -610,45 +730,69 @@ func (a *App) groupHandlers(mux *http.ServeMux) {
 			http.Error(w, "no such group", 400)
 			return
 		}
+		fail := func(code int, msg string) {
+			a.store.mu.Unlock()
+			http.Error(w, msg, code)
+		}
 		old := g
+		host := g.Owner != "" && g.Owner == a.addr
 		if req.Name != nil {
 			if n := cleanNick(*req.Name); n != "" {
 				g.Name = n
 			}
 		}
-		if (len(req.Add) > 0 || len(req.Remove) > 0) && g.Owner != "" && g.Owner != a.addr {
-			a.store.mu.Unlock()
-			http.Error(w, "メンバーを追加・削除できるのはホストだけです", 403)
+		if (len(req.Add) > 0 || len(req.Remove) > 0) && g.Owner != "" && !canManage(g, a.addr) {
+			fail(403, "メンバーを追加・削除できるのはホストと副管理者だけです")
 			return
 		}
-		if (req.Set != nil || req.Pass != nil) && (g.Owner == "" || g.Owner != a.addr) {
-			a.store.mu.Unlock()
-			http.Error(w, "設定を変えられるのはホストだけです", 403)
+		if (req.Set != nil || req.Pass != nil || req.Admins != nil) && !host {
+			fail(403, "設定を変えられるのはホストだけです")
+			return
+		}
+		if len(req.Remove) > 0 && g.Owner == "" {
+			fail(400, "このグループにはホストがいないので外せません（v0.16.0より前に作ったグループ）")
 			return
 		}
 		if req.Set != nil {
-			g.Set = cleanSet(*req.Set)
+			ns := cleanSet(*req.Set)
+			if ns.Max != 0 && !validGroupMax(ns.Max) {
+				fail(400, "人数の上限が不正です")
+				return
+			}
+			if ns.Max == defaultGroupMax {
+				ns.Max = 0
+			}
+			if groupMax(Group{Set: ns}) < len(g.Members) {
+				fail(400, fmt.Sprintf("今のメンバー（%d人）より少ない上限にはできません", len(g.Members)))
+				return
+			}
+			g.Set = ns
 			g.Set.Pass = g.PwH != ""
 		}
+		pwChanged := false
 		if req.Pass != nil {
 			if p := *req.Pass; p == "" {
 				g.PwH = ""
 			} else if n := len([]rune(p)); n < 4 || n > 64 {
-				a.store.mu.Unlock()
-				http.Error(w, "パスワードは4〜64文字にしてください", 400)
+				fail(400, "パスワードは4〜64文字にしてください")
 				return
 			} else {
 				g.PwH = hashGroupPass(p)
 			}
 			g.Set.Pass = g.PwH != ""
+			pwChanged = true
 		}
-		if len(req.Remove) > 0 && g.Owner == "" {
-			a.store.mu.Unlock()
-			http.Error(w, "このグループにはホストがいないので外せません（v0.16.0より前に作ったグループ）", 400)
+		var added, removed []string
+		for _, x := range req.Add {
+			if m, ok := yggAddr(x); ok && !hasMember(g, m) && !hasMember(Group{Members: added}, m) {
+				added = append(added, m)
+			}
+		}
+		if len(g.Members)+len(added) > groupMax(g) {
+			fail(400, fmt.Sprintf("このグループの上限は%d人です（グループ設定で変えられます）", groupMax(g)))
 			return
 		}
-		g.Members = cleanMembers(append(append([]string{}, g.Members...), req.Add...), a.addr)
-		var removed []string
+		g.Members = cleanMembers(append(append([]string{}, g.Members...), added...), a.addr)
 		if len(req.Remove) > 0 {
 			kept := []string{}
 			for _, m := range g.Members {
@@ -658,6 +802,11 @@ func (a *App) groupHandlers(mux *http.ServeMux) {
 						drop = true
 					}
 				}
+				if drop && !host && (m == g.Owner || isAdmin(g, m)) {
+					a.store.mu.Unlock()
+					http.Error(w, "ホストと副管理者は外せません", 403)
+					return
+				}
 				if drop {
 					removed = append(removed, m)
 				} else {
@@ -665,6 +814,24 @@ func (a *App) groupHandlers(mux *http.ServeMux) {
 				}
 			}
 			g.Members = kept
+		}
+		if req.Admins != nil {
+			ad := cleanAdmins(*req.Admins, g)
+			if len(*req.Admins) > maxAdmins {
+				fail(400, fmt.Sprintf("副管理者は%d人までです", maxAdmins))
+				return
+			}
+			g.Admins = ad
+		}
+		g.Admins = cleanAdmins(g.Admins, g)
+		if len(added) > 0 || len(removed) > 0 {
+			g.V++
+		}
+		if host && (req.Set != nil || req.Pass != nil || req.Admins != nil || g.Name != old.Name) {
+			g.SV++ // a late repeat of the old info can't undo this
+		}
+		for _, m := range added {
+			g.Pend = dropPend(g.Pend, m)
 		}
 		g.Req = false
 		a.store.Groups[g.ID] = g
@@ -680,15 +847,25 @@ func (a *App) groupHandlers(mux *http.ServeMux) {
 		if req.Pass != nil && *req.Pass != "" && old.PwH != "" {
 			a.groupSys(g, "あなたが参加パスワードを変更しました")
 		}
-		for _, m := range g.Members {
-			if !hasMember(old, m) {
-				a.groupSys(g, a.nameOf(m)+" を追加しました")
+		a.memberSys(g, a.addr, added, removed)
+		a.adminSys(g, a.addr, old.Admins, g.Admins)
+		if len(added) > 0 || len(removed) > 0 {
+			a.sendMembers(g, added, removed) // the removed hear it too, so they know they're out
+		}
+		if g.Name != old.Name || req.Set != nil || pwChanged || req.Admins != nil {
+			a.sendInfo(g)
+		}
+		if host {
+			var newAd []string
+			for _, x := range g.Admins {
+				if !isAdmin(old, x) || pwChanged {
+					newAd = append(newAd, x)
+				}
+			}
+			if len(newAd) > 0 {
+				a.sendKey(g, newAd)
 			}
 		}
-		for _, m := range removed {
-			a.groupSys(g, a.nameOf(m)+" を外しました")
-		}
-		a.sendInfo(g, removed...) // the removed hear it too, so they know they're out
 		json.NewEncoder(w).Encode(groupView(g))
 	})
 	mux.HandleFunc("/api/group/leave", func(w http.ResponseWriter, r *http.Request) {
@@ -704,14 +881,30 @@ func (a *App) groupHandlers(mux *http.ServeMux) {
 			return
 		}
 		was := g.Left
+		// A leaving host hands the group to the first co-admin, so it can still be run.
+		heir := ""
+		if !was && g.Owner == a.addr && len(g.Admins) > 0 {
+			heir = g.Admins[0]
+			g.Owner = heir
+			g.Admins = cleanAdmins(g.Admins, g)
+			g.V++
+			g.SV++
+		}
 		g.Left, g.Req = true, false
 		a.store.Groups[g.ID] = g
 		a.store.save()
 		a.store.mu.Unlock()
 		a.broadcast("contact", groupView(g))
+		if heir != "" {
+			a.sendInfo(g) // carries the new host ("go") from us, the old host
+			a.groupSys(g, a.nameOf(heir)+" をホストにしました")
+		}
 		if !was {
 			lw := wire{T: "gl", G: g.ID}
 			go func() {
+				if heir != "" {
+					time.Sleep(5 * time.Second) // let the hand-over land first
+				}
 				for i := 0; i < 3; i++ {
 					for _, m := range g.Members {
 						if m != a.addr {
@@ -741,6 +934,13 @@ func (a *App) deleteGroupLocked(gid string) {
 
 // msgWire is the "msg" datagram for m (with the group fields for a group copy).
 func (a *App) msgWire(m Message) wire {
+	w := a.msgWireBare(m)
+	a.withPow(m, &w, "")
+	return w
+}
+
+// msgWireBare is msgWire without the proof of work.
+func (a *App) msgWireBare(m Message) wire {
 	w := wire{T: "msg", ID: m.ID, Nick: m.Nick, Text: m.Text, TS: m.TS, TTL: m.TTL}
 	if m.Grp != "" {
 		w.G = m.Grp

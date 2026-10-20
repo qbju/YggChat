@@ -58,6 +58,18 @@ func (a *App) pendingCtl(peer string) []ctlItem {
 }
 
 func (a *App) flushCtl(peer string) {
+	// One sender per peer: two would steal each other's acks.
+	a.flMu.Lock()
+	if a.ctlBusy == nil {
+		a.ctlBusy = map[string]bool{}
+	}
+	if a.ctlBusy[peer] {
+		a.flMu.Unlock()
+		return
+	}
+	a.ctlBusy[peer] = true
+	a.flMu.Unlock()
+	defer func() { a.flMu.Lock(); delete(a.ctlBusy, peer); a.flMu.Unlock() }()
 	for _, c := range a.pendingCtl(peer) {
 		if !a.sendCtl(c, 6) {
 			return
@@ -66,11 +78,8 @@ func (a *App) flushCtl(peer string) {
 }
 
 func (a *App) sendCtl(c ctlItem, tries int) bool {
-	ch := make(chan struct{})
-	a.ackMu.Lock()
-	a.acks[c.W.ID] = ch
-	a.ackMu.Unlock()
-	defer func() { a.ackMu.Lock(); delete(a.acks, c.W.ID); a.ackMu.Unlock() }()
+	ch := a.waitAck(c.Peer, c.W.ID)
+	defer a.doneAck(c.W.ID, ch)
 	for i := 0; i < tries; i++ {
 		a.sendWire(c.Peer, c.W)
 		select {
@@ -154,6 +163,10 @@ func (a *App) msgEditHandlers(mux *http.ServeMux) {
 		ip := net.ParseIP(req.Peer)
 		if ip == nil || strings.TrimSpace(req.Text) == "" || len(req.Text) > maxText {
 			http.Error(w, "bad request", 400)
+			return
+		}
+		if wireLen(wire{T: "edit", ID: ctlID(), Ref: req.ID, Text: req.Text, TS: time.Now().Unix()}) > dgramMax {
+			http.Error(w, "長すぎて編集できません（日本語でおよそ350文字まで）。送り直してね", 400)
 			return
 		}
 		peer := ip.String()

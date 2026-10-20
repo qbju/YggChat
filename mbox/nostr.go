@@ -63,7 +63,7 @@ type Event struct {
 }
 
 // NostrTag is the pre-v0.13 static recipient tag. Only used when the user turns
-// on "旧式の置き配も通す" (send a second legacy box, fetch this tag); remove in v0.20.
+// on "旧式の置き配も通す" (send a second legacy box, fetch this tag); remove in v0.24.
 func NostrTag(pk []byte) string {
 	h := sha256.Sum256([]byte("yggchat-nostr:" + hex.EncodeToString(pk)))
 	return hex.EncodeToString(h[:])
@@ -163,7 +163,7 @@ func NostrWrap(to ed25519.PublicKey, priv ed25519.PrivateKey, wb []byte) (string
 }
 
 // NostrWrapLegacy is NostrWrap with the pre-v0.13 static tag and no
-// back-dating, so v0.12 receivers find it. Opt-in; remove in v0.20.
+// back-dating, so v0.12 receivers find it. Opt-in; remove in v0.24.
 func NostrWrapLegacy(to ed25519.PublicKey, priv ed25519.PrivateKey, wb []byte) (string, error) {
 	return nostrWrap(to, priv, wb, true)
 }

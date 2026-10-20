@@ -29,6 +29,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -44,6 +45,12 @@ var groupTTLs = map[int]bool{0: true, 300: true, 3600: true, 86400: true, 604800
 func cleanSet(s GroupSet) GroupSet {
 	if !groupTTLs[s.TTL] {
 		s.TTL = 0
+	}
+	if !groupPowChoices[s.PoW] {
+		s.PoW = 0
+	}
+	if !validGroupMax(s.Max) || s.Max == defaultGroupMax {
+		s.Max = 0
 	}
 	return s
 }
@@ -91,6 +98,16 @@ func setDiff(a, b GroupSet) []string {
 	if a.Pass != b.Pass {
 		out = append(out, "参加パスワードを"+onOff(b.Pass)+"にしました")
 	}
+	if groupMax(Group{Set: a}) != groupMax(Group{Set: b}) {
+		out = append(out, "人数の上限を"+itoa(groupMax(Group{Set: b}))+"人にしました")
+	}
+	if groupPow(Group{Set: a}) != groupPow(Group{Set: b}) {
+		if n := groupPow(Group{Set: b}); n == 0 {
+			out = append(out, "投稿のPoWをなしにしました")
+		} else {
+			out = append(out, "投稿のPoWを"+itoa(n)+"ビットにしました")
+		}
+	}
 	return out
 }
 
@@ -122,6 +139,23 @@ type pwFail struct {
 	at time.Time
 }
 
+// pwGlobalOK caps password checks at 20 a minute overall (addresses are free to make).
+var pwGlobal struct {
+	sync.Mutex
+	n  int
+	at time.Time
+}
+
+func pwGlobalOK() bool {
+	pwGlobal.Lock()
+	defer pwGlobal.Unlock()
+	if time.Since(pwGlobal.at) > time.Minute {
+		pwGlobal.n, pwGlobal.at = 0, time.Now()
+	}
+	pwGlobal.n++
+	return pwGlobal.n <= 20
+}
+
 func (a *App) pwLimited(from string, failed bool) bool {
 	a.pwMu.Lock()
 	defer a.pwMu.Unlock()
@@ -145,6 +179,7 @@ func (a *App) pwLimited(from string, failed bool) bool {
 func (a *App) admit(g Group, from, nick, how string) {
 	g.Members = cleanMembers(append(append([]string{}, g.Members...), from), a.addr)
 	g.Pend = dropPend(g.Pend, from)
+	g.V++
 	a.store.Groups[g.ID] = g
 	a.store.save()
 	var hist []Message
@@ -157,7 +192,7 @@ func (a *App) admit(g Group, from, nick, how string) {
 		nick = a.nameOf(from)
 	}
 	a.groupSys(g, nick+" が"+how)
-	a.sendInfo(g)
+	a.sendMembers(g, []string{from}, nil)
 	if len(hist) > 0 {
 		go a.sendHistory(from, g.ID, hist)
 	}
@@ -206,16 +241,23 @@ func (a *App) sendHistory(to, gid string, hist []Message) {
 				text = "📷 " + text
 			}
 		}
-		if len(text) > histText {
-			cut := histText
+		w := wire{T: "ghs", G: gid, ID: m.ID, By: m.From, Nick: m.Nick, Text: text, TS: m.TS}
+		if m.Exp > 0 {
+			r := m.Exp - now - 20 // it takes a few seconds to send
+			if r <= 0 {
+				continue
+			}
+			w.TTL = int(r)
+		}
+		// Shorten until the datagram fits (JSON escapes can triple a text).
+		for cut := min(len(text), histText); wireLen(w) > dgramMax && cut > 0; cut -= 60 {
 			for cut > 0 && !utf8Start(text[cut]) {
 				cut--
 			}
-			text = text[:cut] + "…（省略）"
+			w.Text = text[:cut] + "…（省略）"
 		}
-		w := wire{T: "ghs", G: gid, ID: m.ID, By: m.From, Nick: m.Nick, Text: text, TS: m.TS}
-		if m.Exp > 0 {
-			w.TTL = int(m.Exp - now)
+		if wireLen(w) > dgramMax {
+			continue
 		}
 		ws = append(ws, w)
 	}
@@ -233,7 +275,7 @@ func utf8Start(b byte) bool { return b&0xc0 != 0x80 }
 // onHistory stores one history message from the host. Caller holds a.store.mu; released here.
 func (a *App) onHistory(from string, w wire, g Group, known bool) {
 	by, ok := yggAddr(w.By)
-	if !known || g.Left || g.Owner == "" || g.Owner != from || !g.Set.Hist || !ok || w.Text == "" || len(w.Text) > 2000 || !msgIDRe.MatchString(w.ID) || w.TTL < 0 {
+	if !known || g.Left || !canManage(g, from) || !g.Set.Hist || !ok || w.Text == "" || len(w.Text) > 2000 || !msgIDRe.MatchString(w.ID) || w.TTL < 0 {
 		a.store.mu.Unlock()
 		return
 	}
@@ -269,9 +311,9 @@ func (a *App) groupSetHandlers(mux *http.ServeMux) {
 		addr, _ := yggAddr(req.Addr)
 		a.store.mu.Lock()
 		g, ok := a.store.Groups[req.ID]
-		if !ok || g.Left || a.store.locked || g.Owner != a.addr {
+		if !ok || g.Left || a.store.locked || !canManage(g, a.addr) {
 			a.store.mu.Unlock()
-			http.Error(w, "承認できるのはホストだけです", 403)
+			http.Error(w, "承認できるのはホストと副管理者だけです", 403)
 			return
 		}
 		var p *Pend
@@ -296,7 +338,7 @@ func (a *App) groupSetHandlers(mux *http.ServeMux) {
 			json.NewEncoder(w).Encode(groupView(g))
 			return
 		}
-		if len(g.Members) >= maxGroupMembers {
+		if len(g.Members) >= groupMax(g) {
 			a.store.mu.Unlock()
 			http.Error(w, "グループが満員です", 400)
 			return
