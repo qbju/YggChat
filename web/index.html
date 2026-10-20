@@ -2011,6 +2011,7 @@ function openSettings(){
 }
 
 function closeSettings(){
+  saveDomain(); saveSettingsNick();
   $('settings-screen').classList.remove('active');
 }
 
@@ -2036,16 +2037,23 @@ function renderShareQR(){
 
 $('settings-nick').addEventListener('change', saveSettingsNick);
 $('settings-bio').addEventListener('change', saveSettingsNick);
-$('settings-domain').addEventListener('change', async () => {
+// Mobile browsers don't always fire 'change' when the screen is closed with
+// the field still focused, so also save on Enter and when leaving settings.
+let domainBusy = '';
+$('settings-domain').addEventListener('change', saveDomain);
+$('settings-domain').addEventListener('keydown', e => { if(e.key === 'Enter'){ e.preventDefault(); $('settings-domain').blur(); saveDomain(); } });
+async function saveDomain(){
   const d = $('settings-domain').value.trim().toLowerCase().replace(/\.$/, '');
-  if(d === (state.domain || '')) return;
+  if(d === (state.domain || '') || d === domainBusy) return;
+  domainBusy = d;
   if(d) toast(d + ' を確認しています…');
   try{
     await api('/api/profile', {Nick: state.nick || 'anon', Bio: state.bio || '', Avatar: state.avatar || '', Domain: d});
     state.domain = d; $('settings-domain').value = d;
     toast(d ? '✓ ' + d + ' を確認してプロフィールに追加しました' : 'ドメインを外しました');
   }catch(e){ $('settings-domain').value = state.domain || ''; await uiAlert(e.message + '\n\nDNSで ' + (d || 'ドメイン') + ' のAAAAレコードに ' + state.addr + ' を登録してから、もう一度入れてね。'); }
-});
+  finally{ domainBusy = ''; }
+}
 $('settings-avatar-emoji').addEventListener('change', saveSettingsNick);
 $('settings-nick').addEventListener('keydown', (e) => {
   if(e.key === 'Enter'){
@@ -2059,7 +2067,7 @@ async function saveSettingsNick(){
   const av = $('settings-avatar-emoji').value.trim();
   if(v === state.nick && bio === (state.bio||'') && av === (state.avatar||'')) return;
   try{
-    await api('/api/profile', {Nick: v, Bio: bio, Avatar: av, Domain: state.domain || ''});
+    await api('/api/profile', {Nick: v, Bio: bio, Avatar: av});
     state.nick = v; state.bio = bio; state.avatar = av;
     $('settings-avatar').textContent = av || initials(v);
     renderList();
