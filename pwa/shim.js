@@ -482,7 +482,12 @@
     await wasmReady;
     const r = yggStart(outer.key, outer.peers, onPacket);
     if (r.error) throw new Error(r.error);
+    // Write a freshly made key before anything else, so a quick reload right
+    // after creating an ID doesn't throw it away; ask the browser not to evict it.
+    const fresh = r.key !== outer.key;
     addr = r.addr; outer.key = r.key; saveOuter();
+    if (fresh) await saving;
+    try { navigator.storage && navigator.storage.persist && navigator.storage.persist(); } catch {}
     let last = -1;
     setInterval(() => {
       const n = yggPeers();

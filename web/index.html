@@ -1137,6 +1137,7 @@ img.emoji { height:1.2em; width:1.2em; margin:0 .05em 0 .1em; vertical-align:-0.
           <input id="settings-bio" type="text" placeholder="自己紹介（任意・140字）" maxlength="140" style="margin-top:6px;">
           <input id="settings-domain" type="text" placeholder="ドメイン（任意・AAAAに自分のアドレスを登録）" maxlength="253" autocomplete="off" autocapitalize="off" spellcheck="false" style="margin-top:6px;">
           <input id="settings-avatar-emoji" type="text" placeholder="アイコンの絵文字（任意）" maxlength="8" style="margin-top:6px;">
+          <button id="settings-prof-save" style="margin-top:6px; background:var(--accent); color:#111; border:none;">プロフィールを保存</button>
           <div class="row-sub" id="settings-own-addr"></div>
         </div>
         <button id="settings-copy-addr" class="row-action">コピー</button>
@@ -2055,6 +2056,12 @@ async function saveDomain(){
   finally{ domainBusy = ''; }
 }
 $('settings-avatar-emoji').addEventListener('change', saveSettingsNick);
+$('settings-prof-save').addEventListener('click', () => {
+  const v = id => $(id).value.trim();
+  const same = (v('settings-nick') || state.nick) === state.nick && v('settings-bio') === (state.bio || '') && v('settings-avatar-emoji') === (state.avatar || '') && v('settings-domain').toLowerCase().replace(/\.$/, '') === (state.domain || '');
+  if(same){ toast('変更はありません'); return; }
+  saveSettingsNick(); saveDomain();
+});
 $('settings-nick').addEventListener('keydown', (e) => {
   if(e.key === 'Enter'){
     $('settings-nick').blur();
