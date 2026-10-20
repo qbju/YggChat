@@ -56,6 +56,26 @@ class Message:
         return "Message(%r from %r: %r)" % (self.id, self.sender, self.text[:40])
 
 
+class JoinRequest:
+    """Someone opened the group's invite link while approval is on."""
+
+    def __init__(self, bot, group, d):
+        self.bot = bot
+        self.group = group            # "g:<id>"
+        self.addr = d.get("addr", "")
+        self.nick = d.get("nick", "")
+        self.ts = d.get("ts", 0)
+
+    def approve(self):
+        return self.bot.approve(self.group, self.addr, True)
+
+    def reject(self):
+        return self.bot.approve(self.group, self.addr, False)
+
+    def __repr__(self):
+        return "JoinRequest(%r, %r, %r)" % (self.group, self.addr, self.nick)
+
+
 class Bot(Client):
     """A Client with handlers. Handlers run one at a time on the event thread
     (use threaded=True to run each message handler in its own thread).
@@ -76,6 +96,8 @@ class Bot(Client):
         self._cmd = {}
         self._ev = {}
         self._seen = {}
+        self._join = []
+        self._pend = set()
         self._stop = threading.Event()
         self.me = None
 
@@ -94,6 +116,31 @@ class Bot(Client):
                 self._cmd[n.lower()] = fn
             return fn
         return deco
+
+    def on_join_request(self, fn):
+        """@bot.on_join_request — fn(JoinRequest) for each new join request in a
+        group we host or co-admin (needs approval on: group_settings(g, ap=True)).
+        Call req.approve() / req.reject(), or leave it pending for a human."""
+        self._join.append(fn)
+        return fn
+
+    def _check_pending(self, view):
+        if not self._join or not view.get("group"):
+            return
+        g = view.get("addr", "")
+        now = set()
+        for p in view.get("pend") or []:
+            k = (g, p.get("addr"))
+            now.add(k)
+            if k in self._pend:
+                continue
+            self._pend.add(k)
+            r = JoinRequest(self, g, p)
+            self._say("join request", g, r.addr, repr(r.nick))
+            for fn in self._join:
+                self._call(fn, r)
+        # forget answered ones so a later request from the same address is new again
+        self._pend = {k for k in self._pend if k[0] != g or k in now}
 
     def on(self, event_type):
         """@bot.on("status") — raw event handler: fn(data). Types: message,
@@ -137,6 +184,8 @@ class Bot(Client):
         typ, data = ev.get("type"), ev.get("data") or {}
         for fn in self._ev.get(typ, []):
             self._call(fn, data)
+        if typ == "contact":
+            self._check_pending(data)
         if typ == "contact" and self.auto_accept and data.get("req") and not data.get("group"):
             try:
                 self.accept(data["addr"])
@@ -172,6 +221,8 @@ class Bot(Client):
                 for m in st.get("messages") or []:
                     self._seen[(m.get("peer"), m.get("id"))] = time.time()
                 self._say("bot up as", self.me, "(%s)" % st.get("nick", ""))
+                for c in (st.get("contacts") or {}).values():
+                    self._check_pending(c)  # requests that arrived while we were away
                 delay = 1
                 for ev in self.events():
                     if self._stop.is_set():

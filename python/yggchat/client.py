@@ -207,13 +207,64 @@ class Client:
     def create_group(self, name, members):
         return self.request("group/create", {"Name": name, "Members": list(members)})
 
-    def update_group(self, group_id, name=None, add=None):
+    def groups(self):
+        """Our groups: {"g:<id>": view} (view has members, owner, admins, set, pend, max)."""
+        return {k: v for k, v in self.contacts().items() if v.get("group")}
+
+    def group(self, group_id):
+        return self.contacts().get("g:" + _gid(group_id))
+
+    def update_group(self, group_id, name=None, add=None, remove=None, settings=None,
+                     password=None, admins=None):
+        """Changes a group. add/remove need host or co-admin; settings/password/
+        admins need the host. settings is a dict of the host's group settings:
+        {"nf": no photos, "ap": approve link joins, "hi": history for newcomers,
+        "ttl": seconds, "mx": member limit (24..1024), "pb": PoW bits per post
+        (0 = default 3, -1 = none)}; it replaces the old ones."""
         body = {"ID": _gid(group_id)}
         if name:
             body["Name"] = name
         if add:
             body["Add"] = list(add)
+        if remove:
+            body["Remove"] = list(remove)
+        if settings is not None:
+            body["Set"] = settings
+        if password is not None:
+            body["Pass"] = password
+        if admins is not None:
+            body["Admins"] = list(admins)
         return self.request("group/update", body)
+
+    def group_settings(self, group_id, **changes):
+        """Merges changes into the current settings, e.g. group_settings(g, ap=True, hi=True)."""
+        g = self.group(group_id) or {}
+        cur = dict(g.get("set") or {})
+        cur.update(changes)
+        return self.update_group(group_id, settings=cur)
+
+    def remove_members(self, group_id, addrs):
+        return self.update_group(group_id, remove=addrs)
+
+    def invite_link(self, group_id, reset=False):
+        """Returns {"code", "link"} (host or co-admin). reset=True makes a new one."""
+        return self.request("group/invite", {"ID": _gid(group_id), "Reset": bool(reset)})
+
+    def join_group(self, code, password=""):
+        """Joins with an invite link or its code."""
+        if "#j=" in code:
+            code = code.split("#j=", 1)[1]
+        elif code.startswith("yggchat://join/"):
+            code = code[len("yggchat://join/"):]
+        return self.request("group/join", {"Code": code, "Pw": password})
+
+    def pending(self, group_id):
+        """Join requests waiting for approval: [{"addr", "nick", "ts"}]."""
+        return (self.group(group_id) or {}).get("pend") or []
+
+    def approve(self, group_id, addr, ok=True):
+        """Lets a pending join request in (ok=False refuses it)."""
+        return self.request("group/approve", {"ID": _gid(group_id), "Addr": addr, "OK": bool(ok)})
 
     def leave_group(self, group_id):
         return self.request("group/leave", {"ID": _gid(group_id)})

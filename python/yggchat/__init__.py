@@ -22,7 +22,7 @@ stream. Standard library only.
     bot.run()
 """
 from .client import Client, APIError, Locked
-from .bot import Bot, Message, Contact
+from .bot import Bot, Message, Contact, JoinRequest
 
-__all__ = ["Client", "Bot", "Message", "Contact", "APIError", "Locked"]
-__version__ = "0.1.0"
+__all__ = ["Client", "Bot", "Message", "Contact", "JoinRequest", "APIError", "Locked"]
+__version__ = "0.2.0"
