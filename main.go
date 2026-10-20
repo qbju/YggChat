@@ -70,6 +70,8 @@ type Message struct {
 	Grp string `json:"grp,omitempty"` // group id
 	Of  string `json:"of,omitempty"`  // id of the visible group message
 	Hid bool   `json:"hid,omitempty"`
+	// GImg: a hidden group copy whose photo is on the visible message (Of).
+	GImg bool `json:"gimg,omitempty"`
 }
 
 type Contact struct {
@@ -316,6 +318,7 @@ type wire struct {
 	G  string   `json:"g,omitempty"`  // group id
 	GN string   `json:"gn,omitempty"` // group name (gi)
 	GM []string `json:"gm,omitempty"` // members (gi)
+	GO string   `json:"go,omitempty"` // host (gi, v0.16+)
 	GH string   `json:"gh,omitempty"` // hash of name+members (msg)
 }
 
@@ -371,7 +374,7 @@ func (a *App) serveChat() {
 		case "mh", "mc":
 			a.onMoveIn(from, w)
 			continue
-		case "mca", "mok", "mng":
+		case "mha", "mca", "mok", "mng":
 			a.onMoveAck(from, w)
 			continue
 		case "fq", "fr":
@@ -421,7 +424,7 @@ func (a *App) serveChat() {
 // mailbox). Returns true when it should be acked.
 func (a *App) handleMsg(from string, w wire) bool {
 	if w.G != "" {
-		return a.onGroupMsg(from, w)
+		return a.onGroupMsg(from, w, "")
 	}
 	if w.Text == "" {
 		return false
@@ -509,10 +512,7 @@ func (a *App) setStatus(peer, id, status string) {
 // send stores the message as "sending" and delivers it in the background.
 func (a *App) send(to, text, img string) (Message, error) {
 	if isGroupKey(to) {
-		if img != "" {
-			return Message{}, fmt.Errorf("グループではまだ写真を送れません")
-		}
-		return a.sendGroup(strings.TrimPrefix(to, "g:"), text)
+		return a.sendGroup(strings.TrimPrefix(to, "g:"), text, img)
 	}
 	ip := net.ParseIP(to)
 	if ip == nil || len(ip) != 16 || (ip[0]&0xfe) != 0x02 {
@@ -593,6 +593,9 @@ func (a *App) deliverN(m Message, tries int) bool {
 	defer func() { a.flMu.Lock(); delete(a.inflight, m.ID); a.flMu.Unlock() }()
 	if m.Status != "sending" {
 		a.setStatus(m.Peer, m.ID, "sending")
+	}
+	if m.GImg && m.Img == "" {
+		m.Img = a.groupImg(m.Grp, m.Of)
 	}
 	if m.Img != "" {
 		ok := a.deliverImg(m, tries)

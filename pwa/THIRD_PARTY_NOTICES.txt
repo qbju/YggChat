@@ -18,6 +18,7 @@ YggChat would not exist without the following projects. Thank you!
     emoji graphics, CC-BY 4.0.
   * Kazuhiko Arase - qrcode-generator. "QR Code" is a registered trademark
     of DENSO WAVE INCORPORATED.
+  * Cosmo Wolfe - jsQR (QR code scanning).
 
 Notes on specific licenses
 --------------------------
@@ -31,8 +32,8 @@ Notes on specific licenses
   Form is available from the upstream URLs listed below.
 * The LGPLv3 text below refers to the GNU GPLv3, whose full text is in the
   LICENSE file shipped alongside this notice.
-* Apache-2.0 components (gVisor, google/btree) are used unmodified; neither
-  ships a NOTICE file.
+* Apache-2.0 components (gVisor, google/btree, jsQR) are used unmodified
+  (jsQR is only minified); none ships a NOTICE file.
 
 Components included in the YggChat binaries (Android APK, Windows, Linux,
 Termux and the browser/WebAssembly build)
@@ -146,6 +147,10 @@ Termux and the browser/WebAssembly build)
     Copyright 2020 Twitter, Inc and other contributors
     Graphics are unmodified; YggChat only repackages them (zip) to serve
     them locally instead of from a CDN.
+27. jsQR 1.4.0 (jsqr.min.js) by Cosmo Wolfe
+    https://github.com/cozmo/jsQR
+    License: Apache-2.0 (full text: see gvisor.dev/gvisor below)
+    Copyright Cosmo Wolfe. Unmodified; minified with terser.
 
 FULL LICENSE TEXTS
 ==================

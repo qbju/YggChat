@@ -77,6 +77,10 @@ func (a *App) deliverImg(m Message, tries int) bool {
 	sum := sha256.Sum256(raw)
 	n := (len(raw) + imgChunk - 1) / imgChunk
 	hdr := wire{T: "fh", ID: m.ID, Nick: m.Nick, Text: m.Text, TS: m.TS, TTL: m.TTL, Mime: mime, Size: len(raw), N: n, Sha: hex.EncodeToString(sum[:])}
+	if m.Grp != "" {
+		gw := a.msgWire(m)
+		hdr.TTL, hdr.G, hdr.GH = 0, gw.G, gw.GH
+	}
 	fs := a.files()
 	fs.mu.Lock()
 	fs.acks[m.ID] = map[int]bool{}
@@ -140,7 +144,7 @@ func (a *App) onFileHeader(from string, w wire) {
 		(w.Size+imgChunk-1)/imgChunk != w.N || !shaRe.MatchString(w.Sha) || len(w.Text) > capMax || len(w.Nick) > 120 {
 		return
 	}
-	if a.hasMsg(from, w.ID) {
+	if a.hasMsg(from, w.ID) || (w.G != "" && validGID(w.G) && a.hasGroupMsg(w.G, from, w.ID)) {
 		a.sendWire(from, wire{T: "ack", ID: w.ID})
 		return
 	}
@@ -197,7 +201,14 @@ func (a *App) onFileChunk(from string, w wire) {
 	}
 	h := f.hdr
 	h.T = "msg"
-	if a.acceptMsg(from, h, "data:"+h.Mime+";base64,"+base64.StdEncoding.EncodeToString(raw)) {
+	img := "data:" + h.Mime + ";base64," + base64.StdEncoding.EncodeToString(raw)
+	if h.G != "" {
+		if a.onGroupMsg(from, h, img) {
+			a.sendWire(from, wire{T: "ack", ID: w.ID})
+		}
+		return
+	}
+	if a.acceptMsg(from, h, img) {
 		a.sendWire(from, wire{T: "ack", ID: w.ID})
 	}
 }

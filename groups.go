@@ -14,7 +14,11 @@
 //	{"t":"gl","g"}                 the sender left the group
 //
 // Only members may change the info; a member who receives a list without
-// themselves is out. Text only for now (no photos, edits or timers).
+// themselves is out. Since v0.16 the creator is the group's host ("go" in
+// gi): only the host's info changes the member list (others may rename).
+// Groups made before v0.16 have no host and keep the old rule.
+// Photos go to each member as an image (fh/fc) carrying g/gh, like msg.
+// No edits or timers yet.
 package main
 
 import (
@@ -35,9 +39,10 @@ const maxGroupMembers = 20
 type Group struct {
 	ID      string   `json:"id"`
 	Name    string   `json:"name"`
-	Members []string `json:"members"`        // Yggdrasil addresses, including ours
-	Req     bool     `json:"req,omitempty"`  // invitation not accepted yet
-	Left    bool     `json:"left,omitempty"` // we left or were removed
+	Members []string `json:"members"`         // Yggdrasil addresses, including ours
+	Req     bool     `json:"req,omitempty"`   // invitation not accepted yet
+	Left    bool     `json:"left,omitempty"`  // we left or were removed
+	Owner   string   `json:"owner,omitempty"` // host (creator); "" for pre-v0.16 groups
 }
 
 func gKey(id string) string { return "g:" + id }
@@ -95,7 +100,7 @@ func hasMember(g Group, addr string) bool {
 
 // groupView is how a group appears in the UI's contact list.
 func groupView(g Group) map[string]any {
-	return map[string]any{"addr": gKey(g.ID), "nick": g.Name, "avatar": "👥", "group": true, "members": g.Members, "req": g.Req, "left": g.Left}
+	return map[string]any{"addr": gKey(g.ID), "nick": g.Name, "avatar": "👥", "group": true, "members": g.Members, "req": g.Req, "left": g.Left, "owner": g.Owner}
 }
 
 // contactsViewLocked merges groups into the contact map for the UI. Caller holds a.store.mu.
@@ -126,7 +131,7 @@ func (a *App) groupSys(g Group, text string) {
 }
 
 func (a *App) infoWire(g Group) wire {
-	return wire{T: "gi", G: g.ID, GN: g.Name, GM: g.Members}
+	return wire{T: "gi", G: g.ID, GN: g.Name, GM: g.Members, GO: g.Owner}
 }
 
 // sendInfo pushes the group info to every other member (datagrams, repeated).
@@ -156,7 +161,7 @@ func (a *App) createGroup(name string, members []string) (Group, error) {
 	}
 	b := make([]byte, 8)
 	_, _ = rand.Read(b)
-	g := Group{ID: hex.EncodeToString(b), Name: name, Members: ms}
+	g := Group{ID: hex.EncodeToString(b), Name: name, Members: ms, Owner: a.addr}
 	a.store.mu.Lock()
 	if a.store.locked {
 		a.store.mu.Unlock()
@@ -172,9 +177,17 @@ func (a *App) createGroup(name string, members []string) (Group, error) {
 }
 
 // sendGroup stores the visible message and one hidden copy per member, then delivers them.
-func (a *App) sendGroup(gid, text string) (Message, error) {
-	if text == "" || len(text) > 4000 {
+func (a *App) sendGroup(gid, text, img string) (Message, error) {
+	if (text == "" && img == "") || len(text) > 4000 {
 		return Message{}, fmt.Errorf("message empty or too long")
+	}
+	if img != "" {
+		if _, _, err := parseImg(img); err != nil {
+			return Message{}, err
+		}
+		if len(text) > capMax {
+			return Message{}, fmt.Errorf("caption too long (max %d bytes, about 260 Japanese characters)", capMax)
+		}
 	}
 	a.store.mu.Lock()
 	g, ok := a.store.Groups[gid]
@@ -190,13 +203,15 @@ func (a *App) sendGroup(gid, text string) (Message, error) {
 	nick := a.store.Nick
 	now := time.Now()
 	id := fmt.Sprintf("%x", now.UnixNano())
-	vis := Message{ID: id, Peer: gKey(gid), From: a.addr, Nick: nick, Text: text, TS: now.Unix(), Out: true, Status: "sending"}
+	vis := Message{ID: id, Peer: gKey(gid), From: a.addr, Nick: nick, Text: text, TS: now.Unix(), Out: true, Status: "sending", Img: img}
 	var copies []Message
 	for i, mem := range g.Members {
 		if mem == a.addr {
 			continue
 		}
-		copies = append(copies, Message{ID: fmt.Sprintf("%sg%d", id, i), Peer: mem, From: a.addr, Nick: nick, Text: text, TS: vis.TS, Out: true, Status: "sending", Grp: gid, Of: id, Hid: true})
+		// The photo itself stays on the visible message only (GImg), so a
+		// group of 20 doesn't store it 20 times.
+		copies = append(copies, Message{ID: fmt.Sprintf("%sg%d", id, i), Peer: mem, From: a.addr, Nick: nick, Text: text, TS: vis.TS, Out: true, Status: "sending", Grp: gid, Of: id, Hid: true, GImg: img != ""})
 	}
 	if len(copies) == 0 {
 		vis.Status = "sent"
@@ -280,8 +295,8 @@ func (a *App) retryGroup(gid, id string) (Message, error) {
 }
 
 // onGroupMsg stores an incoming group message. Returns true when it should be acked.
-func (a *App) onGroupMsg(from string, w wire) bool {
-	if !validGID(w.G) || w.Text == "" || len(w.Text) > 8000 || !msgIDRe.MatchString(w.ID) {
+func (a *App) onGroupMsg(from string, w wire, img string) bool {
+	if !validGID(w.G) || (w.Text == "" && img == "") || len(w.Text) > 8000 || !msgIDRe.MatchString(w.ID) {
 		return false
 	}
 	a.store.mu.Lock()
@@ -321,8 +336,31 @@ func (a *App) onGroupMsg(from string, w wire) bool {
 	if dup {
 		return true
 	}
-	a.addMessage(Message{ID: w.ID, Peer: key, From: from, Nick: cleanNick(w.Nick), Text: w.Text, TS: w.TS})
+	a.addMessage(Message{ID: w.ID, Peer: key, From: from, Nick: cleanNick(w.Nick), Text: w.Text, TS: w.TS, Img: img})
 	return true
+}
+
+// groupImg returns the photo of visible group message id (hidden copies don't keep it).
+func (a *App) groupImg(gid, id string) string {
+	a.store.mu.Lock()
+	defer a.store.mu.Unlock()
+	for i := len(a.store.Messages) - 1; i >= 0; i-- {
+		if m := a.store.Messages[i]; m.ID == id && m.Peer == gKey(gid) {
+			return m.Img
+		}
+	}
+	return ""
+}
+
+func (a *App) hasGroupMsg(gid, from, id string) bool {
+	a.store.mu.Lock()
+	defer a.store.mu.Unlock()
+	for i := len(a.store.Messages) - 1; i >= 0; i-- {
+		if m := a.store.Messages[i]; m.Peer == gKey(gid) && m.From == from && m.ID == id {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *App) onGroupCtl(from string, w wire) {
@@ -378,6 +416,10 @@ func (a *App) onGroupCtl(from string, w wire) {
 		if name == "" {
 			name = "グループ"
 		}
+		if known && g.Owner != "" && from != g.Owner {
+			// Not the host: only the host changes who is in the group.
+			ms, in = g.Members, true
+		}
 		if !known {
 			if !in {
 				a.store.mu.Unlock()
@@ -385,6 +427,9 @@ func (a *App) onGroupCtl(from string, w wire) {
 			}
 			c, ok := a.store.Contacts[from]
 			g = Group{ID: w.G, Req: !(ok && c.Shared && !c.Req)}
+			if o, ok := yggAddr(w.GO); ok && hasMember(Group{Members: ms}, o) {
+				g.Owner = o
+			}
 		}
 		old := g
 		g.Name, g.Members = name, ms
@@ -401,10 +446,15 @@ func (a *App) onGroupCtl(from string, w wire) {
 		case known && old.Name != g.Name && old.Name != "グループ":
 			a.groupSys(g, a.nameOf(from)+" がグループ名を「"+g.Name+"」にしました")
 		}
-		if known && len(g.Members) > len(old.Members) && in {
+		if known && in {
 			for _, m := range g.Members {
 				if !hasMember(old, m) && m != a.addr {
 					a.groupSys(g, a.nameOf(from)+" が "+a.nameOf(m)+" を追加しました")
+				}
+			}
+			for _, m := range old.Members {
+				if !hasMember(g, m) && m != from {
+					a.groupSys(g, a.nameOf(from)+" が "+a.nameOf(m)+" を外しました")
 				}
 			}
 		}
@@ -443,9 +493,10 @@ func (a *App) groupHandlers(mux *http.ServeMux) {
 	})
 	mux.HandleFunc("/api/group/update", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			ID   string
-			Name *string
-			Add  []string
+			ID     string
+			Name   *string
+			Add    []string
+			Remove []string
 		}
 		if !readJSON(w, r, &req) {
 			return
@@ -463,7 +514,35 @@ func (a *App) groupHandlers(mux *http.ServeMux) {
 				g.Name = n
 			}
 		}
+		if (len(req.Add) > 0 || len(req.Remove) > 0) && g.Owner != "" && g.Owner != a.addr {
+			a.store.mu.Unlock()
+			http.Error(w, "メンバーを追加・削除できるのはホストだけです", 403)
+			return
+		}
+		if len(req.Remove) > 0 && g.Owner == "" {
+			a.store.mu.Unlock()
+			http.Error(w, "このグループにはホストがいないので外せません（v0.16.0より前に作ったグループ）", 400)
+			return
+		}
 		g.Members = cleanMembers(append(append([]string{}, g.Members...), req.Add...), a.addr)
+		var removed []string
+		if len(req.Remove) > 0 {
+			kept := []string{}
+			for _, m := range g.Members {
+				drop := false
+				for _, r := range req.Remove {
+					if x, ok := yggAddr(r); ok && x == m && m != a.addr {
+						drop = true
+					}
+				}
+				if drop {
+					removed = append(removed, m)
+				} else {
+					kept = append(kept, m)
+				}
+			}
+			g.Members = kept
+		}
 		g.Req = false
 		a.store.Groups[g.ID] = g
 		a.store.save()
@@ -477,7 +556,10 @@ func (a *App) groupHandlers(mux *http.ServeMux) {
 				a.groupSys(g, a.nameOf(m)+" を追加しました")
 			}
 		}
-		a.sendInfo(g)
+		for _, m := range removed {
+			a.groupSys(g, a.nameOf(m)+" を外しました")
+		}
+		a.sendInfo(g, removed...) // the removed hear it too, so they know they're out
 		json.NewEncoder(w).Encode(groupView(g))
 	})
 	mux.HandleFunc("/api/group/leave", func(w http.ResponseWriter, r *http.Request) {

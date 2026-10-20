@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 h6e and YggChat contributors
-const CACHE = 'yggchat-v7';
+const CACHE = 'yggchat-v8';
 const INDEX = './index.html';
 
 self.addEventListener('install', e => {
-  e.waitUntil(caches.open(CACHE).then(c => c.addAll([INDEX, './manifest.webmanifest', './qrcode.js'])).then(() => self.skipWaiting()));
+  e.waitUntil(caches.open(CACHE).then(c => c.addAll([INDEX, './manifest.webmanifest', './qrcode.js', './jsqr.min.js'])).then(() => self.skipWaiting()));
 });
 
 self.addEventListener('activate', e => {

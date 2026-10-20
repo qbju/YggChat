@@ -20,6 +20,9 @@ public class MainActivity extends Activity {
     // Pending <input type=file> callback from the WebView.
     private ValueCallback<Uri[]> fileCb;
     static final int FILE_REQ = 3;
+    // Camera request from the page (QR scanner) waiting on the runtime permission.
+    private PermissionRequest camReq;
+    static final int CAM_REQ = 4;
 
     // Opens the UI through the launch URL, which gives the WebView the API key
     // as an HttpOnly cookie. Waits for the node to create the key on first run.
@@ -138,6 +141,20 @@ public class MainActivity extends Activity {
         });
         // <input type="file">: WebView shows nothing unless the app opens a picker.
         web.setWebChromeClient(new WebChromeClient() {
+            // getUserMedia (QR scanner): camera only, only for the app's own UI.
+            @Override public void onPermissionRequest(final PermissionRequest r) {
+                runOnUiThread(new Runnable() { public void run() {
+                    boolean cam = false;
+                    for (String res : r.getResources()) if (PermissionRequest.RESOURCE_VIDEO_CAPTURE.equals(res)) cam = true;
+                    if (!cam || !onHome || !r.getOrigin().toString().startsWith("http://127.0.0.1:7780")) { r.deny(); return; }
+                    String[] grant = new String[]{ PermissionRequest.RESOURCE_VIDEO_CAPTURE };
+                    if (checkSelfPermission("android.permission.CAMERA") == android.content.pm.PackageManager.PERMISSION_GRANTED) { r.grant(grant); return; }
+                    if (camReq != null) camReq.deny();
+                    camReq = r;
+                    requestPermissions(new String[]{"android.permission.CAMERA"}, CAM_REQ);
+                }});
+            }
+            @Override public void onPermissionRequestCanceled(PermissionRequest r) { if (camReq == r) camReq = null; }
             @Override public boolean onShowFileChooser(WebView v, ValueCallback<Uri[]> cb, FileChooserParams p) {
                 if (fileCb != null) { fileCb.onReceiveValue(null); fileCb = null; }
                 if (!onHome) { cb.onReceiveValue(null); return true; }
@@ -193,6 +210,13 @@ public class MainActivity extends Activity {
     }
 
     @Override public void onRequestPermissionsResult(int code, String[] p, int[] r) {
+        if (code == CAM_REQ) {
+            PermissionRequest q = camReq; camReq = null;
+            if (q == null) return;
+            if (r.length > 0 && r[0] == android.content.pm.PackageManager.PERMISSION_GRANTED) q.grant(new String[]{ PermissionRequest.RESOURCE_VIDEO_CAPTURE });
+            else q.deny();
+            return;
+        }
         if (web != null) web.evaluateJavascript("window.ygNotifResult && window.ygNotifResult('" + notifState() + "')", null);
     }
 

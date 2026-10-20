@@ -176,7 +176,7 @@
   // and gh (hash of name+members); the copies are hidden, the "g:<id>" message shows.
   const isG = k => String(k || '').startsWith('g:');
   const MAXG = 20;
-  const gView = g => ({ addr: 'g:' + g.id, nick: g.name, avatar: '👥', group: true, members: g.members, req: !!g.req, left: !!g.left });
+  const gView = g => ({ addr: 'g:' + g.id, nick: g.name, avatar: '👥', group: true, members: g.members, req: !!g.req, left: !!g.left, owner: g.owner || '' });
   const okGID = id => /^[0-9a-f]{16}$/.test(String(id || ''));
   function cleanMembers(list, must) {
     const out = [];
@@ -187,7 +187,7 @@
   const hasM = (g, a) => g.members.includes(a);
   const nameOf = a => a === addr ? 'あなた' : ((st.contacts[a] && st.contacts[a].nick) || a.slice(0, 9) + '…');
   function gSys(g, text) { addMessage({ id: 's' + Date.now().toString(16) + Math.random().toString(16).slice(2, 5), peer: 'g:' + g.id, from: addr, ts: now(), sys: text, out: true }); }
-  function gInfo(g, extra) { const w = { t: 'gi', g: g.id, gn: g.name, gm: g.members }; for (let i = 0; i < 3; i++) setTimeout(() => { for (const m of g.members.concat(extra || [])) if (m !== addr) send(m, w); }, i * 2000); }
+  function gInfo(g, extra) { const w = { t: 'gi', g: g.id, gn: g.name, gm: g.members, go: g.owner || undefined }; for (let i = 0; i < 3; i++) setTimeout(() => { for (const m of g.members.concat(extra || [])) if (m !== addr) send(m, w); }, i * 2000); }
   function groupStatus(gid, id) {
     const cs = st.messages.filter(m => m.hid && m.grp === gid && m.of === id);
     const n = cs.length, sent = cs.filter(m => m.status === 'sent').length, sending = cs.filter(m => m.status === 'sending').length, stored = cs.filter(m => m.status === 'stored').length;
@@ -200,21 +200,23 @@
     if (m.grp) { w.ttl = undefined; w.g = m.grp; const g = st.groups[m.grp]; if (g) w.gh = await gHash(g); }
     return w;
   }
-  function sendGroup(gid, text) {
+  function sendGroup(gid, text, img) {
     const g = st.groups[gid];
     if (!g || g.left) return null;
     if (g.req) { g.req = false; emit('contact', gView(g)); }
     const id = Date.now().toString(16) + Math.random().toString(16).slice(2, 6), ts = now();
     const v = { id, peer: 'g:' + gid, from: addr, nick: st.nick, text, ts, out: true, status: 'sending' };
-    const cs = g.members.filter(a => a !== addr).map((a, i) => ({ id: id + 'g' + i, peer: a, from: addr, nick: st.nick, text, ts, out: true, status: 'sending', grp: gid, of: id, hid: true }));
+    if (img) v.img = img;
+    // The photo stays on the visible message only (gimg on the copies).
+    const cs = g.members.filter(a => a !== addr).map((a, i) => ({ id: id + 'g' + i, peer: a, from: addr, nick: st.nick, text, ts, out: true, status: 'sending', grp: gid, of: id, hid: true, gimg: img ? true : undefined }));
     if (!cs.length) v.status = 'sent';
     st.messages.push(...cs);
     addMessage(v);
     for (const c of cs) deliver(c);
     return v;
   }
-  async function onGroupMsg(src, w) {
-    if (!okGID(w.g) || !w.text || String(w.text).length > 8000 || !/^[0-9A-Za-z_-]{1,40}$/.test(String(w.id))) return false;
+  async function onGroupMsg(src, w, img) {
+    if (!okGID(w.g) || (!w.text && !img) || String(w.text).length > 8000 || !/^[0-9A-Za-z_-]{1,40}$/.test(String(w.id))) return false;
     if (locked || st.blocked[src]) return false;
     let g = st.groups[w.g], ask = false;
     const known = !!g;
@@ -227,13 +229,15 @@
     if (ask) send(src, { t: 'gq', g: w.g });
     const key = 'g:' + w.g;
     if (st.messages.some(m => m.peer === key && m.from === src && m.id === w.id)) return true;
-    addMessage({ id: w.id, peer: key, from: src, nick: cleanNick(w.nick), text: w.text, ts: w.ts || now(), out: false });
+    const m = { id: w.id, peer: key, from: src, nick: cleanNick(w.nick), text: w.text || '', ts: w.ts || now(), out: false };
+    if (img) m.img = img;
+    addMessage(m);
     return true;
   }
   function onGroupCtl(src, w) {
     if (!okGID(w.g) || locked) return;
     let g = st.groups[w.g];
-    if (w.t === 'gq') { if (g && !g.left && hasM(g, src) && hasM(g, addr)) send(src, { t: 'gi', g: g.id, gn: g.name, gm: g.members }); return; }
+    if (w.t === 'gq') { if (g && !g.left && hasM(g, src) && hasM(g, addr)) send(src, { t: 'gi', g: g.id, gn: g.name, gm: g.members, go: g.owner || undefined }); return; }
     if (w.t === 'gl') {
       if (!g || !hasM(g, src)) return;
       g.members = g.members.filter(a => a !== src); save(); emit('contact', gView(g)); gSys(g, nameOf(src) + ' が退出しました'); return;
@@ -241,14 +245,19 @@
     if (w.t === 'gi') {
       if (!Array.isArray(w.gm) || !w.gm.length) return;
       if (g && (g.left || !hasM(g, src))) return;
-      const ms = cleanMembers(w.gm, src), inG = ms.includes(addr);
-      if (!g) { if (!inG) return; const c = st.contacts[src]; g = st.groups[w.g] = { id: w.g, name: '', members: [], req: !(c && c.shared && !c.req) }; }
+      let ms = cleanMembers(w.gm, src), inG = ms.includes(addr);
+      if (g && g.owner && src !== g.owner) { ms = g.members.slice(); inG = true; } // only the host changes members
+      if (!g) {
+        if (!inG) return; const c = st.contacts[src]; g = st.groups[w.g] = { id: w.g, name: '', members: [], req: !(c && c.shared && !c.req) };
+        const o = norm(String(w.go || '')); if (o && isYgg(o) && ms.includes(o)) g.owner = o;
+      }
       const old = { name: g.name, members: g.members.slice() }, known = !!old.name;
       g.name = cleanNick(w.gn) || 'グループ'; g.members = ms; if (!inG) g.left = true;
       save(); emit('contact', gView(g));
       if (!inG) gSys(g, 'グループから外されました');
       else if (known && old.name !== g.name && old.name !== 'グループ') gSys(g, nameOf(src) + ' がグループ名を「' + g.name + '」にしました');
       if (known && inG) for (const m of ms) if (!old.members.includes(m) && m !== addr) gSys(g, nameOf(src) + ' が ' + nameOf(m) + ' を追加しました');
+      if (known && inG) for (const m of old.members) if (!ms.includes(m) && m !== src) gSys(g, nameOf(src) + ' が ' + nameOf(m) + ' を外しました');
     }
   }
 
@@ -275,7 +284,7 @@
       return;
     }
     if (w.t === 'mh' || w.t === 'mc') { if (!(st.blocked && st.blocked[src])) onMoveIn(src, w); return; }
-    if (w.t === 'mca' || w.t === 'mok' || w.t === 'mng') { onMoveAck(src, w); return; }
+    if (w.t === 'mha' || w.t === 'mca' || w.t === 'mok' || w.t === 'mng') { onMoveAck(src, w); return; }
     if (w.t === 'fca') { const g = chunkAcks.get(w.id); if (g) g.add(w.i | 0); return; }
     if (w.t === 'ack') { const f = acks.get(w.id); if (f) { acks.delete(w.id); f(); } askPK(src); return; }
     if (locked || st.blocked[src]) return; // stay silent: the sender keeps it queued
@@ -340,10 +349,12 @@
     if (!mvIn.on) return;
     if (mvIn.done) { if (w.id === mvIn.id) send(src, { t: 'mok', id: w.id }); return; }
     if (w.t === 'mh') {
+      if (w.id === mvIn.id && src === mvIn.from) { send(src, { t: 'mha', id: w.id }); return; }
       const size = w.size | 0, n = w.n | 0;
       if (w.id === mvIn.id || !/^[0-9a-f]{8,40}$/.test(String(w.id)) || !/^[0-9a-f]{64}$/.test(String(w.sha)) || size < 33 || size > MV_MAX || n !== Math.ceil(size / CHUNK)) return;
       if (mvIn.id && mvIn.from !== src && Date.now() - mvIn.at < 60000) return; // another transfer is running
       Object.assign(mvIn, { id: w.id, from: src, hdr: w, chunks: new Array(n), got: 0, at: Date.now(), busy: false });
+      send(src, { t: 'mha', id: w.id });
       emit('move', { role: 'recv', phase: 'recv', got: 0, n, from: src });
       return;
     }
@@ -371,24 +382,28 @@
   }
   function onMoveAck(src, w) {
     if (!w.id || w.id !== mvOut.id) return;
-    if (w.t === 'mca') mvOut.acks.add(w.i | 0);
+    if (w.t === 'mha') mvOut.hello = true;
+    else if (w.t === 'mca') { mvOut.hello = true; mvOut.acks.add(w.i | 0); }
     else if (mvOut.res) mvOut.res(w.t === 'mok' ? '' : '受け取り側: ' + (cleanText(w.text, 200) || '失敗しました'));
   }
   async function moveSend(peer, blob) {
     const id = hexOf(crypto.getRandomValues(new Uint8Array(8))), n = Math.ceil(blob.length / CHUNK);
     const hdr = { t: 'mh', id, size: blob.length, n, sha: await sha(blob) };
     let resolve; const res = new Promise(r => resolve = r);
-    Object.assign(mvOut, { id, acks: new Set(), res: resolve });
+    Object.assign(mvOut, { id, acks: new Set(), res: resolve, hello: false });
     const finish = err => { if (mvOut.id === id) Object.assign(mvOut, { id: '', acks: null, res: null }); emit('move', err ? { role: 'send', phase: 'error', err } : { role: 'send', phase: 'done', got: n, n }); };
-    let last = -1, lastAt = Date.now();
+    // Header only until the receiver answers it (mha; v0.15.0 never does, so
+    // chunks start after 4 s anyway), then a window that grows from 32.
+    let last = -1, lastAt = Date.now(), win = 32;
+    const start = Date.now();
     for (;;) {
       if (mvOut.id !== id) return finish('キャンセルしました');
       const got = mvOut.acks.size;
-      if (got !== last) { last = got; lastAt = Date.now(); emit('move', { role: 'send', phase: 'send', got, n }); }
+      if (got !== last) { if (last >= 0 && win < 256) win *= 2; last = got; lastAt = Date.now(); emit('move', { role: 'send', phase: 'send', got, n }); }
       else if (Date.now() - lastAt > 90000) return finish('相手に届きません。新しい端末で受け取り画面が開いているか確認してください');
       send(peer, hdr); await sleep(30);
       let k = 0;
-      for (let i = 0; i < n && k < 256; i++) if (!mvOut.acks.has(i)) { send(peer, { t: 'mc', id, i, d: b64(blob.subarray(i * CHUNK, (i + 1) * CHUNK)) }); if (++k % 8 === 0) await sleep(4); }
+      if (mvOut.hello || Date.now() - start >= 4000) for (let i = 0; i < n && k < win; i++) if (!mvOut.acks.has(i)) { send(peer, { t: 'mc', id, i, d: b64(blob.subarray(i * CHUNK, (i + 1) * CHUNK)) }); if (++k % 8 === 0) await sleep(4); }
       const r = await Promise.race([res, sleep(700).then(() => null)]);
       if (r !== null) return finish(r);
     }
@@ -397,6 +412,7 @@
     const p = parseImg(m.img); if (!p) { setStatus(m.peer, m.id, 'failed'); return false; }
     const n = Math.ceil(p.bytes.length / CHUNK);
     const hdr = { t: 'fh', id: m.id, nick: m.nick, text: m.text || undefined, ts: m.ts, ttl: m.ttl || undefined, mime: p.mime, size: p.bytes.length, n, sha: await sha(p.bytes) };
+    if (m.grp) { const gw = await msgPkt(m); hdr.ttl = undefined; hdr.g = gw.g; hdr.gh = gw.gh; }
     const got = new Set(); chunkAcks.set(m.id, got);
     const acked = new Promise(r => acks.set(m.id, r));
     let done = false; acked.then(() => done = true);
@@ -419,7 +435,7 @@
   function onFileHeader(src, w) {
     const n = w.n | 0, size = w.size | 0;
     if (!/^[0-9A-Za-z_-]{1,40}$/.test(String(w.id)) || !MIMES.has(w.mime) || n < 1 || n > MAXN || size < 1 || size > IMGMAX || Math.ceil(size / CHUNK) !== n || !/^[0-9a-f]{64}$/.test(String(w.sha)) || u8len(w.text) > CAPMAX || u8len(w.nick) > 120) return;
-    if (st.messages.some(m => m.peer === src && m.id === w.id)) { send(src, { t: 'ack', id: w.id }); return; }
+    if (st.messages.some(m => (m.peer === src || (w.g && m.peer === 'g:' + w.g && m.from === src)) && m.id === w.id)) { send(src, { t: 'ack', id: w.id }); return; }
     const t = Date.now();
     for (const [k, f] of inFiles) if (t - f.at > 180000) inFiles.delete(k);
     const key = src + '/' + w.id;
@@ -441,7 +457,9 @@
     for (const c of f.chunks) { if (off + c.length > all.length) return; all.set(c, off); off += c.length; }
     if (off !== f.hdr.size || await sha(all) !== f.hdr.sha) return;
     let s = ''; for (let j = 0; j < all.length; j += 0x8000) s += String.fromCharCode(...all.subarray(j, j + 0x8000));
-    if (acceptMsg(src, f.hdr, 'data:' + f.hdr.mime + ';base64,' + btoa(s))) send(src, { t: 'ack', id: w.id });
+    const img = 'data:' + f.hdr.mime + ';base64,' + btoa(s);
+    if (f.hdr.g) { if (await onGroupMsg(src, f.hdr, img)) send(src, { t: 'ack', id: w.id }); return; }
+    if (acceptMsg(src, f.hdr, img)) send(src, { t: 'ack', id: w.id });
   }
 
   // After a miss, greet the peer at 3, 5 and 10 s so the message goes out as
@@ -462,6 +480,7 @@
     if (inflight.has(m.id)) return false;
     inflight.add(m.id);
     if (m.status !== 'sending') setStatus(m.peer, m.id, 'sending');
+    if (m.gimg && !m.img) { const v = st.messages.find(x => x.peer === 'g:' + m.grp && x.id === m.of); if (v && v.img) m = Object.assign({}, m, { img: v.img }); }
     if (m.img) { try { return await deliverImg(m, tries); } finally { inflight.delete(m.id); } }
     const pkt = JSON.stringify(await msgPkt(m));
     const acked = new Promise(r => acks.set(m.id, r));
@@ -669,9 +688,9 @@
             for (const c of st.messages.filter(m => m.hid && m.grp === gid && m.of === v.id && m.status !== 'sent')) { setStatus(c.peer, c.id, 'sending'); deliver(c); }
             return ok(v);
           }
-          if (body.Img) return bad('グループではまだ写真を送れません');
-          const t = String(body.Text || ''); if (!t || t.length > 4000) return bad('message empty or too long');
-          const v = sendGroup(gid, t); return v ? ok(v) : bad('このグループには送れません');
+          const t = String(body.Text || ''); if ((!t && !body.Img) || t.length > 4000) return bad('message empty or too long');
+          if (body.Img && !parseImg(body.Img)) return bad('unsupported or too large image (max 600KB)');
+          const v = sendGroup(gid, t, body.Img || ''); return v ? ok(v) : bad('このグループには送れません');
         }
         if (body.Retry) {
           const m = st.messages.find(x => x.peer === norm(body.To || '') && x.id === body.Retry && x.out);
@@ -695,18 +714,28 @@
       case 'group/create': {
         const ms = cleanMembers(body.Members, addr); if (ms.length < 2) return bad('メンバーを1人以上選んでください');
         const id = hexOf(crypto.getRandomValues(new Uint8Array(8)));
-        const g = st.groups[id] = { id, name: cleanNick(body.Name) || 'グループ', members: ms };
+        const g = st.groups[id] = { id, name: cleanNick(body.Name) || 'グループ', members: ms, owner: addr };
         save(); emit('contact', gView(g)); gSys(g, 'グループ「' + g.name + '」を作りました'); gInfo(g); return ok(gView(g));
       }
       case 'group/update': {
         const g = st.groups[body.ID]; if (!g || g.left) return bad('no such group');
         const old = { name: g.name, members: g.members.slice() };
         if (body.Name != null && cleanNick(body.Name)) g.name = cleanNick(body.Name);
-        g.members = cleanMembers(g.members.concat(body.Add || []), addr); g.req = false;
+        const rmReq = Array.isArray(body.Remove) && body.Remove.length;
+        if (((body.Add || []).length || rmReq) && g.owner && g.owner !== addr) return bad('メンバーを追加・削除できるのはホストだけです', 403);
+        if (rmReq && !g.owner) return bad('このグループにはホストがいないので外せません（v0.16.0より前に作ったグループ）');
+        g.members = cleanMembers(g.members.concat(body.Add || []), addr);
+        let removed = [];
+        if (rmReq) {
+          const rm = body.Remove.map(x => norm(String(x || ''))).filter(x => x && x !== addr);
+          removed = g.members.filter(m => rm.includes(m)); g.members = g.members.filter(m => !rm.includes(m));
+        }
+        g.req = false;
         save(); emit('contact', gView(g));
         if (g.name !== old.name) gSys(g, 'グループ名を「' + g.name + '」にしました');
         for (const m of g.members) if (!old.members.includes(m)) gSys(g, nameOf(m) + ' を追加しました');
-        gInfo(g); return ok(gView(g));
+        for (const m of removed) gSys(g, nameOf(m) + ' を外しました');
+        gInfo(g, removed); return ok(gView(g));
       }
       case 'group/leave': {
         const g = st.groups[body.ID]; if (!g) return bad('no such group');

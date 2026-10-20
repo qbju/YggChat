@@ -942,6 +942,12 @@ select { font:inherit; font-size:16px; color:var(--fg); background:var(--surface
 #attach-btn { flex:0 0 auto; font-size:20px; }
 .img-viewer { position:fixed; inset:0; z-index:90; background:rgba(0,0,0,.92); display:none; align-items:center; justify-content:center; flex-direction:column; padding:calc(12px + env(safe-area-inset-top)) 12px calc(12px + env(safe-area-inset-bottom)); }
 .img-viewer.active { display:flex; }
+.qrscan { position:fixed; inset:0; z-index:95; background:#000; display:none; flex-direction:column; align-items:center; justify-content:center; gap:12px; padding:calc(12px + env(safe-area-inset-top)) 12px calc(12px + env(safe-area-inset-bottom)); color:#fff; }
+.qrscan.active { display:flex; }
+.qrscan-view { position:relative; width:min(86vw, 60vh, 420px); aspect-ratio:1; border-radius:14px; overflow:hidden; background:#111; }
+.qrscan-view video { width:100%; height:100%; object-fit:cover; display:block; }
+.qrscan-view::after { content:""; position:absolute; inset:14%; border:3px solid rgba(255,255,255,.85); border-radius:12px; box-shadow:0 0 0 999px rgba(0,0,0,.35); }
+.qrscan .iv-bar { display:flex; gap:8px; }
 .img-viewer img { max-width:100%; max-height:calc(100% - 64px); object-fit:contain; -webkit-touch-callout:default; }
 .iv-bar { display:flex; gap:10px; margin-top:12px; }
 img.emoji { height:1.2em; width:1.2em; margin:0 .05em 0 .1em; vertical-align:-0.2em; display:inline-block; }
@@ -949,6 +955,7 @@ img.emoji { height:1.2em; width:1.2em; margin:0 .05em 0 .1em; vertical-align:-0.
 </style>
 </head>
 <body class="two-pane">
+<div id="qrscan" class="qrscan"><div id="qrscan-title" style="font-size:14px;"></div><div class="qrscan-view"><video id="qrscan-video" playsinline muted></video></div><div class="iv-bar"><button id="qrscan-manual">コードを入力</button><button id="qrscan-cancel">やめる</button></div></div>
 <div id="img-viewer" class="img-viewer"><img id="img-viewer-img" alt=""><div class="iv-bar"><button id="iv-save">保存</button><button id="iv-close">閉じる</button></div></div>
 <div class="screen" id="lock-screen">
   <div style="font-size:42px;">🔒</div>
@@ -1026,6 +1033,7 @@ img.emoji { height:1.2em; width:1.2em; margin:0 .05em 0 .1em; vertical-align:-0.
         <div style="color:var(--error); font-size:12px; min-height:16px;" id="newchat-err"></div>
         <input id="newchat-nick" type="text" placeholder="名前（任意）" autocomplete="off">
         <div style="display:flex; gap:8px; flex-wrap:wrap;">
+          <button id="scan-btn">📷 QRを読む</button>
           <button id="paste-btn">クリップボードから貼り付け</button>
           <button id="start-chat-btn" style="background:var(--accent); color:#111; border:none;">チャットを開始</button>
         </div>
@@ -1314,7 +1322,7 @@ img.emoji { height:1.2em; width:1.2em; margin:0 .05em 0 .1em; vertical-align:-0.
       <a class="dl-btn" href="https://yggchat.surge.sh/dl/yggchat-windows-amd64.exe" download>🪟 Windows (exe)</a>
       <a class="dl-btn" href="https://yggchat.surge.sh/dl/yggchat-linux-amd64" download>🐧 Linux (amd64)</a>
       <a class="dl-btn" href="https://yggchat.surge.sh/dl/yggchat-android-arm64" download>⌨️ Termux (arm64)</a>
-      <div class="row-sub" id="dl-ver">最新: v0.15.1 ・ SHA256SUMS で検証できます</div>
+      <div class="row-sub" id="dl-ver">最新: v0.16.0 ・ SHA256SUMS で検証できます</div>
     </div>
     <div class="section">
       <div class="section-title">About</div>
@@ -1326,7 +1334,7 @@ img.emoji { height:1.2em; width:1.2em; margin:0 .05em 0 .1em; vertical-align:-0.
         </div>
       </div>
       <div class="row-sub">YggChatはフリーソフトウェアです（GPL-3.0-or-later）。© 2026 h6e and YggChat contributors</div>
-      <div class="row-sub">Yggdrasil Network（yggdrasil-go・yggstack・ironwood）、gVisor、Go、quic-go、coder/websocket、qrcode-generator（Kazuhiko Arase）、go-webview2・WebView2 SDK（Windows版）、Twemoji（© Twitter, Inc. and other contributors, CC-BY 4.0）ほか多くのオープンソースに支えられています。「QRコード」はデンソーウェーブの登録商標です。</div>
+      <div class="row-sub">Yggdrasil Network（yggdrasil-go・yggstack・ironwood）、gVisor、Go、quic-go、coder/websocket、qrcode-generator（Kazuhiko Arase）、jsQR（Cosmo Wolfe）、go-webview2・WebView2 SDK（Windows版）、Twemoji（© Twitter, Inc. and other contributors, CC-BY 4.0）ほか多くのオープンソースに支えられています。「QRコード」はデンソーウェーブの登録商標です。</div>
       <div class="row-btns">
         <button id="about-credits">クレジットと第三者ライセンス</button>
         <button id="about-license">ライセンス（GPL-3.0）</button>
@@ -1781,7 +1789,6 @@ function updateChatHeader(){
   $('req-accept').textContent = grp ? '参加' : '承認';
   $('req-block').style.display = grp ? 'none' : '';
   $('composer').style.display = (isReq || c.left) ? 'none' : '';
-  $('attach-btn').style.display = grp ? 'none' : '';
   $('chat-avatar').style.background = hashColor(curAddr);
   $('chat-avatar').style.border = 'none';
   $('chat-avatar').style.color = '#111';
@@ -1875,6 +1882,81 @@ $('paste-btn').addEventListener('click', async () => {
   }catch(e){
     // ignore
   }
+});
+
+// ---------- QR scanner ----------
+// BarcodeDetector where the browser has it; otherwise jsQR, loaded on first use.
+let jsqrP = null, qrscanClose = null;
+function loadJsQR(){
+  return jsqrP || (jsqrP = new Promise((res, rej) => {
+    const sc = document.createElement('script');
+    sc.src = 'jsqr.min.js';
+    sc.onload = () => window.jsQR ? res(window.jsQR) : rej(new Error('jsQR'));
+    sc.onerror = () => { jsqrP = null; rej(new Error('jsQR')); };
+    document.head.appendChild(sc);
+  }));
+}
+// Resolves with the decoded text, null if cancelled, or {manual:true}.
+async function scanQR(title, manual){
+  if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) throw new Error('この環境ではカメラが使えません');
+  let det = null, jsqr = null;
+  try{ if('BarcodeDetector' in window && (await BarcodeDetector.getSupportedFormats()).includes('qr_code')) det = new BarcodeDetector({formats:['qr_code']}); }catch(e){}
+  if(!det){ try{ jsqr = await loadJsQR(); }catch(e){ throw new Error('QR読み取りの準備に失敗しました'); } }
+  let stream;
+  try{ stream = await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'}}, audio:false}); }
+  catch(e){ throw new Error('カメラを使えませんでした（カメラの権限を確認してね）'); }
+  const v = $('qrscan-video');
+  $('qrscan-title').textContent = title;
+  $('qrscan-manual').style.display = manual ? '' : 'none';
+  v.srcObject = stream;
+  $('qrscan').classList.add('active');
+  try{ await v.play(); }catch(e){}
+  const cv = document.createElement('canvas'), cx = cv.getContext('2d', {willReadFrequently:true});
+  return new Promise(resolve => {
+    let done = false, timer = 0;
+    const finish = r => {
+      if(done) return;
+      done = true; clearTimeout(timer); qrscanClose = null;
+      stream.getTracks().forEach(t => t.stop());
+      v.srcObject = null;
+      $('qrscan').classList.remove('active');
+      resolve(r);
+    };
+    qrscanClose = () => finish(null);
+    $('qrscan-cancel').onclick = () => finish(null);
+    $('qrscan-manual').onclick = () => finish({manual:true});
+    const tick = async () => {
+      if(done) return;
+      try{
+        if(v.readyState >= 2 && v.videoWidth){
+          let txt = null;
+          if(det){ const r = await det.detect(v); if(r.length) txt = r[0].rawValue; }
+          else {
+            const w = Math.min(640, v.videoWidth), h = Math.round(v.videoHeight * w / v.videoWidth);
+            cv.width = w; cv.height = h; cx.drawImage(v, 0, 0, w, h);
+            const r = jsqr(cx.getImageData(0, 0, w, h).data, w, h, {inversionAttempts:'attemptBoth'});
+            if(r && r.data) txt = r.data;
+          }
+          if(txt){ finish(txt); return; }
+        }
+      }catch(e){}
+      timer = setTimeout(tick, 150);
+    };
+    tick();
+  });
+}
+document.addEventListener('visibilitychange', () => { if(document.hidden && qrscanClose) qrscanClose(); });
+$('scan-btn').addEventListener('click', async () => {
+  let t;
+  try{ t = await scanQR('相手のQRコードを写してね'); }catch(e){ $('newchat-err').textContent = e.message; return; }
+  if(typeof t !== 'string') return;
+  t = t.trim();
+  const m = t.match(/#add=([^&\s]+)(?:&n=([^&\s]*))?/);
+  let a = t, n = '';
+  if(m){ try{ a = decodeURIComponent(m[1]); n = m[2] ? decodeURIComponent(m[2]) : ''; }catch(e){ a = m[1]; } }
+  $('newchat-addr').value = a;
+  if(n && !$('newchat-nick').value) $('newchat-nick').value = n;
+  $('newchat-err').textContent = '';
 });
 
 $('add-contact-from-empty').addEventListener('click', openNewChat);
@@ -2140,7 +2222,15 @@ $('mv-stop').addEventListener('click', async () => {
   $('mv-box').style.display = 'none'; mvSet('');
 });
 $('mv-send-btn').addEventListener('click', async () => {
-  const code = await uiPrompt('新しい端末に出ている移行コード（ygm1:…）', '');
+  // Scan the new device's QR; typing the code stays available (and is the
+  // fallback when there is no camera).
+  let code = null;
+  try{
+    const r = await scanQR('新しい端末に出ているQRコードを写してね', true);
+    if(r === null) return;
+    if(typeof r === 'string') code = r;
+  }catch(e){ toast(e.message); }
+  if(code === null) code = await uiPrompt('新しい端末に出ている移行コード（ygm1:…）', '');
   if(code === null || !code.trim()) return;
   const hist = await uiDialog('トーク履歴（画像を含む）も移しますか？', {okText:'履歴も移す'});
   try{
@@ -3187,11 +3277,20 @@ function openGroupInfo(){
   const c = state.contacts[curAddr]; if(!c) return;
   $('gi-name').textContent = c.nick || 'グループ';
   $('gi-count').textContent = c.left ? '退出済み' : ((c.members||[]).length + '人');
-  $('gi-members').innerHTML = (c.members||[]).map(a => '<div class="row" style="padding:6px 0;"><div><div>' + escapeHtml(a === state.addr ? 'あなた' : ((state.contacts[a]||{}).nick || 'anon')) + '</div><div class="row-sub" style="font-family:ui-monospace,monospace;">' + escapeHtml(a) + '</div></div></div>').join('');
+  const host = c.owner === state.addr && !c.left;
+  $('gi-members').innerHTML = (c.members||[]).map(a => '<div class="row" style="padding:6px 0;"><div><div>' + escapeHtml(a === state.addr ? 'あなた' : ((state.contacts[a]||{}).nick || 'anon')) + (a === c.owner ? ' <span class="ttl-badge">ホスト</span>' : '') + '</div><div class="row-sub" style="font-family:ui-monospace,monospace;">' + escapeHtml(a) + '</div></div>' + (host && a !== state.addr ? '<button class="gi-kick" data-addr="' + escapeHtml(a) + '" style="color:var(--error);">外す</button>' : '') + '</div>').join('');
   $('gi-add').style.display = $('gi-leave').style.display = $('gi-rename').style.display = c.left ? 'none' : '';
+  if(c.owner && c.owner !== state.addr) $('gi-add').style.display = 'none';
   $('group-info-screen').classList.add('active');
 }
 $('gi-back').addEventListener('click', () => $('group-info-screen').classList.remove('active'));
+$('gi-members').addEventListener('click', async (e) => {
+  const b = e.target.closest && e.target.closest('.gi-kick'); if(!b) return;
+  const a = b.getAttribute('data-addr');
+  const ok = await uiDialog(((state.contacts[a]||{}).nick || addrShort(a)) + ' をグループから外しますか？', {okText:'外す', danger:true});
+  if(!ok) return;
+  try{ const g = await api('/api/group/update', {ID: curAddr.slice(2), Remove: [a]}); state.contacts[g.addr] = g; updateChatHeader(); openGroupInfo(); renderList(); }catch(e){ toast(e.message); }
+});
 let gpMode = 'create';
 function openGroupPick(mode){
   gpMode = mode;
@@ -3328,6 +3427,7 @@ $('iv-save').addEventListener('click', async () => {
 });
 
 window.ygBack = () => {
+  if(qrscanClose){ qrscanClose(); return true; }
   if($('img-viewer').classList.contains('active')){ closeViewer(); return true; }
   if(modalClose){ modalClose(); return true; }
   if($('contact-info-screen').classList.contains('active')){

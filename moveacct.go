@@ -41,9 +41,10 @@ var mv struct {
 	at     time.Time
 	done   bool
 	// sending
-	sendID   string
-	sendAcks map[int]bool
-	sendRes  chan string // "" = ok, else error text
+	sendID    string
+	sendAcks  map[int]bool
+	sendHello bool        // the receiver answered our header
+	sendRes   chan string // "" = ok, else error text
 }
 
 func (a *App) moveBundle(history bool) ([]byte, error) {
@@ -127,6 +128,10 @@ func (a *App) onMoveIn(from string, w wire) {
 	}
 	switch w.T {
 	case "mh":
+		if w.ID == mv.id && from == mv.from {
+			a.sendWire(from, wire{T: "mha", ID: w.ID})
+			return
+		}
 		if w.ID == mv.id || len(w.ID) < 8 || len(w.ID) > 40 || !shaRe.MatchString(w.Sha) || w.Size < 33 || w.Size > move.MaxSize || w.N != (w.Size+move.Chunk-1)/move.Chunk {
 			return
 		}
@@ -134,6 +139,7 @@ func (a *App) onMoveIn(from string, w wire) {
 			return // another transfer is running
 		}
 		mv.id, mv.from, mv.hdr, mv.chunks, mv.got, mv.at = w.ID, from, w, make([][]byte, w.N), 0, time.Now()
+		a.sendWire(from, wire{T: "mha", ID: w.ID})
 		a.broadcast("move", map[string]any{"role": "recv", "phase": "recv", "got": 0, "n": w.N, "from": from})
 	case "mc":
 		if w.ID != mv.id || from != mv.from || w.I < 0 || w.I >= len(mv.chunks) {
@@ -195,7 +201,10 @@ func (a *App) onMoveAck(from string, w wire) {
 		return
 	}
 	switch w.T {
+	case "mha":
+		mv.sendHello = true
 	case "mca":
+		mv.sendHello = true
 		mv.sendAcks[w.I] = true
 	case "mok", "mng":
 		if mv.sendRes != nil {
@@ -222,7 +231,7 @@ func (a *App) moveSend(peer string, blob []byte) {
 	n := (len(blob) + move.Chunk - 1) / move.Chunk
 	res := make(chan string, 1)
 	mv.mu.Lock()
-	mv.sendID, mv.sendAcks, mv.sendRes = id, map[int]bool{}, res
+	mv.sendID, mv.sendAcks, mv.sendRes, mv.sendHello = id, map[int]bool{}, res, false
 	mv.mu.Unlock()
 	finish := func(err string) {
 		mv.mu.Lock()
@@ -241,6 +250,11 @@ func (a *App) moveSend(peer string, blob []byte) {
 	}
 	hdr := wire{T: "mh", ID: id, Size: len(blob), N: n, Sha: hex.EncodeToString(sum[:])}
 	lastProgress, last := time.Now(), -1
+	// Until the receiver answers the header (mha), send only the header so
+	// the first packets to a new address don't flood the key lookup; v0.15.0
+	// receivers never answer it, so start the chunks anyway after 4 s. Then
+	// grow the window from 32 chunks as acks come in.
+	start, win := time.Now(), 32
 	for {
 		mv.mu.Lock()
 		if mv.sendID != id {
@@ -248,8 +262,9 @@ func (a *App) moveSend(peer string, blob []byte) {
 			finish("キャンセルしました")
 			return
 		}
+		hello := mv.sendHello
 		var todo []int
-		for i := 0; i < n && len(todo) < 256; i++ {
+		for i := 0; i < n && len(todo) < win; i++ {
 			if !mv.sendAcks[i] {
 				todo = append(todo, i)
 			}
@@ -257,6 +272,9 @@ func (a *App) moveSend(peer string, blob []byte) {
 		got := len(mv.sendAcks)
 		mv.mu.Unlock()
 		if got != last {
+			if last >= 0 && win < 256 {
+				win *= 2
+			}
 			last, lastProgress = got, time.Now()
 			a.broadcast("move", map[string]any{"role": "send", "phase": "send", "got": got, "n": n})
 		} else if time.Since(lastProgress) > 90*time.Second {
@@ -265,6 +283,9 @@ func (a *App) moveSend(peer string, blob []byte) {
 		}
 		a.sendWire(peer, hdr)
 		time.Sleep(30 * time.Millisecond)
+		if !hello && time.Since(start) < 4*time.Second {
+			todo = nil
+		}
 		for k, i := range todo {
 			end := min((i+1)*move.Chunk, len(blob))
 			a.sendWire(peer, wire{T: "mc", ID: id, I: i, D: base64.StdEncoding.EncodeToString(blob[i*move.Chunk : end])})
