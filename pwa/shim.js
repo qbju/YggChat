@@ -296,9 +296,10 @@
   // ---- optional offline delivery over public Nostr relays (deprecated, opt-in) ----
   // Undeliverable text is sealed to the peer's key (only they can open it; the
   // sender is inside the box) and posted as a Nostr event signed by a
-  // throw-away key, tagged with a hash of the peer's key and a 7-day NIP-40
-  // expiry. The recipient pulls it, opens it, acks directly and publishes the
-  // NIP-09 deletion. Relays still see the tag, timing and IP addresses.
+  // throw-away key, tagged with a pairwise tag that rotates daily (v0.13), a
+  // back-dated created_at, a blurred 7-day NIP-40 expiry and padding. The
+  // recipient pulls it, opens it, acks directly and publishes the NIP-09
+  // deletion. Relays still see IP addresses and which tags one fetch asks for.
   const nDefaults = () => { try { return JSON.parse(yggNostrDefaults()); } catch { return []; } };
   const nRelays = () => (!locked && st.nostrOn) ? (st.nostrRelays && st.nostrRelays.length ? st.nostrRelays.slice() : nDefaults()) : null;
   const nostrState = () => ({ on: !!st.nostrOn, relays: st.nostrRelays && st.nostrRelays.length ? st.nostrRelays : nDefaults(), defaults: nDefaults() });
@@ -316,10 +317,21 @@
   }
   const relayPublish = (url, ev) => { const id = JSON.parse(ev).id; return relayTalk(url, '["EVENT",' + ev + ']', m => (m[0] === 'OK' && m[1] === id) ? m[2] === true : undefined, 15000).then(v => !!v); };
   const nostrPublish = (rs, ev) => Promise.all(rs.map(r => relayPublish(r, ev))).then(a => a.some(Boolean));
-  function relayFetch(url, tag) {
-    const out = [];
-    const req = JSON.stringify(['REQ', 'yc', { kinds: [1059], '#p': [tag], since: now() - 7 * 86400, limit: 200 }]);
-    return relayTalk(url, req, m => { if (m[0] === 'EVENT' && m[2]) out.push(m[2]); else if (m[0] === 'EOSE' || m[0] === 'CLOSED') return true; }, 20000).then(() => out);
+  function relayFetch(url, tags, since) {
+    const out = [], reqs = [];
+    for (let i = 0; i < tags.length; i += 100) reqs.push(JSON.stringify(['REQ', 'yc' + reqs.length, { kinds: [1059], '#p': tags.slice(i, i + 100), since, limit: 500 }]));
+    let left = reqs.length;
+    return new Promise(res => {
+      let ws, done = false;
+      const fin = () => { if (done) return; done = true; clearTimeout(t); try { ws && ws.close(); } catch {} res(out); };
+      const t = setTimeout(fin, 25000);
+      try { ws = new WebSocket(url); } catch { return fin(); }
+      ws.onopen = () => reqs.forEach(r => ws.send(r));
+      ws.onmessage = e => { let m; try { m = JSON.parse(e.data); } catch { return; }
+        if (m[0] === 'EVENT' && m[2]) out.push(m[2]);
+        else if (m[0] === 'EOSE' || m[0] === 'CLOSED') { try { ws.send(JSON.stringify(['CLOSE', m[1]])); } catch {} if (--left <= 0) fin(); } };
+      ws.onerror = fin; ws.onclose = fin;
+    });
   }
   const nSeen = new Set();
   let nBusy = false;
@@ -327,9 +339,9 @@
     const rs = nRelays(); if (!rs || nBusy) return;
     nBusy = true;
     try {
-      const tag = yggNostrTag();
+      let q; try { q = JSON.parse(yggNostrTags(JSON.stringify(Object.values(st.contacts).map(c => c.pk).filter(Boolean)))); } catch { return; }
       const evs = new Map();
-      for (const l of await Promise.all(rs.map(r => relayFetch(r, tag)))) for (const e of l) if (e && e.id) evs.set(e.id, e);
+      for (const l of await Promise.all(rs.map(r => relayFetch(r, q.tags, q.since)))) for (const e of l) if (e && e.id) evs.set(e.id, e);
       for (const [id, e] of evs) {
         if (nSeen.has(id)) continue;
         const r = yggNostrOpen(JSON.stringify(e)); if (r.error) continue;

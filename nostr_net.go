@@ -84,22 +84,29 @@ func nostrPublish(relays []string, ev string) bool {
 	return ok
 }
 
-// relayFetch returns the raw events addressed to tag on one relay.
-func relayFetch(url, tag string) []string {
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+// relayFetch returns the raw events carrying any of tags on one relay. Tags go
+// out in REQs of at most 100 values on one connection.
+func relayFetch(url string, tags []string) []string {
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 	defer cancel()
 	c, err := relayDial(ctx, url)
 	if err != nil {
 		return nil
 	}
 	defer c.Close(websocket.StatusNormalClosure, "")
-	since := time.Now().Unix() - mbox.NostrTTL
-	req := `["REQ","yc",{"kinds":[` + itoa(mbox.NostrKind) + `],"#p":["` + tag + `"],"since":` + itoa(int(since)) + `,"limit":200}]`
-	if c.Write(ctx, websocket.MessageText, []byte(req)) != nil {
-		return nil
+	since := mbox.NostrSince(time.Now().Unix())
+	subs := 0
+	for i := 0; i < len(tags); i += 100 {
+		j := min(i+100, len(tags))
+		tb, _ := json.Marshal(tags[i:j])
+		req := `["REQ","yc` + itoa(subs) + `",{"kinds":[` + itoa(mbox.NostrKind) + `],"#p":` + string(tb) + `,"since":` + itoa(int(since)) + `,"limit":500}]`
+		if c.Write(ctx, websocket.MessageText, []byte(req)) != nil {
+			return nil
+		}
+		subs++
 	}
 	var out []string
-	for {
+	for subs > 0 {
 		_, b, err := c.Read(ctx)
 		if err != nil {
 			return out
@@ -114,10 +121,11 @@ func relayFetch(url, tag string) []string {
 				out = append(out, string(m[2]))
 			}
 		case `"EOSE"`, `"CLOSED"`:
-			_ = c.Write(ctx, websocket.MessageText, []byte(`["CLOSE","yc"]`))
-			return out
+			_ = c.Write(ctx, websocket.MessageText, []byte(`["CLOSE",`+string(m[1])+`]`))
+			subs--
 		}
 	}
+	return out
 }
 
 func itoa(n int) string { b, _ := json.Marshal(n); return string(b) }
@@ -151,7 +159,15 @@ func (a *App) nostrFetch() {
 	if relays == nil {
 		return
 	}
-	tag := mbox.NostrTag(a.pub())
+	a.store.mu.Lock()
+	var peers [][]byte
+	for _, c := range a.store.Contacts {
+		if pk, err := hex.DecodeString(c.PK); err == nil && len(pk) == 32 {
+			peers = append(peers, pk)
+		}
+	}
+	a.store.mu.Unlock()
+	tags := mbox.NostrTags(a.privKey(), peers, time.Now().Unix())
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	evs := map[string]string{}
@@ -159,7 +175,7 @@ func (a *App) nostrFetch() {
 		wg.Add(1)
 		go func(r string) {
 			defer wg.Done()
-			for _, ev := range relayFetch(r, tag) {
+			for _, ev := range relayFetch(r, tags) {
 				var e struct{ ID string }
 				if json.Unmarshal([]byte(ev), &e) == nil && e.ID != "" {
 					mu.Lock()

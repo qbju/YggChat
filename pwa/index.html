@@ -1194,7 +1194,7 @@ img.emoji { height:1.2em; width:1.2em; margin:0 .05em 0 .1em; vertical-align:-0.
       <a class="dl-btn" href="https://yggchat.surge.sh/dl/yggchat-windows-amd64.exe" download>🪟 Windows (exe)</a>
       <a class="dl-btn" href="https://yggchat.surge.sh/dl/yggchat-linux-amd64" download>🐧 Linux (amd64)</a>
       <a class="dl-btn" href="https://yggchat.surge.sh/dl/yggchat-android-arm64" download>⌨️ Termux (arm64)</a>
-      <div class="row-sub" id="dl-ver">最新: v0.12.3 ・ SHA256SUMS で検証できます</div>
+      <div class="row-sub" id="dl-ver">最新: v0.13.0 ・ SHA256SUMS で検証できます</div>
     </div>
     <div class="section">
       <div class="section-title">About</div>
@@ -2537,7 +2537,7 @@ async function nostrSet(body){
 }
 $('nostr-switch').addEventListener('click', async () => {
   const on = !(state.nostr && state.nostr.on);
-  if(on && !(await uiDialog('Nostr置き配をオンにしますか？\n\n届かなかった文章を暗号化して公開リレーに最大7日預けます。中身と送信者は相手しか読めませんが、リレー運営者には宛先タグ・時刻・IPアドレスが見えます。リレーが消さない・預かってくれないこともあります。相手側もオンにしている必要があります。', {okText:'オンにする'}))) return;
+  if(on && !(await uiDialog('Nostr置き配をオンにしますか？\n\n届かなかった文章を暗号化して公開リレーに最大7日預けます。中身と送信者は相手しか読めませんが、リレー運営者にはIPアドレスと、毎日変わる宛先タグが見えます（送信時刻はぼかします）。連絡先にいる相手同士でしか届きません。リレーが消さない・預かってくれないこともあります。相手側もオンにしている必要があります。', {okText:'オンにする'}))) return;
   if(await nostrSet({On: on})) toast(on ? '置き配をオンにしました' : '置き配をオフにしました');
 });
 $('nostr-edit').addEventListener('click', async () => {

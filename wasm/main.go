@@ -17,6 +17,7 @@ import (
 	"net/url"
 	"os"
 	"syscall/js"
+	"time"
 
 	gologme "github.com/gologme/log"
 	"github.com/h6e/yggchat/mbox"
@@ -272,6 +273,20 @@ func nostrOpen(this js.Value, args []js.Value) any {
 func nostrTag(this js.Value, args []js.Value) any {
 	return mbox.NostrTag(priv.Public().(ed25519.PublicKey))
 }
+// yggNostrTags(pksJSON) -> JSON {tags:[...], since:N}: every tag a box for us may carry now.
+func nostrTags(this js.Value, args []js.Value) any {
+	var hexes []string
+	_ = json.Unmarshal([]byte(args[0].String()), &hexes)
+	var pks [][]byte
+	for _, h := range hexes {
+		if pk, err := hex.DecodeString(h); err == nil && len(pk) == ed25519.PublicKeySize {
+			pks = append(pks, pk)
+		}
+	}
+	now := time.Now().Unix()
+	b, _ := json.Marshal(map[string]any{"tags": mbox.NostrTags(priv, pks, now), "since": mbox.NostrSince(now)})
+	return string(b)
+}
 func nostrDefaults(this js.Value, args []js.Value) any {
 	b, _ := json.Marshal(mbox.DefaultRelays)
 	return string(b)
@@ -287,6 +302,7 @@ func main() {
 	js.Global().Set("yggNostrWrap", js.FuncOf(nostrWrap))
 	js.Global().Set("yggNostrOpen", js.FuncOf(nostrOpen))
 	js.Global().Set("yggNostrTag", js.FuncOf(nostrTag))
+	js.Global().Set("yggNostrTags", js.FuncOf(nostrTags))
 	js.Global().Set("yggNostrDefaults", js.FuncOf(nostrDefaults))
 	js.Global().Set("yggAddPeer", js.FuncOf(addPeer))
 	js.Global().Set("yggRemovePeer", js.FuncOf(removePeer))
