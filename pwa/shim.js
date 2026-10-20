@@ -274,6 +274,8 @@
       if (finger.on) send(src, { t: 'fr', nick: locked ? 'anon' : (st.nick || 'anon'), text: cleanPlan(finger.plan, 700) });
       return;
     }
+    if (w.t === 'mh' || w.t === 'mc') { if (!(st.blocked && st.blocked[src])) onMoveIn(src, w); return; }
+    if (w.t === 'mca' || w.t === 'mok' || w.t === 'mng') { onMoveAck(src, w); return; }
     if (w.t === 'fca') { const g = chunkAcks.get(w.id); if (g) g.add(w.i | 0); return; }
     if (w.t === 'ack') { const f = acks.get(w.id); if (f) { acks.delete(w.id); f(); } askPK(src); return; }
     if (locked || st.blocked[src]) return; // stay silent: the sender keeps it queued
@@ -313,6 +315,84 @@
   }
   const chunkAcks = new Map();
   const inFiles = new Map();
+
+  // ---------- account move (v0.15; same wire + bundle as moveacct.go) ----------
+  const MV_MAX = 64 * 1024 * 1024;
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const b64big = u8 => { let s = ''; for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000)); return btoa(s); };
+  const mvIn = { on: false, id: '', from: '', hdr: null, chunks: null, got: 0, at: 0, done: false, busy: false };
+  const mvOut = { id: '', acks: null, res: null };
+  function moveBundle(history) {
+    const s = { nick: st.nick, bio: st.bio || undefined, avatar: st.avatar || undefined, domain: st.domain || undefined, contacts: st.contacts, blocked: st.blocked, groups: st.groups, nostr_on: !!st.nostrOn, nostr_relays: st.nostrRelays && st.nostrRelays.length ? st.nostrRelays : undefined, nostr_legacy: !!st.nostrLegacy };
+    if (history) { s.messages = st.messages; s.ctl = st.ctl; }
+    return JSON.stringify({ v: 1, key: outer.key, store: s });
+  }
+  async function importBundle(txt) {
+    let b; try { b = JSON.parse(txt) } catch { throw new Error('データが壊れています') }
+    if (!b || b.v !== 1) throw new Error('対応していない移行データです（アプリを更新してください）');
+    if (!/^[0-9a-f]{128}$/.test(String(b.key))) throw new Error('鍵が壊れています');
+    const s = b.store || {};
+    st = Object.assign(blank(), { nick: s.nick || 'anon', bio: s.bio || '', avatar: s.avatar || '', domain: s.domain || undefined, contacts: s.contacts || {}, messages: s.messages || [], blocked: s.blocked || {}, groups: s.groups || {}, ctl: s.ctl || [], nostrOn: !!s.nostr_on, nostrLegacy: !!s.nostr_legacy, nostrRelays: s.nostr_relays || [] });
+    migrate(); outer.key = b.key; save(); saveOuter(); await saving;
+    setTimeout(() => location.reload(), 700);
+  }
+  async function onMoveIn(src, w) {
+    if (!mvIn.on) return;
+    if (mvIn.done) { if (w.id === mvIn.id) send(src, { t: 'mok', id: w.id }); return; }
+    if (w.t === 'mh') {
+      const size = w.size | 0, n = w.n | 0;
+      if (w.id === mvIn.id || !/^[0-9a-f]{8,40}$/.test(String(w.id)) || !/^[0-9a-f]{64}$/.test(String(w.sha)) || size < 33 || size > MV_MAX || n !== Math.ceil(size / CHUNK)) return;
+      if (mvIn.id && mvIn.from !== src && Date.now() - mvIn.at < 60000) return; // another transfer is running
+      Object.assign(mvIn, { id: w.id, from: src, hdr: w, chunks: new Array(n), got: 0, at: Date.now(), busy: false });
+      emit('move', { role: 'recv', phase: 'recv', got: 0, n, from: src });
+      return;
+    }
+    if (w.id !== mvIn.id || src !== mvIn.from || !mvIn.chunks) return;
+    const i = w.i | 0; if (i < 0 || i >= mvIn.chunks.length) return;
+    if (!mvIn.chunks[i]) {
+      let b; try { b = unb64(String(w.d || '')) } catch { return }
+      if (!b.length || b.length > CHUNK) return;
+      mvIn.chunks[i] = b; mvIn.got++; mvIn.at = Date.now();
+      if (mvIn.got % 64 === 0) emit('move', { role: 'recv', phase: 'recv', got: mvIn.got, n: mvIn.chunks.length, from: src });
+    }
+    send(src, { t: 'mca', id: w.id, i });
+    if (mvIn.got < mvIn.chunks.length || mvIn.busy) return;
+    mvIn.busy = true;
+    const id = w.id, n = mvIn.chunks.length;
+    const fail = msg => { send(src, { t: 'mng', id, text: msg }); emit('move', { role: 'recv', phase: 'error', err: msg }); Object.assign(mvIn, { id: '', chunks: null, busy: false }); };
+    const all = new Uint8Array(mvIn.hdr.size); let off = 0;
+    for (const c of mvIn.chunks) { if (off + c.length > all.length) return fail('データが壊れていました'); all.set(c, off); off += c.length; }
+    if (off !== all.length || await sha(all) !== mvIn.hdr.sha) return fail('データが壊れていました');
+    const r = yggMoveOpen(b64big(all)); if (r.error) return fail(r.error);
+    emit('move', { role: 'recv', phase: 'import', got: n, n });
+    try { await importBundle(r.plain); } catch (e) { return fail(e.message); }
+    mvIn.done = true; mvIn.chunks = null;
+    for (let k = 0; k < 3; k++) send(src, { t: 'mok', id });
+  }
+  function onMoveAck(src, w) {
+    if (!w.id || w.id !== mvOut.id) return;
+    if (w.t === 'mca') mvOut.acks.add(w.i | 0);
+    else if (mvOut.res) mvOut.res(w.t === 'mok' ? '' : '受け取り側: ' + (cleanText(w.text, 200) || '失敗しました'));
+  }
+  async function moveSend(peer, blob) {
+    const id = hexOf(crypto.getRandomValues(new Uint8Array(8))), n = Math.ceil(blob.length / CHUNK);
+    const hdr = { t: 'mh', id, size: blob.length, n, sha: await sha(blob) };
+    let resolve; const res = new Promise(r => resolve = r);
+    Object.assign(mvOut, { id, acks: new Set(), res: resolve });
+    const finish = err => { if (mvOut.id === id) Object.assign(mvOut, { id: '', acks: null, res: null }); emit('move', err ? { role: 'send', phase: 'error', err } : { role: 'send', phase: 'done', got: n, n }); };
+    let last = -1, lastAt = Date.now();
+    for (;;) {
+      if (mvOut.id !== id) return finish('キャンセルしました');
+      const got = mvOut.acks.size;
+      if (got !== last) { last = got; lastAt = Date.now(); emit('move', { role: 'send', phase: 'send', got, n }); }
+      else if (Date.now() - lastAt > 90000) return finish('相手に届きません。新しい端末で受け取り画面が開いているか確認してください');
+      send(peer, hdr); await sleep(30);
+      let k = 0;
+      for (let i = 0; i < n && k < 256; i++) if (!mvOut.acks.has(i)) { send(peer, { t: 'mc', id, i, d: b64(blob.subarray(i * CHUNK, (i + 1) * CHUNK)) }); if (++k % 8 === 0) await sleep(4); }
+      const r = await Promise.race([res, sleep(700).then(() => null)]);
+      if (r !== null) return finish(r);
+    }
+  }
   async function deliverImg(m, tries) {
     const p = parseImg(m.img); if (!p) { setStatus(m.peer, m.id, 'failed'); return false; }
     const n = Math.ceil(p.bytes.length / CHUNK);
@@ -658,6 +738,33 @@
         }
         st.nick = cleanNick(body.Nick) || 'anon'; st.bio = cleanText(body.Bio, 140); st.avatar = cleanText(body.Avatar, 8);
         save(); for (const p in st.contacts) if (st.contacts[p].shared) sendProf(p); return ok({});
+      }
+      case 'move/recv': {
+        if (body.Stop) { if (!mvIn.done) Object.assign(mvIn, { on: false, id: '', chunks: null }); return ok({}); }
+        const code = yggMoveNew(addr); if (!code) return bad('failed', 500);
+        Object.assign(mvIn, { on: true, id: '', chunks: null, done: false, busy: false });
+        return ok({ code });
+      }
+      case 'move/send': {
+        if (body.Cancel) { mvOut.id = ''; return ok({}); }
+        if (locked) return bad('ロックを解除してください');
+        if (mvOut.id) return bad('送信中です');
+        const r = yggMoveSeal(String(body.Code || ''), moveBundle(!!body.History));
+        if (r.error) return bad(r.error);
+        if (r.addr === addr) return bad('これはこの端末自身のコードです。新しい端末に出ているコードを入れてください');
+        const blob = unb64(r.blob); moveSend(r.addr, blob);
+        return ok({ size: blob.length });
+      }
+      case 'move/export': {
+        if (locked) return bad('ロックを解除してください');
+        const r = yggMoveSealPass(String(body.Pass || ''), moveBundle(!!body.History));
+        return r.error ? bad(r.error) : ok({ data: r.data });
+      }
+      case 'move/import': {
+        const r = yggMoveOpenPass(String(body.Pass || ''), String(body.Data || ''));
+        if (r.error) return bad(r.error);
+        try { await importBundle(r.plain); } catch (e) { return bad(e.message); }
+        return ok({});
       }
       case 'identity/reset': {
         if (!body.Confirm) return bad('confirm required');

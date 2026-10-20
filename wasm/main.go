@@ -9,7 +9,9 @@
 package main
 
 import (
+	"crypto/ecdh"
 	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
@@ -21,6 +23,7 @@ import (
 
 	gologme "github.com/gologme/log"
 	"github.com/h6e/yggchat/mbox"
+	"github.com/h6e/yggchat/move"
 	"github.com/yggdrasil-network/yggdrasil-go/src/config"
 	"github.com/yggdrasil-network/yggdrasil-go/src/core"
 	"github.com/yggdrasil-network/yggdrasil-go/src/ipv6rwc"
@@ -313,8 +316,76 @@ func main() {
 	js.Global().Set("yggRemovePeer", js.FuncOf(removePeer))
 	js.Global().Set("yggPeerList", js.FuncOf(peerList))
 	js.Global().Set("yggStart", js.FuncOf(start))
+	js.Global().Set("yggMoveNew", js.FuncOf(moveNew))
+	js.Global().Set("yggMoveSeal", js.FuncOf(moveSeal))
+	js.Global().Set("yggMoveOpen", js.FuncOf(moveOpen))
+	js.Global().Set("yggMoveSealPass", js.FuncOf(moveSealPass))
+	js.Global().Set("yggMoveOpenPass", js.FuncOf(moveOpenPass))
 	js.Global().Set("yggSend", js.FuncOf(send))
 	js.Global().Set("yggPeers", js.FuncOf(peers))
 	js.Global().Call("dispatchEvent", js.Global().Get("Event").New("yggready"))
 	select {}
+}
+
+// ---------- account move (see move/move.go) ----------
+
+var mvPriv *ecdh.PrivateKey
+
+func jsErr(err error) any { return js.ValueOf(map[string]any{"error": err.Error()}) }
+
+// yggMoveNew(addr) -> code (keeps the throwaway key for yggMoveOpen)
+func moveNew(this js.Value, args []js.Value) any {
+	k, code, err := move.NewReceiver(args[0].String())
+	if err != nil {
+		return ""
+	}
+	mvPriv = k
+	return code
+}
+
+// yggMoveSeal(code, bundleJSON) -> {addr, blob(base64)} | {error}
+func moveSeal(this js.Value, args []js.Value) any {
+	addr, rpk, err := move.ParseCode(args[0].String())
+	if err != nil {
+		return jsErr(err)
+	}
+	b, err := move.Seal(rpk, []byte(args[1].String()))
+	if err != nil {
+		return jsErr(err)
+	}
+	return js.ValueOf(map[string]any{"addr": addr, "blob": base64.StdEncoding.EncodeToString(b)})
+}
+
+// yggMoveOpen(blobBase64) -> {plain} | {error}
+func moveOpen(this js.Value, args []js.Value) any {
+	if mvPriv == nil {
+		return js.ValueOf(map[string]any{"error": "受け取り待ちではありません"})
+	}
+	b, err := base64.StdEncoding.DecodeString(args[0].String())
+	if err == nil {
+		b, err = move.Open(mvPriv, b)
+	}
+	if err != nil {
+		return jsErr(err)
+	}
+	return js.ValueOf(map[string]any{"plain": string(b)})
+}
+
+func moveSealPass(this js.Value, args []js.Value) any {
+	b, err := move.SealPass(args[0].String(), []byte(args[1].String()))
+	if err != nil {
+		return jsErr(err)
+	}
+	return js.ValueOf(map[string]any{"data": base64.StdEncoding.EncodeToString(b)})
+}
+
+func moveOpenPass(this js.Value, args []js.Value) any {
+	b, err := base64.StdEncoding.DecodeString(args[1].String())
+	if err == nil {
+		b, err = move.OpenPass(args[0].String(), b)
+	}
+	if err != nil {
+		return jsErr(err)
+	}
+	return js.ValueOf(map[string]any{"plain": string(b)})
 }

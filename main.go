@@ -367,6 +367,12 @@ func (a *App) serveChat() {
 			continue
 		}
 		switch w.T {
+		case "mh", "mc":
+			a.onMoveIn(from, w)
+			continue
+		case "mca", "mok", "mng":
+			a.onMoveAck(from, w)
+			continue
 		case "fq", "fr":
 			a.onFingerUDP(from, w)
 			continue
@@ -1311,6 +1317,7 @@ func main() {
 	mux := http.NewServeMux()
 	a.httpHandlers(mux)
 	a.featureHandlers(mux)
+	a.moveHandlers(mux)
 	a.nostrHandlers(mux)
 	a.groupHandlers(mux)
 	a.socksHandlers(mux)

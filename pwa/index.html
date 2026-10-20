@@ -1250,6 +1250,26 @@ img.emoji { height:1.2em; width:1.2em; margin:0 .05em 0 .1em; vertical-align:-0.
       <button id="reset-id" class="btn-danger">新しいIDを作る（連絡先と履歴を消去）</button>
     </div>
     <div class="section">
+      <div class="section-title">端末移行</div>
+      <div class="row-sub">同じIDを別の端末へ移します（PWAとアプリの間もOK）。</div>
+      <div style="display:flex; gap:8px; flex-wrap:wrap;">
+        <button id="mv-recv-btn">この端末で受け取る</button>
+        <button id="mv-send-btn">この端末から送る</button>
+      </div>
+      <div id="mv-box" style="display:none; flex-direction:column; gap:8px;">
+        <div id="mv-qr" style="align-self:center; width:200px; padding:10px; background:#fff; border-radius:10px;"></div>
+        <div class="row-sub" id="mv-code" style="word-break:break-all; user-select:all; -webkit-user-select:all;"></div>
+        <div style="display:flex; gap:8px; flex-wrap:wrap;"><button id="mv-copy">コードをコピー</button><button id="mv-stop">やめる</button></div>
+      </div>
+      <div class="row-sub" id="mv-status"></div>
+      <button id="mv-send-cancel" style="display:none;">送信をやめる</button>
+      <div id="mv-file" style="display:flex; gap:8px; flex-wrap:wrap;">
+        <button id="mv-export">バックアップを書き出す</button>
+        <button id="mv-import">バックアップから読み込む</button>
+        <input type="file" id="mv-file-in" accept=".ygb,application/octet-stream" style="display:none;">
+      </div>
+    </div>
+    <div class="section">
       <div class="section-title">外観</div>
       <div class="seg" id="theme-seg">
         <button data-theme="system">システム</button>
@@ -1949,6 +1969,7 @@ function uiDialog(title, {input=null, okText='OK', danger=false}={}){
 }
 const uiConfirm = (t, danger) => uiDialog(t, {okText: danger ? '削除' : 'OK', danger});
 const uiPrompt = (t, v) => uiDialog(t, {input: v || ''});
+const uiAlert = t => uiDialog(t);
 
 $('ci-rename').addEventListener('click', async () => {
   const c = state.contacts[curAddr] || {addr:curAddr, nick:''};
@@ -2093,6 +2114,91 @@ $('settings-copy-addr').addEventListener('click', async () => {
   }catch(e){
     toast('コピー失敗');
   }
+});
+
+// ---------- device move (v0.15) ----------
+const mvSet = t => { $('mv-status').textContent = t; };
+const u8b64 = u8 => { let s = ''; for(let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000)); return btoa(s); };
+const hasData = () => Object.keys(state.contacts || {}).length > 0 || (state.messages || []).length > 0;
+const replaceOK = async () => !hasData() || await uiDialog('この端末の今のIDと連絡先・履歴は、移ってきたもので置き換わります。続けますか？', {okText:'置き換える', danger:true});
+$('mv-file').style.display = window.YggAndroid ? 'none' : 'flex';
+$('mv-recv-btn').addEventListener('click', async () => {
+  if(!(await replaceOK())) return;
+  try{
+    const r = await api('/api/move/recv', {});
+    $('mv-code').textContent = r.code;
+    try{ const q = qrcode(0, 'M'); q.addData(r.code); q.make(); $('mv-qr').innerHTML = q.createSvgTag({cellSize:4, margin:2, scalable:true}); }catch(e){ $('mv-qr').innerHTML = ''; }
+    $('mv-box').style.display = 'flex';
+    mvSet('古い端末の「この端末から送る」にこのコードを入れてね。受け取るまでこの画面を開いたままに。');
+  }catch(e){ toast(e.message); }
+});
+$('mv-copy').addEventListener('click', async () => {
+  try{ await navigator.clipboard.writeText($('mv-code').textContent); toast('コピーしました'); }catch(e){ toast('コピー失敗'); }
+});
+$('mv-stop').addEventListener('click', async () => {
+  try{ await api('/api/move/recv', {Stop:true}); }catch(e){}
+  $('mv-box').style.display = 'none'; mvSet('');
+});
+$('mv-send-btn').addEventListener('click', async () => {
+  const code = await uiPrompt('新しい端末に出ている移行コード（ygm1:…）', '');
+  if(code === null || !code.trim()) return;
+  const hist = await uiDialog('トーク履歴（画像を含む）も移しますか？', {okText:'履歴も移す'});
+  try{
+    const r = await api('/api/move/send', {Code: code.trim(), History: !!hist});
+    mvSet('送信中… 0%（' + Math.max(1, Math.round(r.size / 1024)) + 'KB）');
+    $('mv-send-cancel').style.display = '';
+  }catch(e){ await uiAlert(e.message); }
+});
+$('mv-send-cancel').addEventListener('click', () => { api('/api/move/send', {Cancel:true}).catch(()=>{}); });
+function onMoveEvent(m){
+  const pct = m.n ? Math.floor(m.got * 100 / m.n) : 0;
+  if(m.role === 'recv'){
+    if(m.phase === 'recv') mvSet('受信中… ' + pct + '%');
+    else if(m.phase === 'import') mvSet('受け取りました。切り替えています…');
+    else if(m.phase === 'error') mvSet('受け取りに失敗: ' + m.err);
+    return;
+  }
+  if(m.phase === 'send'){ mvSet('送信中… ' + pct + '%'); return; }
+  $('mv-send-cancel').style.display = 'none';
+  if(m.phase === 'error'){ mvSet('送信に失敗: ' + m.err); return; }
+  if(m.phase === 'done'){ mvSet('移行しました。'); mvAfterSend(); }
+}
+async function mvAfterSend(){
+  const ok = await uiDialog('移行できました。同じIDを2台で動かすとメッセージが届かなくなるので、この端末のIDは消してね。', {okText:'この端末を初期化', danger:true});
+  if(!ok) return;
+  try{ await api('/api/identity/reset', {Confirm:true}); toast('初期化しました'); }catch(e){ toast(e.message); }
+}
+$('mv-export').addEventListener('click', async () => {
+  const pass = await uiPrompt('バックアップのパスフレーズ（読み込む時に必要）', '');
+  if(!pass) return;
+  const hist = await uiDialog('トーク履歴（画像を含む）も入れますか？', {okText:'履歴も入れる'});
+  toast('作成中…');
+  try{
+    const r = await api('/api/move/export', {Pass: pass, History: !!hist});
+    const bin = atob(r.data), u8 = new Uint8Array(bin.length);
+    for(let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([u8], {type:'application/octet-stream'}));
+    a.download = 'yggchat-' + new Date().toISOString().slice(0, 10) + '.ygb';
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+    toast('書き出しました（鍵が入っているので大事に保管してね）');
+  }catch(e){ await uiAlert(e.message); }
+});
+$('mv-import').addEventListener('click', async () => {
+  if(!(await replaceOK())) return;
+  $('mv-file-in').value = ''; $('mv-file-in').click();
+});
+$('mv-file-in').addEventListener('change', async () => {
+  const f = $('mv-file-in').files[0]; if(!f) return;
+  const pass = await uiPrompt('バックアップのパスフレーズ', '');
+  if(!pass) return;
+  toast('読み込み中…');
+  try{
+    const data = u8b64(new Uint8Array(await f.arrayBuffer()));
+    await api('/api/move/import', {Pass: pass, Data: data});
+    toast('読み込みました。切り替えています…');
+  }catch(e){ await uiAlert(e.message); }
 });
 
 $('copy-invite-btn').addEventListener('click', async () => {
@@ -2572,6 +2678,8 @@ function connectEvents(){
         showLock();
       }else if(d.type === 'lan'){
         if(state.lan){ state.lan.nearby = (d.data && d.data.nearby) || []; renderLan(); }
+      }else if(d.type === 'move'){
+        onMoveEvent(d.data || {});
       }else if(d.type === 'peers'){
         state.peers = (d.data && d.data.up) != null ? d.data.up : state.peers;
         updateConn();
