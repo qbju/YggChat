@@ -468,7 +468,16 @@
     await loadStore();
     const go = new Go();
     const wasmReady = new Promise(r => addEventListener('yggready', r, { once: true }));
-    const res = await WebAssembly.instantiateStreaming(fetch('ygg.wasm'), go.importObject);
+    // A wasm cached half-way (e.g. fetched while a deploy was in progress) never
+    // parses; drop the caches and fetch it fresh from the network once.
+    let res;
+    try { res = await WebAssembly.instantiateStreaming(fetch('ygg.wasm'), go.importObject); }
+    catch (e) {
+      try { for (const k of await caches.keys()) await caches.delete(k); } catch {}
+      const buf = await (await fetch('ygg.wasm?fresh=' + Date.now(), { cache: 'reload' })).arrayBuffer();
+      res = await WebAssembly.instantiate(buf, go.importObject);
+      try { navigator.serviceWorker && navigator.serviceWorker.getRegistration().then(r => r && r.update()); } catch {}
+    }
     go.run(res.instance);
     await wasmReady;
     const r = yggStart(outer.key, outer.peers, onPacket);
