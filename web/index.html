@@ -132,6 +132,15 @@ input, textarea {
   font-size:14px;
 }
 
+input[type=checkbox] {
+  width:24px; height:24px; min-width:24px; padding:0; margin:0;
+  border:2px solid var(--dim); border-radius:6px; background:transparent;
+  display:inline-grid; place-content:center; cursor:pointer;
+}
+input[type=checkbox]::after { content:''; width:7px; height:12px; border:solid #111; border-width:0 3px 3px 0; transform:rotate(45deg) translate(-1px,-1px); opacity:0; }
+input[type=checkbox]:checked { background:var(--accent); border-color:var(--accent); }
+input[type=checkbox]:checked::after { opacity:1; }
+
 input:focus, textarea:focus {
   border-color:var(--accent);
 }
@@ -1050,11 +1059,21 @@ img.emoji { height:1.2em; width:1.2em; margin:0 .05em 0 .1em; vertical-align:-0.
     <div style="display:flex; gap:8px; flex-wrap:wrap; justify-content:center;">
       <button id="ci-copy-addr">アドレスをコピー</button>
       <button id="ci-finger">finger</button>
+      <button id="ci-site">サイト</button>
       <button id="ci-rename">名前を変更</button>
       <button id="ci-delete" style="color:var(--error);">会話を削除</button>
       <button id="ci-block" style="color:var(--error);">ブロック</button>
     </div>
   </div>
+</div>
+
+<div class="screen" id="site-view-screen" style="z-index:25;">
+  <div class="header">
+    <button class="icon-btn" id="sv-back">←</button>
+    <div class="title" id="sv-title" style="font-size:13px; font-family:ui-monospace,monospace; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">サイト</div>
+  </div>
+  <iframe id="sv-frame" sandbox="" referrerpolicy="no-referrer" style="flex:1; width:100%; border:0; background:#fff;"></iframe>
+  <div class="row-sub" style="padding:6px 12px calc(6px + env(safe-area-inset-bottom)); font-size:11px;">スクリプト・フォーム・外部の読み込みは無効にして表示しています。</div>
 </div>
 
 <div class="screen" id="group-info-screen">
@@ -1178,6 +1197,21 @@ img.emoji { height:1.2em; width:1.2em; margin:0 .05em 0 .1em; vertical-align:-0.
       </div>
       <div class="row-sub" id="finger-note"></div>
     </div>
+    <div class="section" id="site-box" style="display:none;">
+      <div class="section-title">プロフィールサイト<span style="font-size:11px;color:#c0392b;margin-left:6px;">ベータ</span></div>
+      <div class="row-sub">オンにすると、Yggdrasil上の誰でも <span style="font-family:ui-monospace,monospace;" id="site-url"></span> で、ここに書いたHTMLの1ページを見られます（80番ポート）。オフの間は80番ポート自体を閉じます。公開中は、あなたがオンラインかどうかが外から分かります。写真は data: URL で埋め込めます（256KBまで）。</div>
+      <div class="toggle">
+        <div class="toggle-label">サイトを公開する</div>
+        <div class="switch" id="site-switch"><div class="switch-handle"></div></div>
+      </div>
+      <textarea id="site-html" rows="8" placeholder="<h1>こんにちは</h1>&#10;<p>好きなもの: Gopher、Yggdrasil</p>" style="width:100%;box-sizing:border-box;font-family:ui-monospace,monospace;font-size:12px;"></textarea>
+      <div class="row-btns">
+        <button id="site-save">保存</button>
+        <button id="site-preview">プレビュー</button>
+        <button id="site-template">ひな形</button>
+      </div>
+      <div class="row-sub" id="site-note"></div>
+    </div>
     <div class="section">
       <div class="section-title">通知</div>
       <div class="toggle">
@@ -1247,7 +1281,7 @@ img.emoji { height:1.2em; width:1.2em; margin:0 .05em 0 .1em; vertical-align:-0.
       <a class="dl-btn" href="https://yggchat.surge.sh/dl/yggchat-windows-amd64.exe" download>🪟 Windows (exe)</a>
       <a class="dl-btn" href="https://yggchat.surge.sh/dl/yggchat-linux-amd64" download>🐧 Linux (amd64)</a>
       <a class="dl-btn" href="https://yggchat.surge.sh/dl/yggchat-android-arm64" download>⌨️ Termux (arm64)</a>
-      <div class="row-sub" id="dl-ver">最新: v0.13.5 ・ SHA256SUMS で検証できます</div>
+      <div class="row-sub" id="dl-ver">最新: v0.13.6 ・ SHA256SUMS で検証できます</div>
     </div>
     <div class="section">
       <div class="section-title">About</div>
@@ -1946,7 +1980,7 @@ function openSettings(){
   if(state.system) $('platform-info').textContent = 'ネイティブ版（端末のYggdrasilを使用中）: 通信は端末のYggdrasil（VPN/TUN）経由です。' + (state.addr ? '' : ' いまは見つかりません。Yggdrasilアプリを起動してください。');
   $('settings-screen').classList.add('active');
   renderShareQR();
-  loadLan(); loadFinger(); loadVpnIn();
+  loadLan(); loadFinger(); loadSite(); loadVpnIn();
 }
 
 function closeSettings(){
@@ -2738,6 +2772,47 @@ $('lan-pass').addEventListener('click', async () => {
 setInterval(() => { if($('settings-screen').classList.contains('active') && state.lan && state.lan.on) loadLan(); }, 5000);
 
 // ---------- finger ----------
+// ---------- profile site (port 80 on the Yggdrasil address) ----------
+const SITE_CSP = '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; img-src data:; style-src \'unsafe-inline\'; font-src data:; media-src data:">';
+function showSite(title, html){
+  $('sv-title').textContent = title;
+  $('sv-frame').srcdoc = SITE_CSP + '<base target="_blank">' + html;
+  $('site-view-screen').classList.add('active');
+}
+$('sv-back').addEventListener('click', () => { $('site-view-screen').classList.remove('active'); $('sv-frame').srcdoc = ''; });
+async function loadSite(){
+  const box = $('site-box');
+  if(state.platform === 'web'){ box.style.display = 'none'; return; }
+  try{ state.site = await api('/api/site', {}); }catch(e){ box.style.display = 'none'; return; }
+  box.style.display = '';
+  const s = state.site || {};
+  setSwitch('site-switch', !!s.on);
+  $('site-url').textContent = s.url || ('http://[' + state.addr + ']/');
+  if(document.activeElement !== $('site-html')) $('site-html').value = s.html || '';
+  $('site-note').textContent = s.on ? (s.listening ? '公開中: ' + s.url : ('80番ポートを開けませんでした（' + (s.error || '不明') + '）')) : '';
+}
+async function siteSet(body){
+  try{ state.site = await api('/api/site', body); await loadSite(); return true; }catch(e){ toast(e.message); return false; }
+}
+$('site-switch').addEventListener('click', async () => {
+  const on = !(state.site && state.site.on);
+  if(on && !(await uiDialog('プロフィールサイトを公開しますか？\n\nYggdrasil上の誰でも http://[あなたのアドレス]/ でこのページを見られます。公開中はオンラインかどうかも分かります。書いた内容は全部公開されるので、個人情報に気をつけてください。', {okText:'公開する'}))) return;
+  if(await siteSet({On: on, HTML: $('site-html').value})) toast(on ? '公開しました' : '公開をやめました');
+});
+$('site-save').addEventListener('click', async () => { if(await siteSet({HTML: $('site-html').value})) toast('保存しました'); });
+$('site-preview').addEventListener('click', () => showSite('プレビュー', $('site-html').value));
+$('site-template').addEventListener('click', async () => {
+  if($('site-html').value.trim() && !(await uiConfirm('今の内容をひな形で置き換えますか？'))) return;
+  const n = escapeHtml(state.nick || 'anon');
+  $('site-html').value = '<!doctype html>\n<meta charset="utf-8">\n<meta name="viewport" content="width=device-width">\n<title>' + n + '</title>\n<style>\n body{font-family:sans-serif;max-width:40em;margin:2em auto;padding:0 1em;line-height:1.7;background:#0f1411;color:#e6efe9}\n h1{color:#6fdc98}\n a{color:#6fdc98}\n</style>\n<h1>' + n + '</h1>\n<p>Yggdrasilで見てくれてありがとう。</p>\n<h2>好きなもの</h2>\n<ul>\n <li>…</li>\n</ul>\n<p>YggChat: ' + escapeHtml(state.addr) + '</p>\n';
+});
+$('ci-site').addEventListener('click', async () => {
+  if(!curAddr) return;
+  if(state.platform === 'web'){ toast('ブラウザ版ではサイトを開けません（アプリ版で開けます）'); return; }
+  toast('読み込み中…');
+  try{ const r = await api('/api/site/view', {Addr: curAddr}); showSite('http://[' + r.addr + ']/', r.html); }catch(e){ toast(e.message); }
+});
+
 async function loadFinger(){
   try{ state.finger = await api('/api/finger'); }catch(e){ state.finger = null; }
   const f = state.finger || {};
@@ -2941,7 +3016,7 @@ function openGroupPick(mode){
   $('gp-name').style.display = mode === 'add' ? 'none' : '';
   $('gp-name').value = ''; $('gp-addr').value = '';
   const cands = Object.values(state.contacts || {}).filter(c => !c.group && !c.req && c.addr && !(g && (g.members||[]).includes(c.addr)));
-  $('gp-list').innerHTML = cands.length ? cands.map(c => '<label class="row" style="padding:6px 0; gap:10px; justify-content:flex-start;"><input type="checkbox" value="' + escapeHtml(c.addr) + '" style="width:auto;"><div><div>' + escapeHtml(c.nick || addrShort(c.addr)) + '</div><div class="row-sub" style="font-family:ui-monospace,monospace;">' + escapeHtml(addrShort(c.addr)) + '</div></div></label>').join('') : '<div class="row-sub">選べる連絡先がありません。アドレスで追加できます。</div>';
+  $('gp-list').innerHTML = cands.length ? cands.map(c => '<label class="row" style="padding:8px 0; gap:12px; justify-content:flex-start; cursor:pointer;"><input type="checkbox" value="' + escapeHtml(c.addr) + '"><div><div>' + escapeHtml(c.nick || addrShort(c.addr)) + '</div><div class="row-sub" style="font-family:ui-monospace,monospace;">' + escapeHtml(addrShort(c.addr)) + '</div></div></label>').join('') : '<div class="row-sub">選べる連絡先がありません。アドレスで追加できます。</div>';
   $('group-pick-screen').classList.add('active');
 }
 $('gp-back').addEventListener('click', () => $('group-pick-screen').classList.remove('active'));

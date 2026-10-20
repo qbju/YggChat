@@ -90,6 +90,7 @@ func (v *vpnState) toCore(f *os.File) {
 			v.in++
 			v.mu.Unlock()
 			portMap(buf[:n], 8, 40, fingerAltPort, fingerPort) // reply from our finger listener
+			portMap(buf[:n], 8, 40, siteAltPort, sitePort)     // reply from our profile site
 			if v.fw != nil {
 				v.fw.outbound(buf[:n])
 			}
@@ -114,6 +115,7 @@ func (v *vpnState) fromCore() {
 		}
 		if f := v.cur(); f != nil {
 			portMap(buf[:n], 24, 42, fingerPort, fingerAltPort) // finger to us -> OS port 7979
+			portMap(buf[:n], 24, 42, sitePort, siteAltPort)     // profile site -> OS port 8080
 			if v.fw != nil && !v.fw.inbound(buf[:n]) {
 				v.mu.Lock()
 				v.drop++

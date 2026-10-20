@@ -63,6 +63,10 @@ Wire: {t:"fh", id, nick, text?, ts, ttl?, mime, size, n, sha} then {t:"fc", id, 
 - POST /api/contact {Addr:"g:<id>", Nick?, Accept?} renames locally / accepts an invitation; /api/contact/delete {Addr:"g:<id>"} deletes it locally.
 - Wire: msg + {g, gh}; {t:"gq",g}; {t:"gi",g,gn,gm}; {t:"gl",g}. See groups.go.
 
+## POST /api/site (v0.13.6, native, beta)
+- {} -> {on, html, url, listening, error}; {On?, HTML?} saves data/site.json + data/site.html (≤256KB) and opens/closes TCP 80 on the Yggdrasil address (8080 + port map in Android VPN mode). Only GET/HEAD / and /index.html.
+- POST /api/site/view {Addr} -> {addr, html}: fetches http://[addr]/ through our own node (≤256KB, no redirects). The UI shows it in a sandboxed iframe (no scripts) with a restrictive CSP.
+
 ## POST /api/socks (v0.13.5, native, beta)
 - {} -> {on, addr, default, available}; {On?, Addr?} saves data/socks.json and restarts the node when it changed (`restart: true`). Also in /api/state as `socks`.
 

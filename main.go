@@ -247,6 +247,7 @@ type App struct {
 	cfg      *config.NodeConfig
 	cfgPath  string
 	fing     *fingerState
+	site     *siteState
 	lan      *lanState
 }
 
@@ -1253,6 +1254,7 @@ func main() {
 		}
 	}
 	a.fingerInit(*dataDir)
+	a.siteInit(*dataDir)
 	a.lanInit(*dataDir, logger)
 	go a.serveChat()
 	go a.sweep()
@@ -1298,6 +1300,7 @@ func main() {
 	a.nostrHandlers(mux)
 	a.groupHandlers(mux)
 	a.socksHandlers(mux)
+	a.siteHandlers(mux)
 	a.systemHandlers(mux, *dataDir)
 	a.vpnHandlers(mux, *dataDir)
 	a.fingerHandlers(mux)

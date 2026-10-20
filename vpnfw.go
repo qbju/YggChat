@@ -42,6 +42,7 @@ type vpnFW struct {
 	open   map[uint16]bool
 	flows  map[flowKey]time.Time
 	finger func() bool
+	site   func() bool
 }
 
 func loadVPNFW(dataDir string, finger func() bool) *vpnFW {
@@ -136,6 +137,9 @@ func (f *vpnFW) inbound(p []byte) bool {
 	if proto == 6 && dp == fingerAltPort && f.finger != nil && f.finger() {
 		return true
 	}
+	if proto == 6 && dp == siteAltPort && f.site != nil && f.site() {
+		return true
+	}
 	var k flowKey
 	k.proto, k.rport, k.lpt = proto, sp, dp
 	copy(k.remote[:], p[8:24])
@@ -190,6 +194,7 @@ var fwInst *vpnFW
 func (a *App) vpnFW(dataDir string) *vpnFW {
 	fwOnce.Do(func() {
 		fwInst = loadVPNFW(dataDir, func() bool { return a.fing != nil && a.fingerConf().On })
+		fwInst.site = a.siteOn
 	})
 	return fwInst
 }
