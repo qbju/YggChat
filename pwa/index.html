@@ -1104,14 +1104,32 @@ img.emoji { height:1.2em; width:1.2em; margin:0 .05em 0 .1em; vertical-align:-0.
     <div class="section" style="width:100%; max-width:420px;">
       <div class="section-title">メンバー</div>
       <div id="gi-members"></div>
-      <div class="row-sub">サーバーはなく、メッセージはメンバー1人ずつに直接届けます（オフラインの人にはオンラインになったときに）。写真・編集・消えるメッセージはまだ1対1だけです。</div>
+      <div class="row-sub">サーバーはなく、メッセージはメンバー1人ずつに直接届けます（オフラインの人にはオンラインになったときに）。編集・消えるメッセージはまだ1対1だけです。</div>
     </div>
     <div style="display:flex; gap:8px; flex-wrap:wrap; justify-content:center;">
+      <button id="gi-link">🔗 招待リンク</button>
       <button id="gi-add">メンバーを追加</button>
       <button id="gi-rename">名前を変更</button>
       <button id="gi-leave" style="color:var(--error);">退出</button>
       <button id="gi-delete" style="color:var(--error);">会話を削除</button>
     </div>
+  </div>
+</div>
+
+<div class="screen" id="group-link-screen">
+  <div class="header">
+    <button class="icon-btn" id="gl-back">←</button>
+    <div class="title">招待リンク</div>
+  </div>
+  <div style="flex:1; overflow-y:auto; padding:16px; display:flex; flex-direction:column; gap:14px; align-items:center; padding-bottom:calc(16px + env(safe-area-inset-bottom));">
+    <div id="gl-qr" style="width:220px; padding:10px; background:#fff; border-radius:10px;"></div>
+    <div id="gl-text" class="row-sub" style="font-family:ui-monospace,monospace; word-break:break-all; text-align:center; max-width:420px;"></div>
+    <div style="display:flex; gap:8px; flex-wrap:wrap; justify-content:center;">
+      <button id="gl-copy">コピー</button>
+      <button id="gl-share">共有</button>
+      <button id="gl-reset" style="color:var(--error);">リセット</button>
+    </div>
+    <div class="row-sub" style="max-width:420px; text-align:center;">リンクを開いた人は、あなた（ホスト）がオンラインのときに参加できます。</div>
   </div>
 </div>
 
@@ -1322,7 +1340,7 @@ img.emoji { height:1.2em; width:1.2em; margin:0 .05em 0 .1em; vertical-align:-0.
       <a class="dl-btn" href="https://yggchat.surge.sh/dl/yggchat-windows-amd64.exe" download>🪟 Windows (exe)</a>
       <a class="dl-btn" href="https://yggchat.surge.sh/dl/yggchat-linux-amd64" download>🐧 Linux (amd64)</a>
       <a class="dl-btn" href="https://yggchat.surge.sh/dl/yggchat-android-arm64" download>⌨️ Termux (arm64)</a>
-      <div class="row-sub" id="dl-ver">最新: v0.16.0 ・ SHA256SUMS で検証できます</div>
+      <div class="row-sub" id="dl-ver">最新: v0.17.0 ・ SHA256SUMS で検証できます</div>
     </div>
     <div class="section">
       <div class="section-title">About</div>
@@ -1841,6 +1859,7 @@ function isYggAddr(a){
 }
 
 $('start-chat-btn').addEventListener('click', async () => {
+  if(parseLink($('newchat-addr').value)){ openLink($('newchat-addr').value); return; }
   let addr = $('newchat-addr').value.trim().replace(/^\[|\]$/g, '');
   let nick = $('newchat-nick').value.trim();
   $('newchat-err').textContent = '';
@@ -1951,9 +1970,9 @@ $('scan-btn').addEventListener('click', async () => {
   try{ t = await scanQR('相手のQRコードを写してね'); }catch(e){ $('newchat-err').textContent = e.message; return; }
   if(typeof t !== 'string') return;
   t = t.trim();
-  const m = t.match(/#add=([^&\s]+)(?:&n=([^&\s]*))?/);
-  let a = t, n = '';
-  if(m){ try{ a = decodeURIComponent(m[1]); n = m[2] ? decodeURIComponent(m[2]) : ''; }catch(e){ a = m[1]; } }
+  const l = parseLink(t);
+  if(l && l.join){ openLink(t); return; }
+  let a = l ? l.add : t, n = l ? (l.nick || '') : '';
   $('newchat-addr').value = a;
   if(n && !$('newchat-nick').value) $('newchat-nick').value = n;
   $('newchat-err').textContent = '';
@@ -2671,16 +2690,52 @@ function notifyIncoming(m){
   }
 }
 
+// ---- links (v0.17): https://yggchat.surge.sh/#add=<addr>&n=<nick> and #j=<group code>,
+// yggchat://add/<addr>?n=<nick> and yggchat://join/<code> (web+yggchat: in browsers) ----
+function safeDec(s){ try{ return decodeURIComponent(s); }catch(e){ return s; } }
+function parseLink(t){
+  t = String(t || '').trim();
+  let m = t.match(/^(?:web\+)?yggchat:(?:\/\/)?(add|join)\/([^?#\s]+)(?:\?n=([^&#\s]*))?/i);
+  if(m) return m[1].toLowerCase() === 'join' ? {join: m[2]} : {add: safeDec(m[2]), nick: m[3] ? safeDec(m[3]) : ''};
+  m = t.match(/#j=([A-Za-z0-9_-]{43})(?![A-Za-z0-9_-])/); if(m) return {join: m[1]};
+  m = t.match(/#add=([^&\s]+)(?:&n=([^&\s]*))?/); if(m) return {add: safeDec(m[1]), nick: m[2] ? safeDec(m[2]) : ''};
+  m = t.match(/#u=([^&\s]+)/); if(m) return parseLink(safeDec(m[1]));
+  return null;
+}
+let pendingJoin = null;
+async function joinByCode(code){
+  if(!await uiDialog('招待されたグループに参加しますか？', {okText:'参加'})) return;
+  try{
+    const r = await api('/api/group/join', {Code: code});
+    if(r.already){ openChat(r.addr); return; }
+    pendingJoin = r.addr;
+    toast('ホストに参加をお願いしています…');
+    setTimeout(() => { if(pendingJoin === r.addr){ pendingJoin = null; toast('ホストから返事がありません。ホストがオンラインのときにもう一度開いてね'); } }, 22000);
+  }catch(e){ toast(e.message); }
+}
+async function openLink(t){
+  const l = parseLink(t);
+  if(!l) return false;
+  while(!state.addr) await new Promise(r => setTimeout(r, 200));
+  if(l.join){ closeNewChat(); joinByCode(l.join); return true; }
+  const addr = String(l.add || '').trim();
+  if(!YGG_RE.test(addr) || addr.length > 39){ toast('招待リンクのアドレスが不正です'); return true; }
+  openNewChat(addr, cleanNick(l.nick || ''));
+  return true;
+}
+window.yggOpenLink = (u) => { openLink(u); };
+window.addEventListener('hashchange', () => handleHash());
+// Invite links inside messages open here instead of in a browser tab.
+document.addEventListener('click', (e) => {
+  const a = e.target.closest && e.target.closest('a[href]'); if(!a) return;
+  const h = a.getAttribute('href') || '';
+  if(/^(web\+)?yggchat:/i.test(h) || /^https:\/\/yggchat\.surge\.sh\/?#(add|j)=/.test(h)){ if(parseLink(h)){ e.preventDefault(); openLink(h); } }
+}, true);
 function handleHash(){
   const h = location.hash || '';
-  const m = h.match(/#add=([^&]+)&n=([^&]*)/);
-  if(m){
-    let addr = '', nick = '';
-    try{ addr = decodeURIComponent(m[1]).trim(); nick = cleanNick(decodeURIComponent(m[2]||'')); }catch(e){}
-    history.replaceState(null, '', location.pathname + location.search);
-    if(!YGG_RE.test(addr) || addr.length > 39){ toast('招待リンクのアドレスが不正です'); return; }
-    setTimeout(() => openNewChat(addr, nick), 100);
-  }
+  if(!/^#(add|j|u)=/.test(h)) return;
+  history.replaceState(null, '', location.pathname + location.search);
+  openLink(h);
 }
 
 function connectEvents(){
@@ -2736,6 +2791,7 @@ function connectEvents(){
         if(c && c.addr){
           state.contacts[c.addr] = c; // server sends the whole contact (false fields omitted)
           renderList();
+          if(pendingJoin === c.addr && !c.left){ pendingJoin = null; toast('グループに参加しました'); openChat(c.addr); }
           if(curAddr === c.addr) updateChatHeader();
         }
       }else if(d.type === 'contact_del'){
@@ -2768,6 +2824,8 @@ function connectEvents(){
         showLock();
       }else if(d.type === 'lan'){
         if(state.lan){ state.lan.nearby = (d.data && d.data.nearby) || []; renderLan(); }
+      }else if(d.type === 'notice'){
+        if(d.data && d.data.text){ pendingJoin = null; toast(d.data.text); }
       }else if(d.type === 'move'){
         onMoveEvent(d.data || {});
       }else if(d.type === 'peers'){
@@ -3281,6 +3339,7 @@ function openGroupInfo(){
   $('gi-members').innerHTML = (c.members||[]).map(a => '<div class="row" style="padding:6px 0;"><div><div>' + escapeHtml(a === state.addr ? 'あなた' : ((state.contacts[a]||{}).nick || 'anon')) + (a === c.owner ? ' <span class="ttl-badge">ホスト</span>' : '') + '</div><div class="row-sub" style="font-family:ui-monospace,monospace;">' + escapeHtml(a) + '</div></div>' + (host && a !== state.addr ? '<button class="gi-kick" data-addr="' + escapeHtml(a) + '" style="color:var(--error);">外す</button>' : '') + '</div>').join('');
   $('gi-add').style.display = $('gi-leave').style.display = $('gi-rename').style.display = c.left ? 'none' : '';
   if(c.owner && c.owner !== state.addr) $('gi-add').style.display = 'none';
+  $('gi-link').style.display = host ? '' : 'none';
   $('group-info-screen').classList.add('active');
 }
 $('gi-back').addEventListener('click', () => $('group-info-screen').classList.remove('active'));
@@ -3306,6 +3365,30 @@ function openGroupPick(mode){
 $('gp-back').addEventListener('click', () => $('group-pick-screen').classList.remove('active'));
 $('new-group-btn').addEventListener('click', () => { closeNewChat(); openGroupPick('create'); });
 $('gi-add').addEventListener('click', () => openGroupPick('add'));
+// ---- group invite link (v0.17, host only) ----
+let glLink = '';
+async function openGroupLink(reset){
+  try{
+    const r = await api('/api/group/invite', {ID: curAddr.slice(2), Reset: !!reset});
+    glLink = r.link;
+    $('gl-text').textContent = glLink;
+    const q = qrcode(0, 'M'); q.addData(glLink); q.make();
+    $('gl-qr').innerHTML = q.createSvgTag({cellSize:4, margin:2, scalable:true});
+    $('group-link-screen').classList.add('active');
+    if(reset) toast('新しいリンクにしました（前のリンクは使えません）');
+  }catch(e){ toast(e.message); }
+}
+$('gi-link').addEventListener('click', () => openGroupLink(false));
+$('gl-back').addEventListener('click', () => $('group-link-screen').classList.remove('active'));
+$('gl-copy').addEventListener('click', () => copyText(glLink));
+$('gl-share').addEventListener('click', async () => {
+  const c = state.contacts[curAddr] || {};
+  try{ if(navigator.share){ await navigator.share({title:'YggChat', text:'YggChat のグループ「' + (c.nick || 'グループ') + '」に参加しよう', url:glLink}); } else copyText(glLink); }catch(e){}
+});
+$('gl-reset').addEventListener('click', async () => {
+  if(!await uiDialog('リンクをリセットしますか？今のリンクとQRは使えなくなります。', {okText:'リセット', danger:true})) return;
+  openGroupLink(true);
+});
 $('gp-ok').addEventListener('click', async () => {
   const picked = [...$('gp-list').querySelectorAll('input:checked')].map(i => i.value)
     .concat($('gp-addr').value.split(/[,\s、]+/).map(s => s.trim()).filter(Boolean));
@@ -3430,6 +3513,7 @@ window.ygBack = () => {
   if(qrscanClose){ qrscanClose(); return true; }
   if($('img-viewer').classList.contains('active')){ closeViewer(); return true; }
   if(modalClose){ modalClose(); return true; }
+  if($('group-link-screen').classList.contains('active')){ $('group-link-screen').classList.remove('active'); return true; }
   if($('contact-info-screen').classList.contains('active')){
     closeContactInfo();
     return true;

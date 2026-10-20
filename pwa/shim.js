@@ -234,9 +234,39 @@
     addMessage(m);
     return true;
   }
+  // ---- group invite links (v0.17, see invite.go): base64url(host 16 B | gid 8 B | token 8 B) ----
+  const joins = {}; // gid -> host while our join request is pending
+  const b64u = b => btoa(String.fromCharCode(...b)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  const unb64u = s => Uint8Array.from(atob(String(s).replace(/-/g, '+').replace(/_/g, '/')), c => c.charCodeAt(0));
+  const hexBytes = h => Uint8Array.from(String(h).match(/../g) || [], x => parseInt(x, 16));
+  function encodeJoin(host, gid, tok) {
+    const full = norm(host).split(':'), i = full.indexOf(''), groups = i < 0 ? full : full.slice(0, i).concat(Array(8 - full.length + 1).fill('0'), full.slice(i + 1));
+    const b = new Uint8Array(32);
+    groups.forEach((x, k) => { const v = parseInt(x || '0', 16); b[k * 2] = v >> 8; b[k * 2 + 1] = v & 255; });
+    b.set(hexBytes(gid), 16); b.set(hexBytes(tok), 24);
+    return b64u(b);
+  }
+  function decodeJoin(code) {
+    let b; try { b = unb64u(code); } catch { b = null; }
+    if (!b || b.length !== 32) throw new Error('招待リンクが壊れています');
+    const parts = []; for (let k = 0; k < 8; k++) parts.push(((b[k * 2] << 8) | b[k * 2 + 1]).toString(16));
+    const host = norm(parts.join(':'));
+    if (!host || !isYgg(host)) throw new Error('招待リンクのアドレスが不正です');
+    return { host, gid: hexOf(b.slice(16, 24)), tok: hexOf(b.slice(24)) };
+  }
+  function onJoin(src, w) {
+    const g = st.groups[w.g];
+    if (!g || g.left || g.owner !== addr || !g.tok || w.tok !== g.tok || st.blocked[src]) { send(src, { t: 'gjn', g: w.g, text: 'この招待リンクは使えません（リセットされたか、グループがなくなりました）' }); return; }
+    if (hasM(g, src)) { send(src, { t: 'gi', g: g.id, gn: g.name, gm: g.members, go: g.owner }); return; }
+    if (g.members.length >= MAXG) { send(src, { t: 'gjn', g: w.g, text: 'グループが満員です（最大' + MAXG + '人）' }); return; }
+    g.members = cleanMembers(g.members.concat([src]), addr); save(); emit('contact', gView(g));
+    gSys(g, (cleanNick(w.nick) || nameOf(src)) + ' が招待リンクから参加しました'); gInfo(g);
+  }
   function onGroupCtl(src, w) {
     if (!okGID(w.g) || locked) return;
     let g = st.groups[w.g];
+    if (w.t === 'gj') { onJoin(src, w); return; }
+    if (w.t === 'gjn') { if (joins[w.g] === src) { delete joins[w.g]; emit('notice', { text: cleanText(w.text, 200) }); } return; }
     if (w.t === 'gq') { if (g && !g.left && hasM(g, src) && hasM(g, addr)) send(src, { t: 'gi', g: g.id, gn: g.name, gm: g.members, go: g.owner || undefined }); return; }
     if (w.t === 'gl') {
       if (!g || !hasM(g, src)) return;
@@ -250,7 +280,9 @@
       if (!g) {
         if (!inG) return; const c = st.contacts[src]; g = st.groups[w.g] = { id: w.g, name: '', members: [], req: !(c && c.shared && !c.req) };
         const o = norm(String(w.go || '')); if (o && isYgg(o) && ms.includes(o)) g.owner = o;
+        if (joins[w.g] === src && g.owner === src) g.req = false; // we asked through the host's link
       }
+      if (joins[w.g] === src && g.owner === src) delete joins[w.g];
       const old = { name: g.name, members: g.members.slice() }, known = !!old.name;
       g.name = cleanNick(w.gn) || 'グループ'; g.members = ms; if (!inG) g.left = true;
       save(); emit('contact', gView(g));
@@ -305,7 +337,7 @@
     if (w.t === 'fh') { onFileHeader(src, w); return; }
     if (w.t === 'fc') { onFileChunk(src, w); return; }
     if ((w.t === 'edit' || w.t === 'del') && onCtl(src, w)) { send(src, { t: 'ack', id: w.id }); return; }
-    if (w.t === 'gq' || w.t === 'gi' || w.t === 'gl') { onGroupCtl(src, w); return; }
+    if (w.t === 'gq' || w.t === 'gi' || w.t === 'gl' || w.t === 'gj' || w.t === 'gjn') { onGroupCtl(src, w); return; }
     if (w.t === 'msg') handleMsg(src, w).then(okm => { if (okm) { send(src, { t: 'ack', id: w.id }); askPK(src); if (queuedFor(src).length) flush(src); } });
   }
 
@@ -736,6 +768,23 @@
         for (const m of g.members) if (!old.members.includes(m)) gSys(g, nameOf(m) + ' を追加しました');
         for (const m of removed) gSys(g, nameOf(m) + ' を外しました');
         gInfo(g, removed); return ok(gView(g));
+      }
+      case 'group/invite': {
+        const g = st.groups[body.ID]; if (!g || g.left || g.owner !== addr) return bad('招待リンクを作れるのはホストだけです', 403);
+        if (!g.tok || body.Reset) { g.tok = hexOf(crypto.getRandomValues(new Uint8Array(8))); save(); }
+        const code = encodeJoin(addr, g.id, g.tok);
+        return ok({ code, link: 'https://yggchat.surge.sh/#j=' + code });
+      }
+      case 'group/join': {
+        let j; try { j = decodeJoin(String(body.Code || '')); } catch (e) { return bad(e.message); }
+        if (j.host === addr) return bad('自分のグループの招待リンクです');
+        const g0 = st.groups[j.gid];
+        if (g0 && !g0.left && !g0.req && hasM(g0, addr)) return ok({ already: true, addr: 'g:' + j.gid });
+        if (g0 && g0.left) { delete st.groups[j.gid]; save(); }
+        joins[j.gid] = j.host;
+        const jw = { t: 'gj', g: j.gid, tok: j.tok, nick: st.nick };
+        let wait = 0; for (let i = 0; i < 4; i++) { setTimeout(() => { if (joins[j.gid]) send(j.host, jw); }, wait * 1000); wait += 2 + i * 2; }
+        return ok({ addr: 'g:' + j.gid });
       }
       case 'group/leave': {
         const g = st.groups[body.ID]; if (!g) return bad('no such group');

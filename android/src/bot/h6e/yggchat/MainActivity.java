@@ -37,6 +37,29 @@ public class MainActivity extends Activity {
 
     static boolean isHome(String u) { return u != null && u.startsWith(HOME); }
 
+    // An invite/add link this activity was opened with (yggchat://…, web+yggchat://…,
+    // https://yggchat.surge.sh/#…), handed to the UI once it is loaded.
+    private volatile String pendingLink;
+    static String linkOf(Intent i) {
+        if (i == null || !Intent.ACTION_VIEW.equals(i.getAction()) || i.getData() == null) return null;
+        String u = i.getData().toString();
+        String sc = i.getData().getScheme();
+        if ("yggchat".equalsIgnoreCase(sc) || "web+yggchat".equalsIgnoreCase(sc)) return u;
+        if ("https".equalsIgnoreCase(sc) && "yggchat.surge.sh".equalsIgnoreCase(i.getData().getHost()) && u.contains("#")) return u;
+        return null;
+    }
+    void deliverLink() {
+        final String l = pendingLink;
+        if (l == null || web == null || !onHome) return;
+        pendingLink = null;
+        web.evaluateJavascript("window.yggOpenLink && window.yggOpenLink(" + org.json.JSONObject.quote(l) + ")", null);
+    }
+    @Override protected void onNewIntent(Intent i) {
+        super.onNewIntent(i);
+        String l = linkOf(i);
+        if (l != null) { pendingLink = l; deliverLink(); }
+    }
+
     // Anything that is not the app's own UI goes to the user's browser.
     void openOutside(Uri u) {
         String sc = u.getScheme();
@@ -57,6 +80,7 @@ public class MainActivity extends Activity {
 
     @Override protected void onCreate(Bundle s) {
         super.onCreate(s);
+        pendingLink = linkOf(getIntent());
         Intent svc = new Intent(this, YggService.class);
         if (Build.VERSION.SDK_INT >= 26) startForegroundService(svc); else startService(svc);
         if (getSharedPreferences("ygg", 0).getBoolean("vpn", false) && android.net.VpnService.prepare(this) == null)
@@ -119,6 +143,8 @@ public class MainActivity extends Activity {
             @Override public boolean shouldOverrideUrlLoading(WebView v, WebResourceRequest r) {
                 Uri u = r.getUrl();
                 if (isHome(u.toString())) return false;
+                String l = linkOf(new Intent(Intent.ACTION_VIEW, u));
+                if (l != null && r.isForMainFrame()) { pendingLink = l; deliverLink(); return true; }
                 if (r.isForMainFrame()) openOutside(u);
                 return true;
             }
@@ -134,6 +160,9 @@ public class MainActivity extends Activity {
             }
             @Override public void doUpdateVisitedHistory(WebView v, String url, boolean reload) {
                 onHome = isHome(url);
+            }
+            @Override public void onPageFinished(WebView v, String url) {
+                if (isHome(url)) deliverLink();
             }
             @Override public void onReceivedError(WebView v, WebResourceRequest r, WebResourceError e) {
                 if (r.isForMainFrame()) { final WebView vv = v; new Handler().postDelayed(new Runnable(){ public void run(){ loadHome(vv, 0); }}, 700); }

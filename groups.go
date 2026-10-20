@@ -43,6 +43,7 @@ type Group struct {
 	Req     bool     `json:"req,omitempty"`   // invitation not accepted yet
 	Left    bool     `json:"left,omitempty"`  // we left or were removed
 	Owner   string   `json:"owner,omitempty"` // host (creator); "" for pre-v0.16 groups
+	Tok     string   `json:"tok,omitempty"`   // invite-link token (host only, v0.17)
 }
 
 func gKey(id string) string { return "g:" + id }
@@ -374,6 +375,19 @@ func (a *App) onGroupCtl(from string, w wire) {
 	}
 	g, known := a.store.Groups[w.G]
 	switch w.T {
+	case "gj":
+		a.onJoin(from, w, g, known)
+		return
+	case "gjn":
+		host, waiting := a.joins[w.G]
+		if waiting && host == from {
+			delete(a.joins, w.G)
+		}
+		a.store.mu.Unlock()
+		if waiting && host == from {
+			a.broadcast("notice", map[string]string{"text": cleanText(w.Text, 200)})
+		}
+		return
 	case "gq":
 		a.store.mu.Unlock()
 		if known && !g.Left && hasMember(g, from) && hasMember(g, a.addr) {
@@ -408,6 +422,9 @@ func (a *App) onGroupCtl(from string, w wire) {
 			a.store.mu.Unlock()
 			return
 		}
+		if known && a.joins[w.G] == from && g.Owner == from {
+			delete(a.joins, w.G)
+		}
 		in := false
 		for _, m := range ms {
 			in = in || m == a.addr
@@ -429,6 +446,10 @@ func (a *App) onGroupCtl(from string, w wire) {
 			g = Group{ID: w.G, Req: !(ok && c.Shared && !c.Req)}
 			if o, ok := yggAddr(w.GO); ok && hasMember(Group{Members: ms}, o) {
 				g.Owner = o
+			}
+			if a.joins[w.G] == from && g.Owner == from {
+				g.Req = false // we asked to join through the host's link
+				delete(a.joins, w.G)
 			}
 		}
 		old := g

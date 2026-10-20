@@ -245,6 +245,7 @@ type App struct {
 	udp      net.PacketConn
 	ackMu    sync.Mutex
 	acks     map[string]chan struct{}
+	joins    map[string]string // group id -> host, while our invite-link join is pending (guarded by store.mu)
 	flMu     sync.Mutex
 	inflight map[string]bool
 	probing  map[string]bool // peers with a quick re-probe running (flMu)
@@ -315,11 +316,12 @@ type wire struct {
 	D    string `json:"d,omitempty"`   // chunk data, base64
 	Ref  string `json:"ref,omitempty"` // edit/del: id of the message it changes
 	// Group chat (groups.go)
-	G  string   `json:"g,omitempty"`  // group id
-	GN string   `json:"gn,omitempty"` // group name (gi)
-	GM []string `json:"gm,omitempty"` // members (gi)
-	GO string   `json:"go,omitempty"` // host (gi, v0.16+)
-	GH string   `json:"gh,omitempty"` // hash of name+members (msg)
+	G   string   `json:"g,omitempty"`   // group id
+	GN  string   `json:"gn,omitempty"`  // group name (gi)
+	GM  []string `json:"gm,omitempty"`  // members (gi)
+	GO  string   `json:"go,omitempty"`  // host (gi, v0.16+)
+	GH  string   `json:"gh,omitempty"`  // hash of name+members (msg)
+	Tok string   `json:"tok,omitempty"` // invite-link token (gj, v0.17)
 }
 
 func (a *App) serveChat() {
@@ -404,7 +406,7 @@ func (a *App) serveChat() {
 			a.onFileChunk(from, w)
 		case "prof", "ttl":
 			a.handleCtl(from, w)
-		case "gq", "gi", "gl":
+		case "gq", "gi", "gl", "gj", "gjn":
 			a.onGroupCtl(from, w)
 		case "edit", "del":
 			if a.onCtl(from, w) {
@@ -1353,6 +1355,7 @@ func main() {
 	a.moveHandlers(mux)
 	a.nostrHandlers(mux)
 	a.groupHandlers(mux)
+	a.inviteHandlers(mux)
 	a.socksHandlers(mux)
 	a.siteHandlers(mux)
 	a.resolveHandlers(mux)
