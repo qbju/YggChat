@@ -185,6 +185,37 @@ public class YggService extends Service {
         return c;
     }
 
+    // The VPN was revoked (another VPN app took over, or the permission is
+    // gone): the node must leave VPN mode, or it keeps using the OS stack
+    // with no TUN behind it and chat stops working until the user toggles
+    // the setting by hand. Retries in the background until the node answers.
+    static void leaveVpnMode(final android.content.Context ctx) {
+        final android.content.Context app = ctx.getApplicationContext();
+        new Thread(new Runnable() { public void run() {
+            for (int i = 0; i < 60; i++) {
+                try {
+                    HttpURLConnection g = api(app, "/api/vpn");
+                    g.setConnectTimeout(2000); g.setReadTimeout(3000);
+                    java.util.Scanner sc = new java.util.Scanner(g.getInputStream(), "UTF-8").useDelimiter("\\A");
+                    JSONObject st = new JSONObject(sc.hasNext() ? sc.next() : "{}");
+                    g.disconnect();
+                    if (!st.optBoolean("on")) return;
+                    if (app.getSharedPreferences("ygg", 0).getBoolean("vpn", false)) return; // turned back on meanwhile
+                    HttpURLConnection c = api(app, "/api/vpn");
+                    c.setConnectTimeout(2000); c.setReadTimeout(3000);
+                    c.setRequestMethod("POST");
+                    c.setDoOutput(true);
+                    c.setRequestProperty("Content-Type", "application/json");
+                    c.getOutputStream().write("{\"On\":false}".getBytes("UTF-8"));
+                    int code = c.getResponseCode();
+                    c.disconnect();
+                    if (code == 200) return;
+                } catch (Exception e) { }
+                try { Thread.sleep(2000); } catch (InterruptedException e) { return; }
+            }
+        }}).start();
+    }
+
     private synchronized void startNode() {
         if (proc != null && proc.isAlive()) return;
         try {

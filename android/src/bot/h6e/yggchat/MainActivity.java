@@ -98,8 +98,15 @@ public class MainActivity extends Activity {
         pendingLink = linkOf(getIntent());
         Intent svc = new Intent(this, YggService.class);
         if (Build.VERSION.SDK_INT >= 26) startForegroundService(svc); else startService(svc);
-        if (getSharedPreferences("ygg", 0).getBoolean("vpn", false) && android.net.VpnService.prepare(this) == null)
-            startService(new Intent(this, YggVpn.class));
+        if (getSharedPreferences("ygg", 0).getBoolean("vpn", false)) {
+            if (android.net.VpnService.prepare(this) == null) startService(new Intent(this, YggVpn.class));
+            else {
+                // VPN consent is gone (revoked while we weren't running): fall
+                // back to the built-in node instead of a VPN mode with no TUN.
+                getSharedPreferences("ygg", 0).edit().putBoolean("vpn", false).apply();
+                YggService.leaveVpnMode(this);
+            }
+        }
         web = new WebView(this);
         web.setBackgroundColor(0xff0b0f0b);
         WebSettings ws = web.getSettings();
