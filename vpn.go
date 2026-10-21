@@ -83,14 +83,23 @@ func (v *vpnState) toCore(f *os.File) {
 				v.tun = nil
 			}
 			v.mu.Unlock()
+			// Our copy of the TUN fd keeps the VPN interface alive: drop it.
+			f.Close()
 			return
 		}
 		if n > 0 && buf[0]>>4 == 6 {
 			v.mu.Lock()
 			v.in++
 			v.mu.Unlock()
-			portMap(buf[:n], 8, 40, fingerAltPort, fingerPort) // reply from our finger listener
-			portMap(buf[:n], 8, 40, siteAltPort, sitePort)     // reply from our profile site
+			// Replies from our own listeners go out from the real ports. Only
+			// while they are up: otherwise 7979/8080 belong to whatever else
+			// runs on the phone and must not be rewritten.
+			if v.fw != nil && v.fw.finger != nil && v.fw.finger() {
+				portMap(buf[:n], 8, 40, fingerAltPort, fingerPort)
+			}
+			if v.fw != nil && v.fw.site != nil && v.fw.site() {
+				portMap(buf[:n], 8, 40, siteAltPort, sitePort)
+			}
 			if v.fw != nil {
 				v.fw.outbound(buf[:n])
 			}
@@ -114,13 +123,19 @@ func (v *vpnState) fromCore() {
 			continue
 		}
 		if f := v.cur(); f != nil {
-			portMap(buf[:n], 24, 42, fingerPort, fingerAltPort) // finger to us -> OS port 7979
-			portMap(buf[:n], 24, 42, sitePort, siteAltPort)     // profile site -> OS port 8080
+			// Filter first: the firewall judges the packet by the port it was
+			// really sent to (79/80), not the mapped one.
 			if v.fw != nil && !v.fw.inbound(buf[:n]) {
 				v.mu.Lock()
 				v.drop++
 				v.mu.Unlock()
 				continue
+			}
+			if v.fw != nil && v.fw.finger != nil && v.fw.finger() {
+				portMap(buf[:n], 24, 42, fingerPort, fingerAltPort) // finger to us -> OS port 7979
+			}
+			if v.fw != nil && v.fw.site != nil && v.fw.site() {
+				portMap(buf[:n], 24, 42, sitePort, siteAltPort) // profile site -> OS port 8080
 			}
 			_, _ = f.Write(buf[:n])
 			v.mu.Lock()

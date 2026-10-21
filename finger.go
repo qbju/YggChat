@@ -34,14 +34,15 @@ type fingerCfg struct {
 }
 
 type fingerState struct {
-	mu     sync.Mutex
-	path   string
-	cfg    fingerCfg
-	tcp    string // "" (off: no listener at all) | "listening" | error text
-	ln     net.Listener
-	waitMu sync.Mutex
-	wait   map[string]chan wire
-	sem    chan struct{}
+	applyMu sync.Mutex // serializes fingerApply (open/close of the listener)
+	mu      sync.Mutex
+	path    string
+	cfg     fingerCfg
+	tcp     string // "" (off: no listener at all) | "listening" | error text
+	ln      net.Listener
+	waitMu  sync.Mutex
+	wait    map[string]chan wire
+	sem     chan struct{}
 }
 
 func cleanPlan(s string, max int) string {
@@ -73,6 +74,10 @@ func (a *App) fingerInit(dataDir string) {
 // 79 is simply closed (same RST as any unused port), so nothing reveals that
 // this address runs YggChat; UDP fq is ignored too.
 func (a *App) fingerApply() {
+	// Without this, an "off" racing a slow "on" could leave a listener open
+	// while finger is off (the off saw no listener yet).
+	a.fing.applyMu.Lock()
+	defer a.fing.applyMu.Unlock()
 	a.fing.mu.Lock()
 	on, ln := a.fing.cfg.On, a.fing.ln
 	if !on && ln != nil {
@@ -88,6 +93,17 @@ func (a *App) fingerApply() {
 	if ln == nil {
 		a.fingerListen()
 	}
+}
+
+// fingerListening reports whether finger is on and its TCP listener is up
+// (the VPN firewall and port mapping only let TCP 79 in then).
+func (a *App) fingerListening() bool {
+	if a.fing == nil {
+		return false
+	}
+	a.fing.mu.Lock()
+	defer a.fing.mu.Unlock()
+	return a.fing.cfg.On && a.fing.ln != nil
 }
 
 func (a *App) fingerConf() fingerCfg {
@@ -107,6 +123,9 @@ func (a *App) fingerListen() {
 		ln, err = net.Listen("tcp6", net.JoinHostPort("::", "79"))
 	default:
 		ln, err = a.ns.ListenTCP(&net.TCPAddr{IP: net.ParseIP(a.addr), Port: fingerPort})
+	}
+	if err == nil && (a.vpn || a.sys) {
+		ln = yggOnlyListener{ln} // the OS listener also sees LAN/Internet clients
 	}
 	a.fing.mu.Lock()
 	if err != nil {

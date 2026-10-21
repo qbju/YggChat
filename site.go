@@ -32,12 +32,13 @@ const siteAltPort = 8080 // VPN mode: the OS can't bind <1024, packets are port-
 const siteMax = 256 << 10
 
 type siteState struct {
-	mu   sync.Mutex
-	dir  string
-	on   bool
-	html string
-	srv  *http.Server
-	err  string
+	applyMu sync.Mutex // serializes siteApply
+	mu      sync.Mutex
+	dir     string
+	on      bool
+	html    string
+	srv     *http.Server
+	err     string
 }
 
 func (a *App) siteInit(dataDir string) {
@@ -63,9 +64,38 @@ func (a *App) siteOn() bool {
 	return a.site.on
 }
 
+// siteListening reports whether the site is on and its listener is up.
+func (a *App) siteListening() bool {
+	if a.site == nil {
+		return false
+	}
+	a.site.mu.Lock()
+	defer a.site.mu.Unlock()
+	return a.site.on && a.site.srv != nil
+}
+
+// yggOnlyListener drops connections that don't come from a Yggdrasil address
+// (200::/7). Used for listeners on the OS stack (system / VPN mode).
+type yggOnlyListener struct{ net.Listener }
+
+func (l yggOnlyListener) Accept() (net.Conn, error) {
+	for {
+		c, err := l.Listener.Accept()
+		if err != nil {
+			return nil, err
+		}
+		if ta, ok := c.RemoteAddr().(*net.TCPAddr); ok && isYggIP(ta.IP) {
+			return c, nil
+		}
+		c.Close()
+	}
+}
+
 // siteApply starts or stops the listener to match the setting.
 func (a *App) siteApply() {
 	s := a.site
+	s.applyMu.Lock()
+	defer s.applyMu.Unlock()
 	s.mu.Lock()
 	on, srv := s.on, s.srv
 	if !on && srv != nil {
@@ -97,6 +127,11 @@ func (a *App) siteApply() {
 		s.mu.Unlock()
 		log.Println("site: listen:", err)
 		return
+	}
+	if a.vpn || a.sys {
+		// Bound to :: on the OS stack, so Wi-Fi/LAN (and, in system mode, any
+		// public IPv6) clients could reach the page too: Yggdrasil peers only.
+		ln = yggOnlyListener{ln}
 	}
 	srv = &http.Server{Handler: http.HandlerFunc(a.siteServe), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 8 << 10}
 	s.mu.Lock()
