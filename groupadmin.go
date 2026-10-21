@@ -165,12 +165,30 @@ func chunkAddrs(as []string) [][]string {
 // else a header (first) plus parts.
 func (a *App) infoPackets(g Group) []wire {
 	w := a.infoWire(g)
+	// The host/an admin says when the members it lists as gone dropped out
+	// ("gt", v0.19.3), when it still fits.
+	var gt map[string]int64
+	if canManage(g, a.addr) {
+		gt = goneTimes(g)
+	}
 	if b, _ := json.Marshal(w); len(b) <= giMaxBytes {
+		if x := w; gt != nil {
+			x.GT = gt
+			if b, _ := json.Marshal(x); len(b) <= giMaxBytes {
+				return []wire{x}
+			}
+		}
 		return []wire{w}
 	}
 	w.GM = nil
 	w.GC = len(g.Members)
 	w.GH = groupHash(g.Name, g.Members)
+	if x := w; gt != nil {
+		x.GT = gt
+		if wireLen(x) <= dgramMax {
+			w = x
+		}
+	}
 	out := []wire{w}
 	parts := chunkAddrs(g.Members)
 	for i, p := range parts {
@@ -565,7 +583,7 @@ func (a *App) onDelta(from string, w wire, g Group, known bool) {
 		trackGone(&g, old.Members)
 	}
 	noteGone(&g, old.Members, at)
-	dels := a.purgeGoneLocked(g, old.Members, at) // what they posted after the removal reached us late
+	dels := a.purgeGoneLocked(g, old.Members) // what they posted after the removal reached us late
 	kick := w.K == "kick" || (merge && len(removed) > 0)
 	if kick && canManage(g, a.addr) {
 		addBan(&g, removed)

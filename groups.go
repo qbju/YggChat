@@ -884,10 +884,10 @@ func (a *App) onGroupCtl(from string, w wire) {
 			at = changeTime(w.TS)
 		}
 		noteGone(&g, old.Members, at)
-		var dels []map[string]string
-		if at > 0 {
-			dels = a.purgeGoneLocked(g, old.Members, at)
+		if adopted && known {
+			noteGoneEach(&g, old.Members, w.GT)
 		}
+		dels := a.purgeGoneLocked(g, old.Members)
 		if !staleSet {
 			g.Name = name
 		}

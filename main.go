@@ -377,6 +377,7 @@ type wire struct {
 	GA  string   `json:"ga,omitempty"`  // packed members added (gd)
 	GR  string   `json:"gr,omitempty"`  // packed members removed (gd)
 	PN  string   `json:"pn,omitempty"`  // proof-of-work nonce (msg, fh, gj)
+	GT  map[string]int64 `json:"gt,omitempty"` // gi: when recently removed members dropped out (v0.19.3)
 
 	checked bool // local only: proof of work already verified (file header)
 }

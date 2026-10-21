@@ -111,16 +111,14 @@ func noteAdded(g *Group, before []string, at int64) {
 }
 
 // purgeGoneLocked drops the posts members of before that are no longer in g
-// made after they were removed (at: when, by the manager's clock). They
-// reached us while we hadn't heard of the removal yet. Caller holds a.store.mu.
-func (a *App) purgeGoneLocked(g Group, before []string, at int64) []map[string]string {
-	if at <= 0 {
-		return nil
-	}
-	var gone []string
+// made after they dropped out (GoneAt: by the manager's clock when it told
+// us, else when we learnt it). They reached us while we hadn't heard of the
+// removal yet. Caller holds a.store.mu.
+func (a *App) purgeGoneLocked(g Group, before []string) []map[string]string {
+	gone := map[string]int64{}
 	for _, m := range before {
-		if !hasMember(g, m) && m != a.addr {
-			gone = append(gone, m)
+		if t := g.GoneAt[m]; !hasMember(g, m) && m != a.addr && t > 0 {
+			gone[m] = t
 		}
 	}
 	if len(gone) == 0 {
@@ -130,7 +128,7 @@ func (a *App) purgeGoneLocked(g Group, before []string, at int64) []map[string]s
 	var del []map[string]string
 	kept := a.store.Messages[:0]
 	for _, m := range a.store.Messages {
-		if m.Peer == key && !m.Out && m.Sys == "" && m.TS > at+goneSlack && hasMember(Group{Members: gone}, m.From) {
+		if t, ok := gone[m.From]; ok && m.Peer == key && !m.Out && m.Sys == "" && m.TS > t+goneSlack {
 			del = append(del, map[string]string{"peer": key, "id": m.ID})
 			continue
 		}
@@ -144,6 +142,56 @@ func (a *App) broadcastDels(del []map[string]string) {
 	for _, d := range del {
 		a.broadcast("msg_del", d)
 	}
+}
+
+// noteGoneEach lowers the drop-out times of members of before that left g
+// to the times the host/admin gave per member ("gt"). Their list version may
+// fold several changes (a merge), so its own time can be later than a
+// removal. Local only.
+func noteGoneEach(g *Group, before []string, gt map[string]int64) {
+	for m, ts := range gt {
+		t := changeTime(ts)
+		if t <= 0 || hasMember(*g, m) || !hasMember(Group{Members: before}, m) {
+			continue
+		}
+		if g.GoneAt == nil {
+			g.GoneAt = map[string]int64{}
+		}
+		if x, ok := g.GoneAt[m]; !ok || t < x {
+			g.GoneAt[m] = t
+		}
+	}
+}
+
+// goneTimes is what the host/an admin puts in its info as "gt": when the
+// members that dropped out most recently did (at most 8, within goneKeep).
+func goneTimes(g Group) map[string]int64 {
+	if len(g.GoneAt) == 0 || !(g.Owner != "") {
+		return nil
+	}
+	type e struct {
+		m string
+		t int64
+	}
+	var es []e
+	now := time.Now().Unix()
+	for m, t := range g.GoneAt {
+		if !hasMember(g, m) && t > 0 && now-t <= goneKeep {
+			es = append(es, e{m, t})
+		}
+	}
+	sort.Slice(es, func(i, j int) bool { return es[i].t > es[j].t })
+	if len(es) > 8 {
+		es = es[:8]
+	}
+	if len(es) == 0 {
+		return nil
+	}
+	out := map[string]int64{}
+	for _, x := range es {
+		out[x.m] = x.t
+	}
+	return out
 }
 
 // ---- history relays ----

@@ -554,3 +554,36 @@ func TestMissedHandOverHeirClaims(t *testing.T) {
 		t.Fatalf("admin took a live host's group: %+v", g)
 	}
 }
+
+// Chaos 6d: the host (cut off) removed C, an admin let D in meanwhile, and the
+// host merged both into a later version. The merged list's own time is after
+// C's post; the per-member time ("gt") still drops it.
+func TestMergedVersionKeepsRemovalTime(t *testing.T) {
+	gid := "abab1111abab1111"
+	now := time.Now().Unix()
+	h := tApp(t, tHost)
+	ms := cleanMembers([]string{tAdm, tMem, tX}, tHost)
+	h.store.Groups[gid] = Group{ID: gid, Name: "G", Members: ms, Owner: tHost, Admins: []string{tAdm}, V: 3, VAt: now, GoneAt: map[string]int64{tMem: now - 500}}
+	h.store.Groups[gid] = func() Group { g := h.store.Groups[gid]; g.Members = cleanMembers([]string{tAdm, tX, tNew}, tHost); return g }()
+	ps := h.infoPackets(h.store.Groups[gid])
+	if len(ps) != 1 || ps[0].GT[tMem] != now-500 {
+		t.Fatalf("gt not sent: %+v", ps)
+	}
+	b := tApp(t, tX)
+	b.store.Groups[gid] = Group{ID: gid, Name: "G", Members: ms, Owner: tHost, Admins: []string{tAdm}, V: 2}
+	b.onGroupMsg(tMem, wire{T: "msg", ID: "aa1g0", G: gid, Text: "while host dark", TS: now - 300}, "")
+	b.onGroupMsg(tMem, wire{T: "msg", ID: "aa2g0", G: gid, Text: "before removal", TS: now - 900}, "")
+	b.onGroupCtl(tHost, ps[0])
+	got := groupMsgsOf(b, gid)
+	if len(got) != 1 || got[0].Text != "before removal" {
+		t.Fatalf("after merged list: %+v", got)
+	}
+	// a member's gt means nothing
+	c := tApp(t, tX)
+	c.store.Groups[gid] = Group{ID: gid, Name: "G", Members: ms, Owner: tHost, Admins: []string{tAdm}, V: 2}
+	c.onGroupMsg(tAdm, wire{T: "msg", ID: "bb1g0", G: gid, Text: "admin post", TS: now - 300}, "")
+	c.onGroupCtl(tMem, wire{T: "gi", G: gid, GN: "G", GM: ms, GO: tHost, GV: 2, GT: map[string]int64{tAdm: now - 1000}})
+	if len(groupMsgsOf(c, gid)) != 1 {
+		t.Fatal("member's gt purged posts")
+	}
+}
