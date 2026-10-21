@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 )
@@ -13,7 +14,7 @@ import (
 func wpkt(t *testing.T, w wire) []byte {
 	b, err := json.Marshal(w)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	return b
 }
@@ -139,4 +140,69 @@ func TestNoParkAfterDelete(t *testing.T) {
 	a.sys = false
 	m := Message{ID: "m5", Peer: tHost, From: tMe, Text: "x", Out: true, Status: "queued"}
 	a.nostrPark(m) // not in the store: must return before touching relays/keys (would panic without cfg)
+}
+
+// A peer that read our Nostr box acks directly; nobody waits for that ack,
+// so the message used to stay "stored" (📮) until some later flush.
+func TestLateAckMarksSent(t *testing.T) {
+	a, _ := contactApp(t)
+	a.store.Messages = append(a.store.Messages,
+		Message{ID: "m1", Peer: tHost, From: tMe, Text: "x", Out: true, Status: "stored", Nostr: true},
+		Message{ID: "m2", Peer: tHost, From: tMe, Text: "y", Out: true, Status: "queued"})
+	a.store.Ctl = []ctlItem{{Peer: tHost, W: wire{T: "edit", ID: "c1", Ref: "m2", Text: "z"}}}
+	a.handlePacket(net.ParseIP(tMem), wpkt(t, wire{T: "ack", ID: "m1"})) // wrong peer
+	a.handlePacket(net.ParseIP(tHost), wpkt(t, wire{T: "ack", ID: "m2"}))
+	a.handlePacket(net.ParseIP(tHost), wpkt(t, wire{T: "ack", ID: "c1"}))
+	ms := msgsWith(a, tHost)
+	if ms[0].Status != "stored" || ms[1].Status != "sent" {
+		t.Fatalf("statuses %q %q", ms[0].Status, ms[1].Status)
+	}
+	if len(a.store.Ctl) != 0 {
+		t.Fatal("acked edit still pending")
+	}
+}
+
+// ackPC plays a peer that acks every msg it gets.
+type ackPC struct {
+	discardPC
+	a    *App
+	mu   sync.Mutex
+	got  []string
+	down bool
+}
+
+func (p *ackPC) WriteTo(b []byte, to net.Addr) (int, error) {
+	var w wire
+	_ = json.Unmarshal(b, &w)
+	p.mu.Lock()
+	down := p.down
+	if w.T == "msg" && !down {
+		p.got = append(p.got, w.ID)
+	}
+	p.mu.Unlock()
+	if w.T == "msg" && !down {
+		ip := to.(*net.UDPAddr).IP
+		go p.a.handlePacket(ip, wpkt(nil, wire{T: "ack", ID: w.ID}))
+	}
+	return len(b), nil
+}
+
+// Once a new message gets through, older queued ones follow at once.
+func TestQueuedFollowNewMessage(t *testing.T) {
+	a, _ := contactApp(t)
+	pc := &ackPC{a: a}
+	a.udp = pc
+	a.store.Messages = append(a.store.Messages, Message{ID: "old1", Peer: tHost, From: tMe, Text: "first", Out: true, Status: "queued", TS: time.Now().Unix() - 60})
+	if _, err := a.send(tHost, "second", ""); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		ms := msgsWith(a, tHost)
+		if len(ms) == 2 && ms[0].Status == "sent" && ms[1].Status == "sent" {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("queued message not flushed after a successful send: %+v", msgsWith(a, tHost))
 }

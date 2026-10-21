@@ -475,12 +475,16 @@ func (a *App) handlePacket(rip net.IP, pkt []byte) {
 	}
 	if w.T == "ack" {
 		a.ackMu.Lock()
-		if ch, ok := a.acks[w.ID]; ok && a.ackFrom[w.ID] == from {
+		ch, waiting := a.acks[w.ID]
+		if waiting && a.ackFrom[w.ID] == from {
 			close(ch)
 			delete(a.acks, w.ID)
 			delete(a.ackFrom, w.ID)
 		}
 		a.ackMu.Unlock()
+		if !waiting && msgIDRe.MatchString(w.ID) {
+			a.lateAck(from, w.ID)
+		}
 		a.askPK(from)
 		return
 	}
@@ -803,7 +807,43 @@ func (a *App) retry(peer, id string) (Message, error) {
 	return *found, nil
 }
 
-func (a *App) deliver(m Message) { a.deliverN(m, 8) }
+// deliver sends a new message; once it gets through, anything older still
+// queued for that peer follows at once instead of at the next hello.
+func (a *App) deliver(m Message) {
+	if a.deliverN(m, 8) && !m.Hid && len(a.queued(m.Peer)) > 0 {
+		a.flush(m.Peer)
+	}
+}
+
+// lateAck handles an ack nobody is waiting for: the peer read a Nostr box (it
+// acks directly) or an earlier try got through after we gave up. A message
+// still shown as queued/stored is in fact delivered; a pending edit/unsend
+// is done.
+func (a *App) lateAck(from, id string) {
+	a.store.mu.Lock()
+	found := false
+	for i := len(a.store.Messages) - 1; i >= 0; i-- {
+		if m := &a.store.Messages[i]; m.ID == id && m.Peer == from && m.Out {
+			found = m.Status == "queued" || m.Status == "stored"
+			break
+		}
+	}
+	n := len(a.store.Ctl)
+	kept := a.store.Ctl[:0]
+	for _, c := range a.store.Ctl {
+		if !(c.Peer == from && c.W.ID == id) {
+			kept = append(kept, c)
+		}
+	}
+	a.store.Ctl = kept
+	if len(kept) != n {
+		a.store.save()
+	}
+	a.store.mu.Unlock()
+	if found {
+		a.setStatus(from, id, "sent")
+	}
+}
 
 // deliverN sends m up to tries times; on no ack the message goes back to the
 // offline queue. Returns true when acked.
