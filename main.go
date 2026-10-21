@@ -77,6 +77,7 @@ type Message struct {
 	Dlv  int    `json:"dlv,omitempty"` // group copies delivered so far (v0.19.1)
 	Tot  int    `json:"tot,omitempty"` // group copies made when sent (recipients then)
 	Pn   string `json:"pn,omitempty"`  // proof-of-work nonce (pow.go)
+	Sg   string `json:"sg,omitempty"`  // group text post: sender's signature (groupssig.go, v0.19.3)
 }
 
 type Contact struct {
@@ -378,6 +379,7 @@ type wire struct {
 	GR  string   `json:"gr,omitempty"`  // packed members removed (gd)
 	PN  string   `json:"pn,omitempty"`  // proof-of-work nonce (msg, fh, gj)
 	GT  map[string]int64 `json:"gt,omitempty"` // gi: when recently removed members dropped out (v0.19.3)
+	Sg  string           `json:"sg,omitempty"` // group post signature (msg, fh, ghs; v0.19.3)
 
 	checked bool // local only: proof of work already verified (file header)
 }

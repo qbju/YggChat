@@ -59,6 +59,7 @@ type Group struct {
 	By      string   `json:"by,omitempty"`   // local: who sent us the invitation (caps invitation spam)
 	Ban     []string `json:"ban,omitempty"`  // host/admin, local: removed by a manager; their link joins are refused
 	Hand    bool     `json:"hand,omitempty"` // we left as host and handed the group to Owner (re-sent if they missed it)
+	Keys    map[string]string `json:"keys,omitempty"` // local: members whose last post was signed -> their key (groupssig.go)
 }
 
 // GroupSet are the host's group settings (v0.18), sent in gi as "gs".
@@ -306,6 +307,9 @@ func (a *App) sendGroup(gid, text, img string) (Message, error) {
 		exp = now.Unix() + int64(ttl)
 	}
 	vis := Message{ID: id, Peer: gKey(gid), From: a.addr, Nick: nick, Text: text, TS: now.Unix(), Out: true, Status: "sending", Img: img, TTL: ttl, Exp: exp}
+	if img == "" {
+		vis.Sg = a.signPost(gid, id, vis.TS, text) // relays can then prove it is ours (v0.19.3)
+	}
 	var copies []Message
 	for i, mem := range g.Members {
 		if mem == a.addr {
@@ -313,7 +317,7 @@ func (a *App) sendGroup(gid, text, img string) (Message, error) {
 		}
 		// The photo itself stays on the visible message only (GImg), so a
 		// group of 20 doesn't store it 20 times.
-		copies = append(copies, Message{ID: fmt.Sprintf("%sg%d", id, i), Peer: mem, From: a.addr, Nick: nick, Text: text, TS: vis.TS, Out: true, Status: "sending", Grp: gid, Of: id, Hid: true, GImg: img != "", TTL: ttl, Exp: exp})
+		copies = append(copies, Message{ID: fmt.Sprintf("%sg%d", id, i), Peer: mem, From: a.addr, Nick: nick, Text: text, TS: vis.TS, Out: true, Status: "sending", Grp: gid, Of: id, Hid: true, GImg: img != "", TTL: ttl, Exp: exp, Sg: vis.Sg})
 	}
 	vis.Tot = len(copies)
 	if len(copies) == 0 {
@@ -577,6 +581,9 @@ func (a *App) onGroupMsg(from string, w wire, img string) bool {
 			return false
 		}
 		a.replaceRelayed(key, from, w)
+		if w.Sg != "" && verifyPost(from, w.PK, w.Sg, w.G, postID(w.ID), w.TS, w.Text) {
+			a.noteSigner(w.G, from, w.PK)
+		}
 		return true
 	}
 	if dup || drop {
@@ -587,6 +594,15 @@ func (a *App) onGroupMsg(from string, w wire, img string) bool {
 	}
 	// Stored under the post id (copies are "<post>g<i>"), so relays dedupe on it.
 	m := Message{ID: postID(w.ID), Peer: key, From: from, Nick: cleanNick(w.Nick), Text: w.Text, TS: w.TS, Img: img, TTL: ttl}
+	if img == "" {
+		// A signed text post: keep the signature to pass on with relays; the
+		// sender is known to sign while its posts are signed (v0.19.3).
+		pk := ""
+		if w.Sg != "" && verifyPost(from, w.PK, w.Sg, w.G, postID(w.ID), w.TS, w.Text) {
+			m.Sg, pk = w.Sg, w.PK
+		}
+		a.noteSigner(w.G, from, pk)
+	}
 	if ttl > 0 {
 		m.Exp = time.Now().Unix() + int64(ttl)
 	}
@@ -1381,6 +1397,9 @@ func (a *App) msgWireBare(m Message) wire {
 	w := wire{T: "msg", ID: m.ID, Nick: m.Nick, Text: m.Text, TS: m.TS, TTL: m.TTL}
 	if m.Grp != "" {
 		w.G = m.Grp
+		if m.Sg != "" {
+			w.Sg, w.PK = m.Sg, a.myPK()
+		}
 		a.store.mu.Lock()
 		if g, ok := a.store.Groups[m.Grp]; ok {
 			w.GH = groupHash(g.Name, g.Members)

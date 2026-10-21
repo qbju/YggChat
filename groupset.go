@@ -239,6 +239,15 @@ func (a *App) sendHistory(to, gid string, hist []Message) {
 	defer func() { recover() }() // a bad message must never take the node down
 	time.Sleep(3 * time.Second) // let the gi land first
 	now := time.Now().Unix()
+	sigs := map[string][2]string{}
+	a.store.mu.Lock()
+	g := a.store.Groups[gid]
+	for _, m := range hist {
+		if sg, pk := a.sigForLocked(g, m); sg != "" && pk != "" {
+			sigs[m.From+"|"+m.ID] = [2]string{sg, pk}
+		}
+	}
+	a.store.mu.Unlock()
 	ws := make([]wire, 0, len(hist))
 	for _, m := range hist {
 		text := m.Text
@@ -251,6 +260,9 @@ func (a *App) sendHistory(to, gid string, hist []Message) {
 		}
 		// The post id, not our copy's "<post>g<i>": every member then has the same one to dedupe on (v0.19.2).
 		w := wire{T: "ghs", G: gid, ID: postID(m.ID), By: m.From, Nick: m.Nick, Text: text, TS: m.TS}
+		if s, ok := sigs[m.From+"|"+m.ID]; ok && m.Img == "" {
+			w.Sg, w.PK = s[0], s[1] // the sender's proof, valid only for the whole text
+		}
 		if m.Exp > 0 {
 			r := m.Exp - now - 20 // it takes a few seconds to send
 			if r <= 0 {
@@ -259,6 +271,9 @@ func (a *App) sendHistory(to, gid string, hist []Message) {
 			w.TTL = int(r)
 		}
 		// Shorten until the datagram fits (JSON escapes can triple a text).
+		if w.Sg != "" && wireLen(w) > dgramMax {
+			w.Sg, w.PK = "", "" // it will be shortened: the signature no longer fits the text
+		}
 		for cut := min(len(text), histText); wireLen(w) > dgramMax && cut > 0; cut -= 60 {
 			for cut > 0 && cut < len(text) && !utf8Start(text[cut]) {
 				cut--
@@ -319,12 +334,30 @@ func (a *App) onHistory(from string, w wire, g Group, known bool) {
 			return
 		}
 	}
+	knownSigner := g.Keys[by] != ""
 	a.store.mu.Unlock()
 	if by == a.addr {
 		return
 	}
+	// The sender's signature (groupssig.go): a bad one is a forgery; a good
+	// one is its own words, whoever relays it (v0.19.3).
+	signed := false
+	if w.Sg != "" {
+		if !verifyPost(by, w.PK, w.Sg, g.ID, postID(w.ID), w.TS, w.Text) {
+			return
+		}
+		signed = true
+	}
 	m := Message{ID: postID(w.ID), Peer: key, From: by, Nick: cleanNick(w.Nick), Text: w.Text, TS: w.TS, Hist: true}
-	if by != from && !canManage(g, from) {
+	if signed {
+		m.Sg = w.Sg
+		if !knownSigner && hasMember(g, by) {
+			a.noteSigner(g.ID, by, w.PK) // so we can pass the proof on too
+		}
+	}
+	// Unsigned relays show who relayed them; the host's and admins' too when
+	// the sender is known to sign (an unsigned post "by" it is not its own).
+	if by != from && !signed && (!canManage(g, from) || knownSigner) {
 		m.Via = from
 	}
 	if m.TS <= 0 || m.TS > time.Now().Unix()+300 {

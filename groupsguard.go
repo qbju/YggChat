@@ -352,7 +352,10 @@ func (a *App) replaceRelayed(key, from string, w wire) {
 	for i := len(a.store.Messages) - 1; i >= 0; i-- {
 		m := &a.store.Messages[i]
 		if m.Peer == key && m.From == from && !m.Out && samePost(m.ID, w.ID) {
-			m.Text, m.Via, m.Hist = w.Text, "", false
+			m.Text, m.Via, m.Hist, m.Sg = w.Text, "", false, ""
+			if w.Sg != "" && verifyPost(from, w.PK, w.Sg, w.G, postID(w.ID), w.TS, w.Text) {
+				m.Sg = w.Sg
+			}
 			if n := cleanNick(w.Nick); n != "" {
 				m.Nick = n
 			}
