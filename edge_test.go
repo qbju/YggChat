@@ -116,3 +116,18 @@ func TestDomCheckRateLimit(t *testing.T) {
 	}
 	domCheckDone()
 }
+
+func FuzzFingerQuery(f *testing.F) {
+	for _, s := range []string{"\r\n", "/W\r\n", "/W alice\r\n", "alice@host\r\n", "/W @a@b", "\x00\xff@", strings.Repeat("a", 300)} {
+		f.Add(s)
+	}
+	f.Fuzz(func(t *testing.T, s string) {
+		u, fwd := fingerQuery(s)
+		if strings.Contains(s, "@") != fwd {
+			t.Fatalf("%q: forward=%v", s, fwd)
+		}
+		if fwd && u != "" || strings.Contains(u, "@") || len(u) > len(s) {
+			t.Fatalf("%q -> %q", s, u)
+		}
+	})
+}

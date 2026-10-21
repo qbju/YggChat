@@ -180,13 +180,28 @@ func (a *App) fingerServe(c net.Conn) {
 	if blocked {
 		return
 	}
-	line, _ := bufio.NewReader(io.LimitReader(c, 256)).ReadString('\n')
-	q := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "/W"))
-	if strings.Contains(q, "@") {
+	line, _ := bufio.NewReader(io.LimitReader(c, fingerMaxLine)).ReadString('\n')
+	if _, fwd := fingerQuery(line); fwd {
 		io.WriteString(c, "finger: forwarding refused\r\n")
 		return
 	}
 	io.WriteString(c, strings.ReplaceAll(a.fingerText(cf), "\n", "\r\n"))
+}
+
+const fingerMaxLine = 256
+
+// fingerQuery parses an RFC 1288 query line ({Q1} "[/W] [user]" or {Q2}
+// "[/W] [user]@host..."). Every user gets the same card, so only whether it
+// asks us to forward (contains "@", refused per RFC 1288 2.5.5) matters.
+func fingerQuery(line string) (user string, forward bool) {
+	q := strings.TrimSpace(line)
+	if strings.HasPrefix(q, "/W") || strings.HasPrefix(q, "/w") {
+		q = strings.TrimSpace(q[2:])
+	}
+	if strings.Contains(q, "@") {
+		return "", true
+	}
+	return q, false
 }
 
 func (a *App) fingerNick() string {
