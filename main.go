@@ -73,6 +73,8 @@ type Message struct {
 	// GImg: a hidden group copy whose photo is on the visible message (Of).
 	GImg bool `json:"gimg,omitempty"`
 	Hist bool `json:"hist,omitempty"` // relayed by the group host as history for a new member (v0.18)
+	Via  string `json:"via,omitempty"` // history relayed by another member, not the sender (v0.19.1)
+	Dlv  int    `json:"dlv,omitempty"` // group copies delivered so far (v0.19.1)
 	Pn   string `json:"pn,omitempty"`  // proof-of-work nonce (pow.go)
 }
 
@@ -556,6 +558,12 @@ func (a *App) setStatus(peer, id, status string) {
 					// A delivered group copy is no longer needed (the visible
 					// message's status counts the copies still pending).
 					a.store.Messages = append(a.store.Messages[:i], a.store.Messages[i+1:]...)
+					for j := len(a.store.Messages) - 1; j >= 0; j-- {
+						if v := &a.store.Messages[j]; v.ID == of && v.Peer == gKey(grp) {
+							v.Dlv++
+							break
+						}
+					}
 				}
 			}
 			break
@@ -1374,6 +1382,7 @@ func main() {
 			if n := a.upPeers(); n != last {
 				if n > 0 && last <= 0 {
 					go func() { time.Sleep(1500 * time.Millisecond); a.helloAll() }()
+					go func() { time.Sleep(6 * time.Second); a.syncAllGroups() }()
 				}
 				last = n
 				a.broadcast("peers", map[string]int{"up": n})
@@ -1404,6 +1413,9 @@ func main() {
 			tick++
 			if a.upPeers() == 0 {
 				continue
+			}
+			if tick%30 == 0 {
+				go a.syncAllGroups() // catch up on groups every 10 min
 			}
 			if tick%6 == 0 {
 				a.helloAll()

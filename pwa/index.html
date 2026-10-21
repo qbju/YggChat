@@ -1371,7 +1371,7 @@ img.emoji { height:1.2em; width:1.2em; margin:0 .05em 0 .1em; vertical-align:-0.
       <a class="dl-btn" href="https://yggchat.surge.sh/dl/yggchat-windows-amd64.exe" download>🪟 Windows (exe)</a>
       <a class="dl-btn" href="https://yggchat.surge.sh/dl/yggchat-linux-amd64" download>🐧 Linux (amd64)</a>
       <a class="dl-btn" href="https://yggchat.surge.sh/dl/yggchat-android-arm64" download>⌨️ Termux (arm64)</a>
-      <div class="row-sub" id="dl-ver">最新: v0.19.0 ・ SHA256SUMS で検証できます</div>
+      <div class="row-sub" id="dl-ver">最新: v0.19.1 ・ SHA256SUMS で検証できます</div>
     </div>
     <div class="section">
       <div class="section-title">About</div>
@@ -1745,7 +1745,7 @@ function renderMessages(){
     if(!m.out && !g.same){
       html += '<div style="display:flex; gap:6px; align-items:flex-end; margin-bottom:2px;">'
         + '<div class="avatar small" style="width:28px; height:28px; font-size:10px; background:' + avc + '; border:none; color:#111;">' + escapeHtml(av) + '</div>'
-        + '<div style="font-size:11px; color:var(--dim);">' + escapeHtml(inGroup ? senderName(m) : (m.nick || addrShort(m.from||curAddr))) + '</div>'
+        + '<div style="font-size:11px; color:var(--dim);">' + escapeHtml(inGroup ? senderName(m) + (m.via ? '（' + memberNick(curAddr, m.via) + 'が中継）' : '') : (m.nick || addrShort(m.from||curAddr))) + '</div>'
         + '</div>';
     }
     if(m.img && /^data:image\/(jpeg|png|webp|gif);base64,[A-Za-z0-9+\/=]+$/.test(m.img)){
@@ -1841,6 +1841,24 @@ async function retrySend(id){
   }
 }
 
+// A member's name: their contact name, else the name on their group messages.
+function memberNick(gaddr, a, bare){
+  let n = (state.contacts[a] || {}).nick;
+  if(!n){ for(let i = state.messages.length - 1; i >= 0; i--){ const m = state.messages[i]; if(m.peer === gaddr && m.from === a && m.nick){ n = m.nick; break; } } }
+  return n || (bare ? '' : 'メンバー');
+}
+// Group header: the member count and the names we know, never raw addresses.
+function groupSubtitle(c){
+  const ms = c.members || [], names = [];
+  for(const a of ms){
+    if(a === state.addr) continue;
+    const n = memberNick(c.addr, a, true);
+    if(n) names.push(n);
+  }
+  let s = ms.length + '人';
+  if(names.length) s += '・' + names.slice(0, 3).join('、') + (ms.length - 1 > 3 ? ' ほか' : '');
+  return s;
+}
 function updateChatHeader(){
   const c = state.contacts[curAddr] || {addr:curAddr, nick:''};
   $('chat-avatar').textContent = avatarText(c, curAddr);
@@ -1858,12 +1876,13 @@ function updateChatHeader(){
   $('chat-avatar').style.border = 'none';
   $('chat-avatar').style.color = '#111';
   $('chat-name').textContent = c.nick || addrShort(curAddr);
-  $('chat-addr').textContent = grp ? (c.left ? '退出済みのグループ' : ((c.members||[]).length + '人: ' + (c.members||[]).map(a => a === state.addr ? 'あなた' : ((state.contacts[a]||{}).nick || addrShort(a))).join('、'))) : (c.dom && c.domok ? '✓ ' + c.dom + ' ・ ' + curAddr : curAddr);
+  $('chat-addr').textContent = grp ? (c.left ? '退出済みのグループ' : groupSubtitle(c)) : (c.dom && c.domok ? '✓ ' + c.dom + ' ・ ' + curAddr : curAddr);
 }
 
 let forceBottom = false;
 function openChat(addr){
   curAddr = addr;
+  if(isGroup(addr) && !(state.contacts[addr]||{}).req) api('/api/group/sync', {ID: addr.slice(2)}).catch(()=>{}); // catch up on what we missed
   forceBottom = true;
   document.body.classList.add('chat-open');
   updateChatHeader();
@@ -2758,7 +2777,7 @@ async function joinByCode(code, pw){
     if(r.already){ openChat(r.addr); return; }
     pendingJoin = r.addr;
     toast('ホストに参加をお願いしています…');
-    setTimeout(() => { if(pendingJoin === r.addr){ pendingJoin = null; toast('ホストから返事がありません。ホストがオンラインのときにもう一度開いてね'); } }, 22000);
+    setTimeout(() => { if(pendingJoin === r.addr){ pendingJoin = null; toast('ホストから返事がありません。ホストがオンラインのときにもう一度開いてね'); } }, 30000);
   }catch(e){ toast(e.message); }
 }
 async function openLink(t){

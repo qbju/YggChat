@@ -86,7 +86,8 @@
 
   function addMessage(m) {
     st.messages.push(m);
-    if (st.messages.length > 5000) st.messages.splice(0, st.messages.length - 5000);
+    // Cap the visible history; pending group copies are never dropped (v0.19.1).
+    if (st.messages.length > 5000) { let over = st.messages.length - 5000; st.messages = st.messages.filter(x => { if (over > 0 && !x.hid && !(x.out && x.status !== 'sent')) { over--; return false; } return true; }); }
     let c = st.contacts[m.peer];
     if (isG(m.peer)) { /* group conversations have no contact entry */ }
     else if (!c) { c = st.contacts[m.peer] = { addr: m.peer, nick: m.out ? '' : (m.nick || ''), req: !m.out, shared: !!m.out, ttl: m.ttl || 0 }; emit('contact', c); }
@@ -97,7 +98,7 @@
 
   function setStatus(peer, id, status) {
     const i = st.messages.findIndex(x => x.peer === peer && x.id === id), m = i >= 0 ? st.messages[i] : null;
-    if (m) { m.status = status; if (m.hid) { if (status === 'sent') st.messages.splice(i, 1); saveSoon(); } else save(); }
+    if (m) { m.status = status; if (m.hid) { if (status === 'sent') { st.messages.splice(i, 1); const v = st.messages.find(x => x.peer === 'g:' + m.grp && x.id === m.of); if (v) v.dlv = (v.dlv | 0) + 1; } saveSoon(); } else save(); }
     if (m && m.hid) { groupStatus(m.grp, m.of); return; }
     emit('status', { id, peer, status });
   }
@@ -236,12 +237,34 @@
   }
   function onHistory(src, w) {
     const g = st.groups[w.g], by = norm(String(w.by || ''));
-    if (!g || g.left || !canMng(g, src) || !(g.set && g.set.hi) || !by || !isYgg(by) || by === addr || !w.text || String(w.text).length > 2000 || !/^[0-9A-Za-z_-]{1,40}$/.test(String(w.id)) || (w.ttl | 0) < 0) return;
+    // Any member may relay what it has (v0.19.1); copies not from the sender, host or an admin show who relayed them.
+    if (!g || g.left || !g.members.includes(src) || !by || !isYgg(by) || by === addr || !w.text || String(w.text).length > 2000 || !/^[0-9A-Za-z_-]{1,40}$/.test(String(w.id)) || (w.ttl | 0) < 0) return;
     const key = 'g:' + g.id; if (st.messages.some(m => m.peer === key && m.from === by && m.id === w.id)) return;
-    const m = { id: w.id, peer: key, from: by, nick: cleanNick(w.nick), text: String(w.text), ts: w.ts || now(), out: false, hist: true };
+    let ts = +w.ts || 0; if (ts <= 0 || ts > now() + 300) ts = now();
+    const m = { id: w.id, peer: key, from: by, nick: cleanNick(w.nick), text: String(w.text), ts, out: false, hist: true };
+    if (by !== src && !canMng(g, src)) m.via = src;
     if (w.ttl | 0) m.exp = now() + (w.ttl | 0);
     addMessage(m);
   }
+  // Catch-up (v0.19.1): whoever of the group is online stands in as its mailbox.
+  const histSeen = {};
+  function onHistReq(src, w) {
+    const g = st.groups[w.g];
+    if (!g || g.left || !g.members.includes(src) || !g.members.includes(addr) || src === addr) return;
+    const k = src + '/' + g.id, t = now(); if (t - (histSeen[k] || 0) < 20) return; histSeen[k] = t;
+    const h = historyOf(g.id).filter(m => m.from !== src && ((g.set && g.set.hi) || (m.ts || 0) >= (+w.ts || 0)));
+    if (h.length) sendHistory(src, g.id, h);
+  }
+  function syncGroup(gid) {
+    const g = st.groups[gid]; if (!g || g.left || g.req || locked) return;
+    const key = 'g:' + gid; let since = now(); const f = st.messages.find(m => m.peer === key && m.ts > 0); if (f && f.ts < since) since = f.ts;
+    const ask = [];
+    const add = x => { if (x && x !== addr && g.members.includes(x) && !ask.includes(x) && ask.length < 8) ask.push(x); };
+    add(g.owner); for (const x of g.admins || []) add(x);
+    for (const x of g.members.slice().sort(() => Math.random() - 0.5)) add(x);
+    for (const x of ask) send(x, { t: 'ghq', g: gid, ts: since });
+  }
+  function syncAllGroups() { let d = 0; for (const id of Object.keys(st.groups)) { setTimeout(() => syncGroup(id), d); d += 200; } }
   const okGID = id => /^[0-9a-f]{16}$/.test(String(id || ''));
   function cleanMembers(list, must) {
     const out = [];
@@ -456,7 +479,8 @@
   function groupStatus(gid, id) {
     const cs = st.messages.filter(m => m.hid && m.grp === gid && m.of === id);
     const n = cs.length, sent = cs.filter(m => m.status === 'sent').length, sending = cs.filter(m => m.status === 'sending').length, stored = cs.filter(m => m.status === 'stored').length;
-    const s = (!n || sent === n) ? 'sent' : sending ? 'sending' : (sent + stored === n) ? 'stored' : 'queued';
+    const v0 = st.messages.find(m => m.peer === 'g:' + gid && m.id === id);
+    const s = (!n || sent || (v0 && v0.dlv)) ? 'sent' : sending ? 'sending' : stored ? 'stored' : 'queued'; // delivered to anyone = sent (v0.19.1)
     const v = st.messages.find(m => m.peer === 'g:' + gid && m.id === id);
     if (v && v.status !== s) { v.status = s; saveSoon(); emit('status', { id, peer: v.peer, status: s }); }
   }
@@ -503,9 +527,9 @@
       const c = st.contacts[src];
       g = st.groups[w.g] = { id: w.g, name: 'グループ', members: cleanMembers([src], addr), req: !(c && c.shared && !c.req), stub: true };
       ask = true; save(); emit('contact', gView(g));
-    } else if (g.left || !hasM(g, src)) { askInfo(src, w.g); return false; }
+    } else if (g.left || !hasM(g, src)) { askInfo(src, w.g); if (!g.left && g.owner && g.owner !== src && g.owner !== addr) askInfo(g.owner, w.g); return false; }
     else if (w.gh && w.gh !== gHashS(g.name, g.members)) ask = true;
-    if (ask) askInfo(src, w.g);
+    if (ask) { askInfo(src, w.g); if (g.owner && g.owner !== src && g.owner !== addr) askInfo(g.owner, w.g); }
     const key = 'g:' + w.g;
     if (st.messages.some(m => m.peer === key && m.from === src && m.id === w.id)) return true;
     if (!powCheck(src, w)) return false;
@@ -567,6 +591,7 @@
     if (w.t === 'gj') { onJoin(src, w); return; }
     if (w.t === 'gjn') { if (joins[w.g] === src) { if (w.k !== 'wait') delete joins[w.g]; emit('notice', { text: cleanText(w.text, 200), k: w.k || '', g: w.g }); } return; }
     if (w.t === 'ghs') { onHistory(src, w); return; }
+    if (w.t === 'ghq') { onHistReq(src, w); return; }
     if (w.t === 'gd') { onDelta(src, w); return; }
     if (w.t === 'gk') { onKey(src, w); return; }
     if (w.t === 'gkq') { if (g && !g.left && g.owner === addr && isAdm(g, src)) sendKey(g, [src]); return; }
@@ -677,7 +702,7 @@
     if (w.t === 'fh') { onFileHeader(src, w); return; }
     if (w.t === 'fc') { onFileChunk(src, w); return; }
     if ((w.t === 'edit' || w.t === 'del') && onCtl(src, w)) { send(src, { t: 'ack', id: w.id }); return; }
-    if (['gq', 'gi', 'gl', 'gj', 'gjn', 'ghs', 'gd', 'gp', 'gk', 'gkq'].includes(w.t)) { onGroupCtl(src, w); return; }
+    if (['gq', 'gi', 'gl', 'gj', 'gjn', 'ghs', 'ghq', 'gd', 'gp', 'gk', 'gkq'].includes(w.t)) { onGroupCtl(src, w); return; }
     if (w.t === 'msg') handleMsg(src, w).then(okm => { if (okm) { send(src, { t: 'ack', id: w.id }); askPK(src); if (queuedFor(src).length) flush(src); } });
   }
 
@@ -967,7 +992,40 @@
     for (const m of gone) emit('msg_del', { peer: m.peer, id: m.id });
   }, 2000);
 
+  // One tab runs the node: two tabs with the same key fight over the address
+  // and each keep their own copy of the history (v0.19.1).
+  function tabCover(text, btn, onClick) {
+    const d = document.createElement('div');
+    d.style.cssText = 'position:fixed;inset:0;z-index:99999;display:flex;flex-direction:column;gap:16px;align-items:center;justify-content:center;background:#16161a;color:#eee;font:16px system-ui,sans-serif;text-align:center;padding:24px';
+    const p = document.createElement('div'); p.textContent = text; d.appendChild(p);
+    const b = document.createElement('button'); b.textContent = btn;
+    b.style.cssText = 'padding:10px 20px;border-radius:999px;border:0;background:#7c4dff;color:#fff;font-size:15px';
+    b.onclick = () => { b.disabled = true; onClick(); }; d.appendChild(b);
+    const put = () => document.body.appendChild(d);
+    document.body ? put() : addEventListener('DOMContentLoaded', put, { once: true });
+    return d;
+  }
+  async function tabLock() {
+    if (!(navigator.locks && navigator.locks.request) || typeof BroadcastChannel === 'undefined') return;
+    const bc = new BroadcastChannel('yggchat-tab');
+    const hold = () => new Promise(got => {
+      navigator.locks.request('yggchat-node', () => { got(); return new Promise(() => {}); });
+    });
+    const take = () => new Promise(got => {
+      navigator.locks.request('yggchat-node', { ifAvailable: true }, l => { if (!l) { got(false); return; } got(true); return new Promise(() => {}); });
+    });
+    bc.onmessage = e => { if (e.data === 'take' && holding) { try { sessionStorage.setItem('yggpassive', '1'); } catch {} location.reload(); } };
+    let holding = false, passive = false;
+    try { passive = sessionStorage.getItem('yggpassive') === '1'; sessionStorage.removeItem('yggpassive'); } catch {}
+    if (!passive && await take()) { holding = true; return; }
+    await new Promise(go => {
+      const cover = tabCover('YggChatは別のタブで開いています', 'このタブで使う', async () => { bc.postMessage('take'); await hold(); cover.remove(); go(); });
+    });
+    holding = true;
+  }
+
   const ready = (async () => {
+    await tabLock();
     await loadStore();
     const go = new Go();
     const wasmReady = new Promise(r => addEventListener('yggready', r, { once: true }));
@@ -994,8 +1052,9 @@
     let last = -1;
     setInterval(() => {
       const n = yggPeers();
-      if (n !== last) { if (n > 0 && last <= 0) setTimeout(helloAll, 1500); last = n; emit('peers', { up: n }); }
+      if (n !== last) { if (n > 0 && last <= 0) { setTimeout(helloAll, 1500); setTimeout(syncAllGroups, 6000); } last = n; emit('peers', { up: n }); }
     }, 3000);
+    setInterval(() => { if (yggPeers() > 0 && !locked) syncAllGroups(); }, 600000);
     // Probe peers we still owe messages to, plus everyone now and then so they can flush to us.
     setInterval(() => { if (yggPeers() > 0 && !locked) for (const p of new Set([...st.messages.filter(m => m.out && (m.status === 'queued' || m.status === 'stored')).map(m => m.peer), ...(st.ctl || []).map(c => c.peer)])) hello(p); }, 20000);
     setInterval(() => { if (yggPeers() > 0) helloAll(); }, 120000);
@@ -1103,10 +1162,12 @@
         if (ttl) { m.ttl = ttl; m.exp = m.ts + ttl; }
         addMessage(m); if (share) sendProf(dst); deliver(m); return ok(m);
       }
+      case 'group/sync': { syncGroup(String(body.ID || '')); return ok({}); }
       case 'group/create': {
         const ms = cleanMembers(body.Members, addr); if (ms.length < 2) return bad('メンバーを1人以上選んでください');
         const id = hexOf(crypto.getRandomValues(new Uint8Array(8)));
-        const g = st.groups[id] = { id, name: cleanNick(body.Name) || 'グループ', members: ms, owner: addr };
+        const g = st.groups[id] = { id, name: cleanNick(body.Name) || 'グループ', members: ms, owner: addr, v: 1, set: { hi: true } };
+        { const mx = GMAXES.find(c => c >= ms.length); if (mx && mx > GDEF) g.set.mx = mx; }
         save(); emit('contact', gView(g)); gSys(g, 'グループ「' + g.name + '」を作りました'); gInfo(g); return ok(gView(g));
       }
       case 'group/update': {
@@ -1146,6 +1207,7 @@
         if (body.Pass && hadPw) gSys(g, 'あなたが参加パスワードを変更しました');
         memberSys(g, addr, added, removed); adminSys(g, addr, old.admins, g.admins || []);
         if (added.length || removed.length) gMembers(g, added, removed);
+        if (added.length && g.set && g.set.hi) { const h = historyOf(g.id); if (h.length) for (const x of added) sendHistory(x, g.id, h); }
         if (g.name !== old.name || ns || pwChanged || body.Admins) gInfo(g);
         if (host) { const na = (g.admins || []).filter(x => !old.admins.includes(x) || pwChanged); if (na.length) sendKey(g, na); }
         return ok(gView(g));

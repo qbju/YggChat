@@ -184,6 +184,7 @@ func (a *App) createGroup(name string, members []string) (Group, error) {
 	b := make([]byte, 8)
 	_, _ = rand.Read(b)
 	g := Group{ID: hex.EncodeToString(b), Name: name, Members: ms, Owner: a.addr, V: 1}
+	g.Set.Hist = true // new members and members who were away catch up (v0.19.1)
 	for _, c := range groupMaxChoices {
 		if c >= len(ms) {
 			if c > defaultGroupMax {
@@ -303,13 +304,23 @@ func (a *App) groupStatus(gid, id string) {
 			}
 		}
 	}
+	// Delivered to anyone counts as sent: the rest are retried on their own
+	// (v0.19.1, user's request), so "waiting for them to come online" only
+	// shows while nobody has it yet.
+	dlv := 0
+	for i := len(a.store.Messages) - 1; i >= 0; i-- {
+		if m := &a.store.Messages[i]; m.ID == id && m.Peer == gKey(gid) {
+			dlv = m.Dlv
+			break
+		}
+	}
 	st := "queued"
 	switch {
-	case n == 0 || sent == n:
+	case n == 0 || sent > 0 || dlv > 0:
 		st = "sent"
 	case sending > 0:
 		st = "sending"
-	case sent+stored == n:
+	case stored > 0:
 		st = "stored"
 	}
 	changed := false
@@ -380,6 +391,9 @@ func (a *App) onGroupMsg(from string, w wire, img string) bool {
 	} else if g.Left || !hasMember(g, from) {
 		a.store.mu.Unlock()
 		a.askInfo(from, w.G)
+		if !g.Left && g.Owner != "" && g.Owner != from && g.Owner != a.addr {
+			a.askInfo(g.Owner, w.G) // we may have missed a change: the host knows the list
+		}
 		return false
 	} else if w.GH != "" && w.GH != groupHash(g.Name, g.Members) {
 		ask = true
@@ -409,6 +423,9 @@ func (a *App) onGroupMsg(from string, w wire, img string) bool {
 	}
 	if ask {
 		a.askInfo(from, w.G)
+		if known && g.Owner != "" && g.Owner != from && g.Owner != a.addr {
+			a.askInfo(g.Owner, w.G)
+		}
 	}
 	if dup || drop {
 		return true
@@ -481,6 +498,9 @@ func (a *App) onGroupCtl(from string, w wire) {
 		return
 	case "ghs":
 		a.onHistory(from, w, g, known)
+		return
+	case "ghq":
+		a.onHistReq(from, w, g, known)
 		return
 	case "gd":
 		a.onDelta(from, w, g, known)
@@ -851,6 +871,16 @@ func (a *App) groupHandlers(mux *http.ServeMux) {
 		a.adminSys(g, a.addr, old.Admins, g.Admins)
 		if len(added) > 0 || len(removed) > 0 {
 			a.sendMembers(g, added, removed) // the removed hear it too, so they know they're out
+		}
+		if len(added) > 0 && g.Set.Hist {
+			a.store.mu.Lock()
+			hist := a.historyLocked(g.ID)
+			a.store.mu.Unlock()
+			for _, m := range added {
+				if len(hist) > 0 {
+					go a.sendHistory(m, g.ID, hist)
+				}
+			}
 		}
 		if g.Name != old.Name || req.Set != nil || pwChanged || req.Admins != nil {
 			a.sendInfo(g)

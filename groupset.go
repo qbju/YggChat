@@ -27,6 +27,7 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	mrand "math/rand"
 	"net/http"
 	"strings"
 	"sync"
@@ -229,6 +230,7 @@ func (a *App) historyLocked(gid string) []Message {
 }
 
 func (a *App) sendHistory(to, gid string, hist []Message) {
+	defer func() { recover() }() // a bad message must never take the node down
 	time.Sleep(3 * time.Second) // let the gi land first
 	now := time.Now().Unix()
 	ws := make([]wire, 0, len(hist))
@@ -251,7 +253,7 @@ func (a *App) sendHistory(to, gid string, hist []Message) {
 		}
 		// Shorten until the datagram fits (JSON escapes can triple a text).
 		for cut := min(len(text), histText); wireLen(w) > dgramMax && cut > 0; cut -= 60 {
-			for cut > 0 && !utf8Start(text[cut]) {
+			for cut > 0 && cut < len(text) && !utf8Start(text[cut]) {
 				cut--
 			}
 			w.Text = text[:cut] + "…（省略）"
@@ -275,7 +277,10 @@ func utf8Start(b byte) bool { return b&0xc0 != 0x80 }
 // onHistory stores one history message from the host. Caller holds a.store.mu; released here.
 func (a *App) onHistory(from string, w wire, g Group, known bool) {
 	by, ok := yggAddr(w.By)
-	if !known || g.Left || !canManage(g, from) || !g.Set.Hist || !ok || w.Text == "" || len(w.Text) > 2000 || !msgIDRe.MatchString(w.ID) || w.TTL < 0 {
+	// Any member may relay what it has (it stands in as the mailbox for
+	// members who were away); only the sender's own copy and the host's or
+	// admins' are unmarked, the rest show who relayed them.
+	if !known || g.Left || !hasMember(g, from) || !ok || w.Text == "" || len(w.Text) > 2000 || !msgIDRe.MatchString(w.ID) || w.TTL < 0 {
 		a.store.mu.Unlock()
 		return
 	}
@@ -291,6 +296,12 @@ func (a *App) onHistory(from string, w wire, g Group, known bool) {
 		return
 	}
 	m := Message{ID: w.ID, Peer: key, From: by, Nick: cleanNick(w.Nick), Text: w.Text, TS: w.TS, Hist: true}
+	if by != from && !canManage(g, from) {
+		m.Via = from
+	}
+	if m.TS <= 0 || m.TS > time.Now().Unix()+300 {
+		m.TS = time.Now().Unix()
+	}
 	if w.TTL > 0 {
 		m.Exp = time.Now().Unix() + int64(w.TTL)
 	}
@@ -298,6 +309,14 @@ func (a *App) onHistory(from string, w wire, g Group, known bool) {
 }
 
 func (a *App) groupSetHandlers(mux *http.ServeMux) {
+	mux.HandleFunc("/api/group/sync", func(w http.ResponseWriter, r *http.Request) {
+		var req struct{ ID string }
+		if !readJSON(w, r, &req) {
+			return
+		}
+		go a.syncGroup(req.ID)
+		w.Write([]byte("{}"))
+	})
 	// The host answers a join request waiting for approval.
 	mux.HandleFunc("/api/group/approve", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
@@ -349,4 +368,91 @@ func (a *App) groupSetHandlers(mux *http.ServeMux) {
 		a.store.mu.Unlock()
 		json.NewEncoder(w).Encode(groupView(g))
 	})
+}
+
+// Catch-up (v0.19.1): a member who opens a group or comes back online asks a
+// few other members for the recent messages; whoever is online answers, so
+// any member stands in as the group's mailbox.
+var (
+	histReqMu   sync.Mutex
+	histReqSeen = map[string]int64{}
+)
+
+func (a *App) onHistReq(from string, w wire, g Group, known bool) {
+	if !known || g.Left || !hasMember(g, from) || !hasMember(g, a.addr) || from == a.addr {
+		a.store.mu.Unlock()
+		return
+	}
+	hist := a.historyLocked(g.ID)
+	a.store.mu.Unlock()
+	now := time.Now().Unix()
+	histReqMu.Lock()
+	k := from + "/" + g.ID
+	if t := histReqSeen[k]; now-t < 20 {
+		histReqMu.Unlock()
+		return
+	}
+	histReqSeen[k] = now
+	if len(histReqSeen) > 4096 {
+		histReqSeen = map[string]int64{}
+	}
+	histReqMu.Unlock()
+	out := hist[:0:0]
+	for _, m := range hist {
+		// Without history sharing, only what was said since they were in the group.
+		if m.From == from || (!g.Set.Hist && m.TS < w.TS) {
+			continue
+		}
+		out = append(out, m)
+	}
+	if len(out) > 0 {
+		go a.sendHistory(from, g.ID, out)
+	}
+}
+
+// syncGroup asks the host, the admins and a few other members for what we missed.
+func (a *App) syncGroup(gid string) {
+	a.store.mu.Lock()
+	g, ok := a.store.Groups[gid]
+	if !ok || g.Left || g.Req || a.store.locked {
+		a.store.mu.Unlock()
+		return
+	}
+	since := time.Now().Unix()
+	for _, m := range a.store.Messages {
+		if m.Peer == gKey(gid) && m.TS > 0 && m.TS < since {
+			since = m.TS
+			break
+		}
+	}
+	a.store.mu.Unlock()
+	ask := []string{}
+	add := func(x string) {
+		if x != "" && x != a.addr && hasMember(g, x) && !hasMember(Group{Members: ask}, x) && len(ask) < 8 {
+			ask = append(ask, x)
+		}
+	}
+	add(g.Owner)
+	for _, x := range g.Admins {
+		add(x)
+	}
+	for _, i := range mrand.Perm(len(g.Members)) {
+		add(g.Members[i])
+	}
+	for _, x := range ask {
+		a.sendWire(x, wire{T: "ghq", G: gid, TS: since})
+	}
+}
+
+func (a *App) syncAllGroups() {
+	a.store.mu.Lock()
+	ids := []string{}
+	for id := range a.store.Groups {
+		ids = append(ids, id)
+	}
+	a.store.mu.Unlock()
+	for _, id := range ids {
+		a.syncGroup(id)
+		time.Sleep(200 * time.Millisecond)
+	}
 }
