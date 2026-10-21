@@ -16,6 +16,7 @@ func (a *App) learnPK(from, pkHex string) {
 	if err != nil || !mbox.AddrOK(from, pk) {
 		return
 	}
+	pkHex = hex.EncodeToString(pk) // canonical lower case: "AB.." vs "ab.." is no change
 	a.store.mu.Lock()
 	defer a.store.mu.Unlock()
 	if c, ok := a.store.Contacts[from]; ok && c.PK != pkHex {

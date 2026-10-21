@@ -810,7 +810,7 @@ var cliHelp = fmt.Sprintf(`コマンド:
   /nostr on|off      Nostr置き配の切り替え
   /quit              終了（-cli で起動したノードも止まります）
 それ以外の入力は、開いている相手に送信します（最大 %d バイト）。
-「/」で始まる文を送るときは「//」と書きます（//shrug → /shrug）。`, maxText)
+「/」で始まる文を送るときは「//」と書きます（//shrug → /shrug）。`, maxSendText)
 
 // ---------- input ----------
 
@@ -1004,8 +1004,8 @@ func (c *cli) send(text string) {
 		c.printf("相手が選ばれていません。/list と /open で選んでください")
 		return
 	}
-	if len(text) > maxText {
-		c.printf("長すぎます（%d バイト。最大 %d バイト）。送信していません", len(text), maxText)
+	if len(text) > maxSendText {
+		c.printf("長すぎます（%d バイト。最大 %d バイト）。送信していません", len(text), maxSendText)
 		return
 	}
 	var m Message
