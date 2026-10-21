@@ -473,6 +473,8 @@ func restartSelf() {
 	if err == nil {
 		cmd := exec.Command(exe, os.Args[1:]...)
 		cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+		// The UI is already open and reconnects by itself: no second tab.
+		cmd.Env = append(os.Environ(), "YGGCHAT_NO_OPEN=1")
 		_ = cmd.Start()
 	}
 	os.Exit(0)

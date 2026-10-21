@@ -1450,7 +1450,7 @@ func main() {
 	peers := flag.String("peers", "", "comma-separated Yggdrasil peer URIs (overrides config)")
 	listen := flag.String("listen", "", "comma-separated Yggdrasil listen URIs, e.g. tls://0.0.0.0:12345")
 	cliMode := flag.Bool("cli", false, "terminal chat (attaches to a node already running on -ui, or starts one)")
-	noWindow := flag.Bool("nowindow", false, "Windows: don't open the app window (use a browser on -ui instead)")
+	noWindow := flag.Bool("nowindow", false, "don't open the app window (Windows) or the browser (macOS/Linux); just print the UI URL")
 	licenses := flag.Bool("licenses", false, "print the license (GPL-3.0-or-later) and third-party notices, then exit")
 	flag.Parse()
 	if *licenses {
@@ -1478,6 +1478,13 @@ func main() {
 	if wantWindow && apiUp(*uiAddr) {
 		// Already running (e.g. double-clicked twice): just show it.
 		openWindow(uiURL(*uiAddr), *dataDir)
+		return
+	}
+	// macOS/Linux desktops: open the UI in the default browser (the URL is printed too).
+	wantBrowser := !*cliMode && !*noWindow && runtime.GOOS != "windows" && runtime.GOOS != "android" && browserCmd(uiURL(*uiAddr), os.Getenv) != nil
+	if wantBrowser && apiUp(*uiAddr) {
+		fmt.Printf("YggChat is already running\n  open UI:      %s\n", uiURL(*uiAddr))
+		openBrowser(uiURL(*uiAddr))
 		return
 	}
 	_ = os.MkdirAll(*dataDir, 0700)
@@ -1647,6 +1654,9 @@ func main() {
 		log.Fatal(err)
 	}
 	handler := localOnly(*uiAddr, keyGuard(*uiAddr, a.lockGuard(mux)))
+	if wantBrowser {
+		openBrowser(uiURL(*uiAddr)) // the listener is up: the page loads at once
+	}
 	if wantWindow {
 		go func() { log.Fatal(http.Serve(ln, handler)) }()
 		if openWindow(uiURL(*uiAddr), *dataDir) {

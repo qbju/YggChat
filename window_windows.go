@@ -54,3 +54,8 @@ func openWindow(url, dataDir string) bool {
 	w.Destroy()
 	return true
 }
+
+// openBrowser: Windows uses openWindow (WebView2, or the browser as fallback).
+func openBrowser(url string) {}
+
+func browserCmd(url string, getenv func(string) string) []string { return nil }
