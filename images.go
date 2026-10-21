@@ -134,6 +134,9 @@ func (a *App) deliverFile(m Message, mime string, raw []byte, tries int) bool {
 	}
 	idle, last := 0, -1
 	for idle < tries {
+		if last >= 0 && !m.Hid && !a.stillOut(m.Peer, m.ID) {
+			return true // deleted meanwhile
+		}
 		if x := powAsked(m.Peer, m.ID); x > asked {
 			asked, m.Pn = x, ""
 			a.withPow(m, &hdr, hdr.Sha)
@@ -284,6 +287,9 @@ func (a *App) onFileChunk(from string, w wire) {
 func (a *App) hasMsg(from, id string) bool {
 	a.store.mu.Lock()
 	defer a.store.mu.Unlock()
+	if a.store.isGoneLocked(from, id) {
+		return true // unsent / deleted: ack and drop
+	}
 	for i := len(a.store.Messages) - 1; i >= 0; i-- {
 		if a.store.Messages[i].Peer == from && a.store.Messages[i].ID == id {
 			return true

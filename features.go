@@ -211,7 +211,7 @@ func (s *Store) resetData() {
 	s.Nick, s.Bio, s.Avatar, s.Domain = "", "", "", ""
 	s.Contacts, s.Messages, s.Blocked, s.Groups, s.Ctl = nil, nil, nil, nil, nil
 	s.NostrOn, s.NostrRelays, s.NostrLegacy, s.PowStrict = false, nil, false, false
-	s.Joins = nil
+	s.Joins, s.Gone, s.Early = nil, nil, nil
 }
 
 // loadData replaces all saved fields with the JSON b (every field, so new
@@ -331,6 +331,7 @@ func (a *App) sweep() {
 		for _, m := range a.store.Messages {
 			if m.Exp > 0 && m.Exp <= now {
 				gone = append(gone, map[string]string{"peer": m.Peer, "id": m.ID})
+				a.store.goneIfRecentLocked(m) // a late copy must not bring it back
 				continue
 			}
 			kept = append(kept, m)
@@ -421,7 +422,7 @@ func (a *App) resetIdentity() error {
 	a.store.Ctl = nil
 	a.store.Domain = ""
 	a.store.Blocked = map[string]bool{}
-	a.store.Joins = nil
+	a.store.Joins, a.store.Gone, a.store.Early = nil, nil, nil
 	a.store.save()
 	a.store.mu.Unlock()
 	go func() {
@@ -568,6 +569,8 @@ func (a *App) featureHandlers(mux *http.ServeMux) {
 			for _, m := range a.store.Messages {
 				if m.Peer != addr || m.Hid { // pending group copies to them still count for the group (v0.19.2)
 					kept = append(kept, m)
+				} else {
+					a.store.goneIfRecentLocked(m)
 				}
 			}
 			a.store.Messages = kept

@@ -125,6 +125,12 @@ type Store struct {
 	PowStrict bool `json:"pow_strict,omitempty"`
 	// Our pending invite-link joins: group id -> host, until they expire (invite.go).
 	Joins map[string]joinWait `json:"joins,omitempty"`
+	// 1:1 messages that must not (re)appear: unsent by their sender, or
+	// deleted / expired here ("peer/id" -> unix time the entry may go).
+	// A late Nostr copy or a retry would otherwise bring them back.
+	Gone map[string]int64 `json:"gone,omitempty"`
+	// Edits that arrived before the message they change ("peer/id").
+	Early map[string]earlyEdit `json:"early,omitempty"`
 }
 
 func (s *Store) save() { _ = s.saveErr() }
@@ -545,7 +551,7 @@ func (a *App) acceptMsg(from string, w wire, img string) bool {
 		a.store.mu.Unlock()
 		return false
 	}
-	dup := false
+	dup := a.store.isGoneLocked(from, w.ID) // unsent by them, or deleted/expired here
 	for i := len(a.store.Messages) - 1; i >= 0 && !dup; i-- {
 		dup = a.store.Messages[i].Peer == from && a.store.Messages[i].ID == w.ID
 	}
@@ -587,6 +593,11 @@ func (a *App) acceptMsg(from string, w wire, img string) bool {
 	if w.TTL > 0 {
 		m.Exp = time.Now().Unix() + int64(w.TTL)
 	}
+	a.store.mu.Lock()
+	if t, ok := a.store.takeEarlyLocked(from, w.ID); ok {
+		m.Text, m.Edited = t, true // its edit overtook it
+	}
+	a.store.mu.Unlock()
 	a.addMessage(m)
 	return true
 }
@@ -775,6 +786,9 @@ func (a *App) deliverN(m Message, tries int) bool {
 	dst := &net.UDPAddr{IP: net.ParseIP(m.Peer), Port: chatPort}
 	// First packet to a new key triggers a key lookup, so retry a few times.
 	for i := 0; i < tries; i++ {
+		if i > 0 && !m.Hid && !a.stillOut(m.Peer, m.ID) {
+			return true // deleted while we were trying: don't keep sending it
+		}
 		if x := powAsked(m.Peer, m.ID); x > asked {
 			asked = x // the receiver wants more work
 			m.Pn = ""
@@ -824,6 +838,16 @@ func (a *App) probeSoon(peer string) {
 
 // nostrPark parks a message the peer did not ack on Nostr relays (if enabled).
 func (a *App) nostrPark(m Message) {
+	a.store.mu.Lock()
+	still := false
+	for i := len(a.store.Messages) - 1; i >= 0 && !still; i-- {
+		x := &a.store.Messages[i]
+		still = x.Peer == m.Peer && x.ID == m.ID && x.Status == "queued"
+	}
+	a.store.mu.Unlock()
+	if !still {
+		return // delivered, deleted or unsent meanwhile: nothing to park
+	}
 	if !a.nostrPut(m) {
 		return
 	}
@@ -1219,6 +1243,8 @@ func (a *App) httpHandlers(mux *http.ServeMux) {
 		for _, m := range a.store.Messages {
 			if m.Peer != addr || m.Hid { // pending group copies to them still count for the group (v0.19.2)
 				kept = append(kept, m)
+			} else {
+				a.store.goneIfRecentLocked(m)
 			}
 		}
 		a.store.Messages = kept
