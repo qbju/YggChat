@@ -903,7 +903,7 @@ body.screen-open .fab { display:none; }
   font-size:13px;
   max-width:90%;
   text-align:center;
-  z-index:40;
+  z-index:100; /* above dialogs, the photo viewer and the QR scanner, whose actions toast too */
   display:none;
   box-shadow:0 4px 12px rgba(0,0,0,0.3);
 }
@@ -1697,11 +1697,15 @@ function hashColor(addr){
   return 'hsl(' + h + ', 70%, 55%)';
 }
 
+// One timer for the one toast: an earlier toast's timer hid a newer one early;
+// long messages stay up longer.
+let toastT = null;
 function toast(msg){
   const el = $('toast');
   el.textContent = msg;
   el.classList.add('show');
-  setTimeout(() => el.classList.remove('show'), 2500);
+  clearTimeout(toastT);
+  toastT = setTimeout(() => el.classList.remove('show'), Math.min(8000, 2500 + String(msg || '').length * 40));
 }
 
 async function api(path, body){
@@ -3413,7 +3417,7 @@ async function socksSet(body, msg){
 }
 $('socks-switch').addEventListener('click', async () => {
   const on = !(state.socks && state.socks.on);
-  if(on && !(await uiDialog('SOCKS5（' + (state.socks.addr || '127.0.0.1:9050') + '）経由に切り替えますか？\n\nOrbotやTorを先に起動しておいてください。動いていないとどこにもつながりません。切り替えると再起動します。', {okText:'切り替える'}))) return;
+  if(on && !(await uiDialog('SOCKS5（' + ((state.socks && state.socks.addr) || '127.0.0.1:9050') + '）経由に切り替えますか？\n\nOrbotやTorを先に起動しておいてください。動いていないとどこにもつながりません。切り替えると再起動します。', {okText:'切り替える'}))) return;
   socksSet({On: on}, on ? 'SOCKS5経由に切り替えます' : '直接接続に戻します');
 });
 $('socks-edit').addEventListener('click', async () => {
@@ -4036,12 +4040,13 @@ $('iv-close').addEventListener('click', closeViewer);
 $('img-viewer').addEventListener('click', (e) => { if(e.target.id === 'img-viewer') closeViewer(); });
 $('iv-save').addEventListener('click', async () => {
   const src = $('img-viewer-img').src;
+  const mt = (src.match(/^data:image\/(jpeg|png|webp|gif)[;,]/) || [])[1] || 'jpeg', ext = mt === 'jpeg' ? 'jpg' : mt; // PNG/GIF/WebP photos kept a .jpg name
   try{
     const blob = await (await fetch(src)).blob();
-    const file = new File([blob], 'yggchat-' + Date.now() + '.jpg', {type: blob.type});
+    const file = new File([blob], 'yggchat-' + Date.now() + '.' + ext, {type: blob.type});
     if(navigator.canShare && navigator.canShare({files:[file]})){ await navigator.share({files:[file]}); return; }
   }catch(e){ if(e && e.name === 'AbortError') return; }
-  const a = document.createElement('a'); a.href = src; a.download = 'yggchat-' + Date.now() + '.jpg'; document.body.appendChild(a); a.click(); a.remove();
+  const a = document.createElement('a'); a.href = src; a.download = 'yggchat-' + Date.now() + '.' + ext; document.body.appendChild(a); a.click(); a.remove();
 });
 
 window.ygBack = () => {
