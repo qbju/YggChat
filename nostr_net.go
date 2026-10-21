@@ -121,6 +121,9 @@ func relayFetch(url string, tags []string) []string {
 			if len(m) >= 3 {
 				out = append(out, string(m[2]))
 			}
+			if len(out) >= maxFetchEvents {
+				return out // a relay streaming junk can't fill our memory
+			}
 		case `"EOSE"`, `"CLOSED"`:
 			_ = c.Write(ctx, websocket.MessageText, []byte(`["CLOSE",`+string(m[1])+`]`))
 			subs--
@@ -128,6 +131,8 @@ func relayFetch(url string, tags []string) []string {
 	}
 	return out
 }
+
+const maxFetchEvents = 2000 // per relay and fetch
 
 func itoa(n int) string { b, _ := json.Marshal(n); return string(b) }
 
@@ -164,7 +169,18 @@ func (a *App) nostrPut(m Message) bool {
 	return ok
 }
 
-var nostrSeen sync.Map // event id -> struct{}
+var nostrSeen sync.Map // event id -> time handled (unix)
+
+// pruneNostrSeen forgets events older than any box can live (memory stays bounded).
+func pruneNostrSeen() {
+	cut := time.Now().Unix() - mbox.NostrTTL - 3*86400
+	nostrSeen.Range(func(k, v any) bool {
+		if t, ok := v.(int64); !ok || t < cut {
+			nostrSeen.Delete(k)
+		}
+		return true
+	})
+}
 
 // nostrFetch pulls, opens and deletes everything waiting for us.
 func (a *App) nostrFetch() {
@@ -181,6 +197,7 @@ func (a *App) nostrFetch() {
 		}
 	}
 	a.store.mu.Unlock()
+	pruneNostrSeen()
 	tags := mbox.NostrTags(a.privKey(), peers, time.Now().Unix(), legacy)
 	if len(tags) == 0 {
 		return // no contacts with a known key yet: don't even contact the relays
@@ -230,7 +247,7 @@ func (a *App) nostrFetch() {
 	})
 	for _, p := range ps {
 		if a.handleMsg(p.from, p.w) {
-			nostrSeen.Store(p.id, struct{}{})
+			nostrSeen.Store(p.id, time.Now().Unix())
 			go a.sendWire(p.from, wire{T: "ack", ID: p.w.ID}) // tell the sender directly if it is online
 			if p.del != "" {
 				go nostrPublish(relays, p.del)
