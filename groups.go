@@ -916,7 +916,15 @@ func (a *App) onGroupCtl(from string, w wire) {
 		if !in {
 			g.Left = true
 		}
-		setChanged, handed := false, ""
+		setChanged, handed, claimed := false, "", false
+		if known && g.Owner != "" && from != g.Owner && !hasMember(g, g.Owner) && isAdmin(old, from) && hasMember(g, from) && w.GSV > g.SV {
+			// The host left (it is no longer a member) and we missed its
+			// hand-over: the admin it named says so itself (v0.19.3). While
+			// the host is still in the group nobody else can claim it.
+			if o, ok := yggAddr(w.GO); ok && o == from {
+				g.Owner, claimed = from, true
+			}
+		}
 		if g.Owner != "" && from == g.Owner && !staleSet {
 			if w.GSV > g.SV {
 				g.SV = w.GSV
@@ -1002,6 +1010,9 @@ func (a *App) onGroupCtl(from string, w wire) {
 		}
 		if handed != "" {
 			a.groupSys(g, a.gNameOf(g, from)+" が "+a.gNameOf(g, handed)+" をホストにしました")
+		}
+		if claimed {
+			a.groupSys(g, a.gNameOf(g, from)+" がホストになりました")
 		}
 		if known && in {
 			var added, removed []string

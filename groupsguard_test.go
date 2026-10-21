@@ -527,3 +527,30 @@ func TestPendingListExpires(t *testing.T) {
 		t.Fatalf("pending: %+v", g.Pend)
 	}
 }
+
+// A member that missed the old host's hand-over (but got its gl) took
+// nothing from the new host: the group had no host for it.
+func TestMissedHandOverHeirClaims(t *testing.T) {
+	gid := "abcd0000abcd0000"
+	a := tApp(t, tMe)
+	ms := cleanMembers([]string{tAdm, tMem}, tMe) // the host already left
+	a.store.Groups[gid] = Group{ID: gid, Name: "G", Members: ms, Owner: tHost, Admins: []string{tAdm}, V: 6, SV: 2}
+	// an ordinary member can't claim it
+	a.onGroupCtl(tMem, wire{T: "gi", G: gid, GN: "G", GM: ms, GO: tMem, GV: 6, GSV: 9, GS: &GroupSet{NoFiles: true}})
+	if g := a.store.Groups[gid]; g.Owner != tHost || g.Set.NoFiles {
+		t.Fatalf("member claimed: %+v", g)
+	}
+	a.onGroupCtl(tAdm, wire{T: "gi", G: gid, GN: "G", GM: ms, GO: tAdm, GV: 6, GSV: 3, GS: &GroupSet{NoFiles: true}})
+	g := a.store.Groups[gid]
+	if g.Owner != tAdm || !g.Set.NoFiles || g.SV != 3 {
+		t.Fatalf("heir's claim: %+v", g)
+	}
+	// while the host is still a member, an admin can't
+	b := tApp(t, tMe)
+	ms2 := cleanMembers([]string{tAdm, tMem, tHost}, tMe)
+	b.store.Groups[gid] = Group{ID: gid, Name: "G", Members: ms2, Owner: tHost, Admins: []string{tAdm}, V: 6, SV: 2}
+	b.onGroupCtl(tAdm, wire{T: "gi", G: gid, GN: "G", GM: ms2, GO: tAdm, GV: 6, GSV: 3})
+	if g := b.store.Groups[gid]; g.Owner != tHost {
+		t.Fatalf("admin took a live host's group: %+v", g)
+	}
+}
