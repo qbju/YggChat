@@ -43,6 +43,13 @@ public class MainActivity extends Activity {
         }}).start();
     }
 
+    private volatile long verifiedAt = -100000;
+    static WebResourceResponse blocked(int code) {
+        java.util.Map<String, String> hd = new java.util.HashMap<String, String>();
+        hd.put("Cache-Control", "no-store");
+        return new WebResourceResponse("text/plain", "utf-8", code, code == 403 ? "Forbidden" : "Unavailable", hd, new java.io.ByteArrayInputStream(new byte[0]));
+    }
+
     static boolean isHome(String u) { return u != null && u.startsWith(HOME); }
 
     // An invite/add link this activity was opened with (yggchat://…, web+yggchat://…,
@@ -161,6 +168,22 @@ public class MainActivity extends Activity {
                 if (isHome(url)) return false;
                 openOutside(Uri.parse(url));
                 return true;
+            }
+            // Every request the WebView makes to 127.0.0.1 carries the key
+            // cookie (cookies ignore ports). Only our node's port is allowed,
+            // and only after it has recently proved it is ours: during a node
+            // restart another app could grab 7780 and collect the cookie.
+            @Override public WebResourceResponse shouldInterceptRequest(WebView v, WebResourceRequest r) {
+                Uri u = r.getUrl();
+                String h = u.getHost();
+                if (h == null) return null;
+                h = h.toLowerCase(java.util.Locale.ROOT);
+                if (!h.equals("127.0.0.1") && !h.equals("localhost") && !h.equals("[::1]") && !h.equals("::1") && !h.startsWith("127.")) return null;
+                if (!"http".equals(u.getScheme()) || !h.equals("127.0.0.1") || u.getPort() != 7780) return blocked(403);
+                long now = android.os.SystemClock.elapsedRealtime();
+                if (now - verifiedAt < 300) return null;
+                if (YggService.nodeOK(YggService.uiKey(MainActivity.this))) { verifiedAt = now; return null; }
+                return blocked(503);
             }
             @Override public void onPageStarted(WebView v, String url, android.graphics.Bitmap f) {
                 onHome = isHome(url);
