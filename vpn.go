@@ -43,6 +43,8 @@ type vpnState struct {
 	lastErr       string
 	drop          int64 // inbound packets blocked by the firewall
 	fw            *vpnFW
+	chatMu        sync.Mutex
+	chat          map[chatKey]chatSeen // chat datagrams just written to the TUN (vpnchat.go)
 }
 
 func (a *App) startVPN() {
@@ -137,6 +139,7 @@ func (v *vpnState) fromCore() {
 			if v.fw != nil && v.fw.site != nil && v.fw.site() {
 				portMap(buf[:n], 24, 42, sitePort, siteAltPort) // profile site -> OS port 8080
 			}
+			v.noteChat(buf[:n])
 			_, _ = f.Write(buf[:n])
 			v.mu.Lock()
 			v.out++

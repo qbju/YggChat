@@ -385,7 +385,7 @@ func (a *App) serveChat() {
 	var pc net.PacketConn
 	var err error
 	if a.sys || a.vpn {
-		pc, err = net.ListenUDP("udp6", &net.UDPAddr{Port: chatPort})
+		pc, err = a.listenOSChat() // only datagrams that came from Yggdrasil (vpnchat.go)
 	} else {
 		pc, err = a.ns.ListenUDP(&net.UDPAddr{IP: net.ParseIP(a.addr), Port: chatPort})
 	}
