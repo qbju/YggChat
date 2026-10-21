@@ -954,6 +954,10 @@ select { font:inherit; font-size:16px; color:var(--fg); background:var(--surface
 .img-bubble { padding:4px !important; max-width:72%; }
 .msg-img { display:block; max-width:100%; max-height:320px; border-radius:12px; cursor:zoom-in; -webkit-touch-callout:default; }
 .img-cap { padding:6px 8px 4px; white-space:pre-wrap; word-break:break-word; }
+/* Remote names/text can't flip the text around them; RTL messages align by their own direction. */
+.bubble, .img-cap { unicode-bidi:plaintext; text-align:start; }
+.contact-row .name, .contact-row .last, .sys-line, .row-title, .row-sub, #chat-name, #chat-addr, #ci-nick, #ci-bio, #ci-dom, #gi-name { unicode-bidi:isolate; }
+.avatar { white-space:nowrap; line-height:1; text-overflow:clip; }
 #attach-btn { flex:0 0 auto; font-size:20px; }
 .img-viewer { position:fixed; inset:0; z-index:90; background:rgba(0,0,0,.92); display:none; align-items:center; justify-content:center; flex-direction:column; padding:calc(12px + env(safe-area-inset-top)) 12px calc(12px + env(safe-area-inset-bottom)); }
 .img-viewer.active { display:flex; }
@@ -1558,7 +1562,8 @@ async function resyncState(){
     const keepMsgs = {};
     for(const m of state.messages || []) if(m && m.id) keepMsgs[m.peer + '/' + m.id] = m;
     state = Object.assign(state, s);
-    state.messages = (s.messages || []).map(m => Object.assign(keepMsgs[m.peer + '/' + m.id] || {}, m));
+    for(const m of s.messages || []) if(m && m.id && !keepMsgs[m.peer + '/' + m.id]) noteArrival(m); // arrived while the stream was down
+    state.messages = (s.messages || []).map(m => normMsg(Object.assign(keepMsgs[m.peer + '/' + m.id] || {}, m)));
     state.contacts = s.contacts || {};
     state.joins = s.joins || [];
     setOffline(false);
@@ -1595,8 +1600,21 @@ function safeText(s){
 
 // Safe for both text and attribute values (quotes included).
 function escapeHtml(s){
-  return String(s == null ? '' : s).replace(/[&<>"'`]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;','`':'&#96;'}[c]));
+  return String(s == null ? '' : s).replace(BIDI_RE, '').replace(/[&<>"'`]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;','`':'&#96;'}[c]));
 }
+// Enter that only confirms an IME conversion (Japanese/Chinese input) must not
+// send or submit. Chrome/Firefox flag it with isComposing; Safari ends the
+// composition first and then sends keydown Enter with keyCode 229.
+let imeOn = false, imeEndAt = 0;
+document.addEventListener('compositionstart', () => { imeOn = true; }, true);
+document.addEventListener('compositionend', () => { imeOn = false; imeEndAt = Date.now(); }, true);
+function imeEnter(e){ return !!(e.isComposing || e.keyCode === 229 || imeOn || Date.now() - imeEndAt < 50); }
+// Remote text: drop bidi override/isolate controls so a name or message can't
+// reverse the UI text around it (they are also isolated with CSS).
+const BIDI_RE = /[\u202a-\u202e\u2066-\u2069]/g;
+// A sender's timestamp for display/sorting: always a number.
+function tsOf(m){ const t = +(m && m.ts); return isFinite(t) && t > 0 ? t : 0; }
+function normMsg(m){ if(m && typeof m.ts !== 'number') m.ts = tsOf(m); return m; }
 const YGG_RE = /^(?:0?2|0?3)[0-9a-f]{0,2}(?::[0-9a-f]{0,4}){2,7}$/i;
 function cleanNick(n){
   return String(n || '').replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069]/g, '').trim().slice(0, 32);
@@ -1714,10 +1732,30 @@ function getLastRead(addr){
   return readMap[addr] || 0;
 }
 
+// Unread = newer than the last read time, plus messages that arrived later
+// with an older (or future) timestamp than that: queued/Nostr deliveries,
+// history, a sender with a wrong clock. Timestamps come from the sender, so a
+// far-future one used to mark every later message of that chat as read.
+let unseen = {};
+try{ unseen = JSON.parse(localStorage.getItem('yggchat_unseen') || '{}') || {}; }catch(e){ unseen = {}; }
+const nowS = () => Date.now() / 1000;
+const tsUnread = (m, lr) => { const t = tsOf(m); return t > lr && t <= nowS() + 300; };
+function saveUnseen(){ try{ localStorage.setItem('yggchat_unseen', JSON.stringify(unseen)); }catch(e){} }
+// A message that just arrived and wouldn't count by its timestamp.
+function noteArrival(m){
+  if(!m || m.out || !m.peer || !m.id) return;
+  if(m.peer === curAddr && !document.hidden && document.body.classList.contains('chat-open')) return;
+  if(tsUnread(m, getLastRead(m.peer))) return;
+  const l = unseen[m.peer] = (unseen[m.peer] || []);
+  if(l.includes(m.id)) return;
+  l.push(m.id); if(l.length > 300) l.splice(0, l.length - 300);
+  saveUnseen();
+}
 function markRead(addr){
+  if(unseen[addr]){ delete unseen[addr]; saveUnseen(); }
   const msgs = state.messages.filter(m => m.peer === addr && !m.out);
   if(msgs.length === 0) return;
-  const last = Math.max(...msgs.map(m => m.ts || 0));
+  const last = Math.max(...msgs.map(m => Math.min(tsOf(m), Math.floor(nowS()))));
   if(last > getLastRead(addr)){
     readMap[addr] = last;
     saveReadMap();
@@ -1732,8 +1770,8 @@ function joinTs(addr){
   return 0;
 }
 function unreadCount(addr){
-  const lr = getLastRead(addr), jt = joinTs(addr);
-  return state.messages.filter(m => m.peer === addr && !m.out && (m.ts || 0) > lr && !(m.hist && jt && (m.ts || 0) <= jt)).length;
+  const lr = getLastRead(addr), jt = joinTs(addr), us = new Set(unseen[addr] || []);
+  return state.messages.filter(m => m.peer === addr && !m.out && (tsUnread(m, lr) || us.has(m.id)) && !(m.hist && jt && tsOf(m) <= jt)).length;
 }
 
 function sortContacts(){
@@ -2278,7 +2316,28 @@ $('scan-btn').addEventListener('click', async () => {
 $('add-contact-from-empty').addEventListener('click', () => openNewChat());
 
 // ---------- share sheet / first run ----------
-function qrSvg(text){ try{ const q = qrcode(0, 'M'); q.addData(text); q.make(); return q.createSvgTag({cellSize:4, margin:2, scalable:true}); }catch(e){ return ''; } }
+// QR code drawn into el: an SVG with a fixed size of its own (px). The old
+// viewBox-only SVG had no intrinsic size and came out 0 px tall in an Android
+// WebView (blank 「IDを共有」 QR in settings); if it still gets no height, a
+// GIF <img> (no SVG layout at all) is used instead.
+function qrInto(el, text, px){
+  el.innerHTML = '';
+  if(!text) return;
+  px = px || 180;
+  let q;
+  try{ q = qrcode(0, 'M'); q.addData(text); q.make(); }catch(e){ return; }
+  el.innerHTML = q.createSvgTag({cellSize:4, margin:2, scalable:true}).replace('<svg ', '<svg width="' + px + '" height="' + px + '" role="img" aria-label="QRコード" ');
+  const svg = el.querySelector('svg');
+  if(svg) svg.style.cssText = 'display:block; max-width:100%; margin:0 auto;';
+  requestAnimationFrame(() => {
+    const s = el.querySelector('svg');
+    if(!s || !el.getClientRects().length || s.getBoundingClientRect().height >= 20) return;
+    const img = new Image(); img.alt = 'QRコード';
+    img.src = q.createDataURL(Math.max(2, Math.floor(px / (q.getModuleCount() + 4))), 2 * Math.max(2, Math.floor(px / (q.getModuleCount() + 4))));
+    img.style.cssText = 'display:block; width:' + px + 'px; max-width:100%; height:auto; margin:0 auto; image-rendering:pixelated;';
+    el.innerHTML = ''; el.appendChild(img);
+  });
+}
 function openShareSheet(firstRun){
   $('ob-name').style.display = firstRun ? '' : 'none';
   $('ob-share').style.display = firstRun ? 'none' : '';
@@ -2287,7 +2346,7 @@ function openShareSheet(firstRun){
   $('share-sheet').classList.add('active');
 }
 function fillShare(){
-  $('ss-qr').innerHTML = state.addr ? qrSvg(makeInviteLink(state.addr, state.nick)) : '';
+  qrInto($('ss-qr'), state.addr ? makeInviteLink(state.addr, state.nick) : '');
   $('ss-addr').textContent = state.addr || '';
 }
 function closeShareSheet(){
@@ -2303,7 +2362,7 @@ async function obNext(){
   $('ob-name').style.display = 'none'; $('ob-share').style.display = ''; fillShare();
 }
 $('ob-next').addEventListener('click', () => obNext());
-$('ob-nick').addEventListener('keydown', e => { if(e.key === 'Enter'){ e.preventDefault(); obNext(); } });
+$('ob-nick').addEventListener('keydown', e => { if(e.key === 'Enter' && !imeEnter(e)){ e.preventDefault(); obNext(); } });
 $('ob-skip').addEventListener('click', () => { try{ localStorage.setItem('yggchat_onboarded', '1'); }catch(e){} $('ob-name').style.display = 'none'; $('ob-share').style.display = ''; fillShare(); });
 $('ss-copy').addEventListener('click', () => copyText(makeInviteLink(state.addr, state.nick)));
 $('ss-share').addEventListener('click', shareSelf);
@@ -2359,17 +2418,7 @@ function openContactInfo(){
   $('ci-avatar').style.color = '#111';
   $('ci-nick').textContent = c.nick || addrShort(curAddr);
   $('ci-addr').textContent = curAddr;
-  const qr = $('ci-qr-wrap');
-  qr.innerHTML = '';
-  try{
-    const q = qrcode(0, 'M');
-    const link = makeInviteLink(curAddr, c.nick);
-    q.addData(link);
-    q.make();
-    qr.innerHTML = q.createSvgTag({cellSize:4, margin:2, scalable:true});
-  }catch(e){
-    qr.innerHTML = '';
-  }
+  qrInto($('ci-qr-wrap'), makeInviteLink(curAddr, c.nick));
   $('contact-info-screen').classList.add('active');
 }
 
@@ -2397,7 +2446,7 @@ function uiDialog(title, {input=null, okText='OK', danger=false, placeholder=''}
     cancel.onclick = () => done(inp ? null : false);
     ok.onclick = () => done(inp ? inp.value : true);
     bg.onclick = e => { if(e.target === bg) done(inp ? null : false); };
-    if(inp){ inp.onkeydown = e => { if(e.key === 'Enter') done(inp.value); }; setTimeout(() => inp.focus(), 50); }
+    if(inp){ inp.onkeydown = e => { if(e.key === 'Enter' && !imeEnter(e)) done(inp.value); }; setTimeout(() => inp.focus(), 50); }
   });
 }
 const uiConfirm = (t, danger) => uiDialog(t, {okText: danger ? '削除' : 'OK', danger});
@@ -2478,18 +2527,7 @@ function makeInviteLink(addr, nick){
 }
 
 function renderShareQR(){
-  const qr = $('share-qr-wrap');
-  qr.innerHTML = '';
-  if(!state.addr) return;
-  try{
-    const q = qrcode(0, 'M');
-    const link = makeInviteLink(state.addr, state.nick);
-    q.addData(link);
-    q.make();
-    qr.innerHTML = q.createSvgTag({cellSize:4, margin:2, scalable:true});
-  }catch(e){
-    qr.innerHTML = '';
-  }
+  qrInto($('share-qr-wrap'), state.addr ? makeInviteLink(state.addr, state.nick) : '');
 }
 
 $('settings-nick').addEventListener('change', saveSettingsNick);
@@ -2498,7 +2536,7 @@ $('settings-bio').addEventListener('change', saveSettingsNick);
 // the field still focused, so also save on Enter and when leaving settings.
 let domainBusy = '';
 $('settings-domain').addEventListener('change', saveDomain);
-$('settings-domain').addEventListener('keydown', e => { if(e.key === 'Enter'){ e.preventDefault(); $('settings-domain').blur(); saveDomain(); } });
+$('settings-domain').addEventListener('keydown', e => { if(e.key === 'Enter' && !imeEnter(e)){ e.preventDefault(); $('settings-domain').blur(); saveDomain(); } });
 async function saveDomain(){
   const d = $('settings-domain').value.trim().toLowerCase().replace(/\.$/, '');
   if(d === (state.domain || '') || d === domainBusy) return;
@@ -2519,7 +2557,7 @@ $('settings-prof-save').addEventListener('click', () => {
   saveSettingsNick(); saveDomain();
 });
 $('settings-nick').addEventListener('keydown', (e) => {
-  if(e.key === 'Enter'){
+  if(e.key === 'Enter' && !imeEnter(e)){
     $('settings-nick').blur();
   }
 });
@@ -2553,7 +2591,7 @@ $('mv-recv-btn').addEventListener('click', async () => {
   try{
     const r = await api('/api/move/recv', {});
     $('mv-code').textContent = r.code;
-    try{ const q = qrcode(0, 'M'); q.addData(r.code); q.make(); $('mv-qr').innerHTML = q.createSvgTag({cellSize:4, margin:2, scalable:true}); }catch(e){ $('mv-qr').innerHTML = ''; }
+    qrInto($('mv-qr'), r.code);
     $('mv-box').style.display = 'flex';
     mvSet('古い端末の「この端末から送る」にこのコードを入れてね。受け取るまでこの画面を開いたままに。');
   }catch(e){ toast(e.message); }
@@ -2843,7 +2881,7 @@ $('msg-text').addEventListener('input', () => {
 
 $('msg-text').addEventListener('keydown', (e) => {
   const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
-  if(e.key === 'Enter'){
+  if(e.key === 'Enter' && !imeEnter(e)){
     if(isMobile){
       return;
     }
@@ -2870,20 +2908,28 @@ function putSent(m){
   state.messages[idx] = Object.assign(old, m, {status: st});
 }
 
+// One send at a time: Enter pressed again while /api/send was still running
+// sent the same text again. The box is cleared at once (text typed meanwhile
+// is kept) and refilled if the send fails.
+let sendBusy = false;
 async function sendMsg(){
   const ta = $('msg-text');
   const text = ta.value.trim();
-  if(!curAddr || text === '') return;
+  if(!curAddr || text === '' || sendBusy) return;
+  sendBusy = true;
+  const to = curAddr;
+  ta.value = '';
+  ta.style.height = 'auto';
   $('send-btn').disabled = true;
   try{
-    putSent(await api('/api/send', {To: curAddr, Text: text}));
-    ta.value = '';
-    ta.style.height = 'auto';
+    putSent(await api('/api/send', {To: to, Text: text}));
     renderMessages();
     renderList();
   }catch(e){
     toast(e.message);
+    if(curAddr === to && ta.value.trim() === ''){ ta.value = text; ta.dispatchEvent(new Event('input')); }
   }finally{
+    sendBusy = false;
     $('send-btn').disabled = (ta.value.trim() === '');
     ta.focus();
   }
@@ -3088,7 +3134,7 @@ function connectEvents(){
     try{
       const d = JSON.parse(ev.data);
       if(d.type === 'message'){
-        const msg = d.data;
+        const msg = normMsg(d.data);
         if(msg && msg.id){
           const ex = state.messages.findIndex(x => x.id === msg.id);
           if(ex >= 0){
@@ -3097,6 +3143,7 @@ function connectEvents(){
             if(lateStatus[msg.id]){ msg.status = lateStatus[msg.id]; delete lateStatus[msg.id]; }
             state.messages.push(msg);
             if(msg.peer && !msg.out){
+              noteArrival(msg);
               notifyIncoming(msg);
             }
           }
@@ -3177,6 +3224,7 @@ function connectEvents(){
           pendingJoin = null;
           uiPrompt(d.data.text + '\nパスワードを入力', '').then(v => { if(v) joinByCode(pendingCode, v); });
         }else if(d.data && d.data.k === 'wait'){ pendingJoin = null; toast('承認待ちです。チャット一覧に表示しています'); }
+        else if(d.data && d.data.k === 'store'){ uiAlert(String(d.data.text || '')); }
         else if(d.data && d.data.text){ pendingJoin = null; toast(d.data.text); }
       }else if(d.type === 'move'){
         onMoveEvent(d.data || {});
@@ -3221,7 +3269,7 @@ async function init(){
   }
   setOffline(false);
   esRetry = 1000;
-  state.messages = state.messages || [];
+  state.messages = (state.messages || []).map(normMsg);
   state.contacts = state.contacts || {};
   if(state.locked){ showLock(); }
   updateConn();
@@ -3240,7 +3288,8 @@ async function init(){
     navigator.serviceWorker.addEventListener('controllerchange', () => {
       if(!hadCtl || sessionStorage.getItem('yc_swreload')) return;
       sessionStorage.setItem('yc_swreload', '1');
-      location.reload();
+      // the PWA node writes what is pending first (a reload cut that write off)
+      Promise.race([Promise.resolve(window.yggSaveNow && window.yggSaveNow()).catch(() => {}), new Promise(r => setTimeout(r, 3000))]).then(() => location.reload());
     });
     setTimeout(() => sessionStorage.removeItem('yc_swreload'), 30000);
     navigator.serviceWorker.register('sw.js', {updateViaCache: 'none'}).then(r => r.update()).catch(()=>{});
@@ -3270,7 +3319,7 @@ async function doUnlock(){
     await api('/api/unlock', {Pass: p});
     $('lock-screen').classList.remove('active');
     state = await api('/api/state');
-    state.messages = state.messages || []; state.contacts = state.contacts || {};
+    state.messages = (state.messages || []).map(normMsg); state.contacts = state.contacts || {}; state.joins = state.joins || [];
     updateConn(); renderList();
   }catch(e){
     $('lock-err').textContent = e.message || 'パスコードが違います';
@@ -3279,7 +3328,7 @@ async function doUnlock(){
   }
 }
 $('lock-unlock').addEventListener('click', doUnlock);
-$('lock-pass').addEventListener('keydown', e => { if(e.key === 'Enter') doUnlock(); });
+$('lock-pass').addEventListener('keydown', e => { if(e.key === 'Enter' && !imeEnter(e)) doUnlock(); });
 
 function setSwitch(id, on){ const e = $(id); if(e) e.classList.toggle('active', !!on); }
 function renderPrivacy(){
@@ -3833,8 +3882,7 @@ async function openGroupLink(reset){
     const r = await api('/api/group/invite', {ID: curAddr.slice(2), Reset: !!reset});
     glLink = r.link;
     $('gl-text').textContent = glLink;
-    const q = qrcode(0, 'M'); q.addData(glLink); q.make();
-    $('gl-qr').innerHTML = q.createSvgTag({cellSize:4, margin:2, scalable:true});
+    qrInto($('gl-qr'), glLink, 200);
     $('group-link-screen').classList.add('active');
     if(reset) toast('新しいリンクにしました（前のリンクは使えません）');
   }catch(e){ toast(e.message); }
@@ -3947,7 +3995,7 @@ $('img-input').addEventListener('change', async () => {
   try{
     const m = await api('/api/send', {To: curAddr, Text: cap, Img: url});
     putSent(m);
-    $('msg-text').value = ''; $('msg-text').style.height = 'auto'; $('send-btn').disabled = true;
+    if($('msg-text').value.trim() === cap){ $('msg-text').value = ''; $('msg-text').style.height = 'auto'; $('send-btn').disabled = true; }
     renderMessages(); renderList();
   }catch(e){ toast(e.message); }
 });
