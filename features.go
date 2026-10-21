@@ -359,6 +359,7 @@ func (a *App) handleCtl(from string, w wire) bool {
 			a.store.mu.Unlock()
 			return true
 		}
+		old := c
 		if n := cleanNick(w.Nick); n != "" && !c.Renamed {
 			c.Nick = n
 		}
@@ -370,11 +371,20 @@ func (a *App) handleCtl(from string, w wire) bool {
 		if dom != c.Dom {
 			c.Dom, c.DomOK, c.DomAt = dom, false, 0
 		}
+		if c == old {
+			// The same profile again (it is sent 3 times, and re-shared):
+			// no rewrite of the whole store per datagram.
+			a.store.mu.Unlock()
+			if recheck && domCheckOK(from) {
+				go a.verifyDomain(from, dom)
+			}
+			return true
+		}
 		a.store.Contacts[from] = c
 		a.store.save()
 		a.store.mu.Unlock()
 		a.broadcast("contact", c)
-		if recheck {
+		if recheck && domCheckOK(from) {
 			go a.verifyDomain(from, dom)
 		}
 		return true
@@ -388,6 +398,27 @@ func (a *App) handleCtl(from string, w wire) bool {
 		return true
 	}
 	return false
+}
+
+var (
+	domCheckMu sync.Mutex
+	domCheckAt = map[string]time.Time{}
+)
+
+// domCheckOK limits domain look-ups to one per peer per 30 s: a peer that
+// sends a new domain in every datagram would otherwise make us fire DNS
+// queries as fast as it can send.
+func domCheckOK(peer string) bool {
+	domCheckMu.Lock()
+	defer domCheckMu.Unlock()
+	if t, ok := domCheckAt[peer]; ok && time.Since(t) < 30*time.Second {
+		return false
+	}
+	if len(domCheckAt) > 4096 {
+		domCheckAt = map[string]time.Time{}
+	}
+	domCheckAt[peer] = time.Now()
+	return true
 }
 
 func cleanText(s string, max int) string {

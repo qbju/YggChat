@@ -341,7 +341,11 @@ func (a *App) addMessage(m Message) {
 			}
 		}
 	}
-	a.store.Messages = append(a.store.Messages, m)
+	if !m.Out && m.Sys == "" && !isGroupKey(m.Peer) {
+		a.store.insertByTimeLocked(m)
+	} else {
+		a.store.Messages = append(a.store.Messages, m)
+	}
 	if isGroupKey(m.Peer) {
 		// group conversations have no contact entry
 	} else if _, ok := a.store.Contacts[m.Peer]; !ok {
@@ -359,6 +363,20 @@ func (a *App) addMessage(m Message) {
 	a.store.save()
 	a.store.mu.Unlock()
 	a.broadcast("message", m)
+}
+
+// insertByTimeLocked stores an incoming 1:1 message in time order: queued
+// and Nostr-parked messages arrive late and out of order, and the history
+// (CLI, exports, anything reading the store in order) should still read
+// oldest first. Caller holds s.mu.
+func (s *Store) insertByTimeLocked(m Message) {
+	i := len(s.Messages)
+	for steps := 0; i > 0 && steps < 2000 && s.Messages[i-1].TS > m.TS; steps++ {
+		i--
+	}
+	s.Messages = append(s.Messages, Message{})
+	copy(s.Messages[i+1:], s.Messages[i:])
+	s.Messages[i] = m
 }
 
 // Wire format (shared with the browser/WASM node): one JSON datagram per UDP
@@ -560,6 +578,11 @@ func (a *App) acceptMsg(from string, w wire, img string) bool {
 	key := from + "/" + w.ID
 	a.seenMu.Lock()
 	dup = dup || a.seen[key]
+	if len(a.seen) >= 50000 {
+		// Only guards against races with the store check above (and keeps
+		// memory bounded); deleted messages are covered by Store.Gone.
+		a.seen = map[string]bool{}
+	}
 	a.seen[key] = true
 	a.seenMu.Unlock()
 	if dup {
@@ -568,9 +591,9 @@ func (a *App) acceptMsg(from string, w wire, img string) bool {
 	if w.TTL < 0 || w.TTL > 4*7*86400 {
 		w.TTL = 0
 	}
-	if !a.powCheck(from, w) {
+	if !a.powCheck(from, w) || ((!known || c.Req) && !strangerOK(from)) {
 		a.seenMu.Lock()
-		delete(a.seen, key) // let the recomputed one in
+		delete(a.seen, key) // let the recomputed (or later retried) one in
 		a.seenMu.Unlock()
 		return false
 	}
@@ -589,7 +612,11 @@ func (a *App) acceptMsg(from string, w wire, img string) bool {
 			a.store.mu.Unlock()
 		}
 	}
-	m := Message{ID: w.ID, Peer: from, From: from, Nick: cleanNick(w.Nick), Text: w.Text, TS: w.TS, TTL: w.TTL, Img: img}
+	ts := w.TS
+	if now := time.Now().Unix(); ts <= 0 || ts > now+600 {
+		ts = now // a wrong (or hostile) clock must not pin it far in the past/future
+	}
+	m := Message{ID: w.ID, Peer: from, From: from, Nick: cleanNick(w.Nick), Text: w.Text, TS: ts, TTL: w.TTL, Img: img}
 	if w.TTL > 0 {
 		m.Exp = time.Now().Unix() + int64(w.TTL)
 	}
@@ -599,6 +626,48 @@ func (a *App) acceptMsg(from string, w wire, img string) bool {
 	}
 	a.store.mu.Unlock()
 	a.addMessage(m)
+	return true
+}
+
+// Message requests (from strangers or not yet accepted contacts) are
+// limited: each one is stored and rewrites the whole history file, so a
+// flood of cheap requests would otherwise keep the disk busy. Over the limit
+// we stay silent and the sender retries later (nothing is lost).
+var (
+	reqMu     sync.Mutex
+	reqPeer   = map[string][]int64{}
+	reqAll    []int64
+	reqPerMin = 20
+	reqAllMin = 120
+)
+
+func strangerOK(from string) bool {
+	now := time.Now().UnixMilli()
+	cut := now - 60000
+	trim := func(ts []int64) []int64 {
+		i := 0
+		for i < len(ts) && ts[i] <= cut {
+			i++
+		}
+		return ts[i:]
+	}
+	reqMu.Lock()
+	defer reqMu.Unlock()
+	reqAll = trim(reqAll)
+	p := trim(reqPeer[from])
+	if len(p) >= reqPerMin || len(reqAll) >= reqAllMin {
+		reqPeer[from] = p
+		return false
+	}
+	if len(reqPeer) > 4096 {
+		for k, v := range reqPeer {
+			if len(trim(v)) == 0 {
+				delete(reqPeer, k)
+			}
+		}
+	}
+	reqPeer[from] = append(p, now)
+	reqAll = append(reqAll, now)
 	return true
 }
 

@@ -70,14 +70,25 @@ func parseImg(u string) (string, []byte, error) {
 	if len(raw) > imgMaxSize {
 		return "", nil, errors.New("image too large (max 600KB after compression)")
 	}
+	if err := imgDimsOK(mime, raw); err != nil {
+		return "", nil, err
+	}
 	return mime, raw, nil
 }
+
+const (
+	maxInFiles     = 32 // partial incoming files kept at once (≤ 600 KB each)
+	maxInFilesPeer = 4  // of which one peer may hold
+	maxInFilesReq  = 12 // and all strangers (not accepted contacts) together
+)
 
 type inFile struct {
 	hdr    wire
 	chunks [][]byte
 	got    int
 	at     time.Time
+	// from someone we haven't accepted (their slots are capped together)
+	stranger bool
 }
 
 type fileState struct {
@@ -212,6 +223,10 @@ func (a *App) onFileHeader(from string, w wire) {
 	if w.Mime == textMime && (w.Size > maxRecvText || w.Text != "") {
 		return
 	}
+	a.store.mu.Lock()
+	c, ok := a.store.Contacts[from]
+	stranger := !ok || c.Req
+	a.store.mu.Unlock()
 	fs := a.files()
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
@@ -221,10 +236,25 @@ func (a *App) onFileHeader(from string, w wire) {
 		}
 	}
 	key := from + "/" + w.ID
-	if _, ok := fs.in[key]; ok || len(fs.in) >= 16 {
+	if _, ok := fs.in[key]; ok || len(fs.in) >= maxInFiles {
 		return
 	}
-	fs.in[key] = &inFile{hdr: w, chunks: make([][]byte, w.N), at: time.Now()}
+	// One peer may only hold a few slots, so a stranger can't keep every
+	// slot busy (refreshing them with a chunk now and then) and block photos
+	// and long texts from everyone else.
+	n, ns := 0, 0
+	for k, f := range fs.in {
+		if strings.HasPrefix(k, from+"/") {
+			n++
+		}
+		if f.stranger {
+			ns++
+		}
+	}
+	if n >= maxInFilesPeer || (stranger && ns >= maxInFilesReq) {
+		return
+	}
+	fs.in[key] = &inFile{hdr: w, chunks: make([][]byte, w.N), at: time.Now(), stranger: stranger}
 }
 
 func (a *App) onFileChunk(from string, w wire) {
@@ -272,6 +302,11 @@ func (a *App) onFileChunk(from string, w wire) {
 			return
 		}
 		h.Text, img = string(raw), ""
+	} else if imgDimsOK(h.Mime, raw) != nil {
+		// A decompression bomb would crash the UI: drop it, but ack so the
+		// sender stops resending it.
+		a.sendWire(from, wire{T: "ack", ID: w.ID})
+		return
 	}
 	if h.G != "" {
 		if a.onGroupMsg(from, h, img) {
