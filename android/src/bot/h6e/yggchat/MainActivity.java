@@ -26,13 +26,21 @@ public class MainActivity extends Activity {
 
     // Opens the UI through the launch URL, which gives the WebView the API key
     // as an HttpOnly cookie. Waits for the node to create the key on first run.
+    // The launch URL is only opened once the node on 127.0.0.1:7780 has proved
+    // it is ours (YggService.nodeOK): another app squatting the port while the
+    // node is down must not receive the key.
     void loadHome(final WebView v, final int tries) {
-        String k = YggService.uiKey(this);
-        if (k.isEmpty() && tries < 50) {
-            new Handler().postDelayed(new Runnable(){ public void run(){ loadHome(v, tries + 1); }}, 200);
-            return;
-        }
-        v.loadUrl(HOME + "?k=" + k);
+        new Thread(new Runnable() { public void run() {
+            final String k = YggService.uiKey(MainActivity.this);
+            final boolean ok = YggService.nodeOK(k);
+            runOnUiThread(new Runnable() { public void run() {
+                if (ok) { v.loadUrl(HOME + "?k=" + k); return; }
+                // No key file at all after ~10 s: show the node's own page
+                // (without a key) so the user isn't left with a blank screen.
+                if (k.isEmpty() && tries == 50) { v.loadUrl(HOME); }
+                new Handler().postDelayed(new Runnable(){ public void run(){ loadHome(v, tries + 1); }}, tries < 50 ? 200 : 1000);
+            }});
+        }}).start();
     }
 
     static boolean isHome(String u) { return u != null && u.startsWith(HOME); }

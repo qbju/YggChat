@@ -12,7 +12,9 @@ package main
 // data directory can read it.
 
 import (
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
 	"net"
@@ -64,9 +66,37 @@ const noKeyPage = `<!doctype html><meta charset="utf-8"><meta name="viewport" co
 <h1>YggChat</h1><p>この画面を開くには、起動時に表示された <code>?k=</code> 付きのURLを開いてください。</p>
 <p>To open the UI, use the URL with <code>?k=</code> that YggChat printed when it started.</p>`
 
+// uiProof answers GET /api/proof?n=<nonce> with HMAC-SHA256(key, nonce)
+// without needing the key. Another app (or local user) can bind the UI port
+// first when our node isn't running (first start, restarts); a client that
+// holds the key file (the Android service and WebView loader) checks the
+// proof before sending the key, so an impostor on the port can't collect it.
+func uiProof(nonce string) string {
+	m := hmac.New(sha256.New, []byte(uiKey))
+	m.Write([]byte("yggchat-ui-proof\n" + nonce))
+	return hex.EncodeToString(m.Sum(nil))
+}
+
+func validNonce(n string) bool {
+	if len(n) < 32 || len(n) > 128 {
+		return false
+	}
+	_, err := hex.DecodeString(n)
+	return err == nil
+}
+
 func keyGuard(addr string, h http.Handler) http.Handler {
 	name := keyCookieName(addr)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/proof" && r.Method == "GET" {
+			n := r.URL.Query().Get("n")
+			if uiKey == "" || !validNonce(n) {
+				http.Error(w, "bad nonce", 400)
+				return
+			}
+			w.Write([]byte(`{"mac":"` + uiProof(n) + `"}`))
+			return
+		}
 		if k := r.URL.Query().Get("k"); k != "" {
 			if !keyOK(k) {
 				http.Error(w, "bad key", 403)
