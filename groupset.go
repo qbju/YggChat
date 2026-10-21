@@ -533,10 +533,19 @@ func (a *App) syncGroup(gid string) {
 func (a *App) syncAllGroups() {
 	a.store.mu.Lock()
 	ids := []string{}
-	for id := range a.store.Groups {
+	var gone []Group
+	for id, g := range a.store.Groups {
 		ids = append(ids, id)
+		if g.Left && g.Quit && g.QuitAt > 0 && time.Now().Unix()-g.QuitAt < leaveRepeat {
+			gone = append(gone, g)
+		}
 	}
 	a.store.mu.Unlock()
+	// Groups we left lately: our gl again (it may all have been lost while
+	// we were cut off; a member that has it ignores it), v0.19.3.
+	for _, g := range gone {
+		a.repeatLeave(g)
+	}
 	for _, id := range ids {
 		a.syncGroup(id)
 		time.Sleep(200 * time.Millisecond)

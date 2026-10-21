@@ -310,10 +310,16 @@ var gps = &gpState{bufs: map[string]*partBuf{}, qAt: map[string]time.Time{}, rAt
 
 // leaveNotice re-sends gl to a peer that still treats us as a member of a
 // group we left (it missed our gl), at most every 5 minutes (v0.19.2).
-func (a *App) leaveNotice(peer, gid string) {
+func (a *App) leaveNotice(peer, gid string) { a.leaveNoticeAt(peer, gid, 0) }
+
+// leaveNoticeAt is leaveNotice with when we left. The gl goes twice a few
+// seconds apart and at most once a minute: the first packets after a peer
+// comes back often go nowhere while the route is looked up, and a lost one
+// left the member thinking we were still in for 5 minutes (chaos 6b, v0.19.3).
+func (a *App) leaveNoticeAt(peer, gid string, ts int64) {
 	gps.mu.Lock()
 	k := gid + "|" + peer
-	if time.Since(gps.lAt[k]) < 5*time.Minute {
+	if time.Since(gps.lAt[k]) < time.Minute {
 		gps.mu.Unlock()
 		return
 	}
@@ -322,7 +328,9 @@ func (a *App) leaveNotice(peer, gid string) {
 	}
 	gps.lAt[k] = time.Now()
 	gps.mu.Unlock()
-	a.sendWire(peer, wire{T: "gl", G: gid})
+	w := wire{T: "gl", G: gid, TS: ts}
+	a.sendWire(peer, w)
+	time.AfterFunc(3*time.Second, func() { a.sendWire(peer, w) })
 }
 
 // askInfo sends gq to peer, at most every 15 s per group.

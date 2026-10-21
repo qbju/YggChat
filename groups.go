@@ -60,6 +60,7 @@ type Group struct {
 	Ban     []string `json:"ban,omitempty"`  // host/admin, local: removed by a manager; their link joins are refused
 	Hand    bool     `json:"hand,omitempty"` // we left as host and handed the group to Owner (re-sent if they missed it)
 	Keys    map[string]string `json:"keys,omitempty"` // local: members whose last post was signed -> their key (groupssig.go)
+	QuitAt  int64    `json:"qat,omitempty"`  // when we left (our gl is repeated for a while, v0.19.3)
 }
 
 // GroupSet are the host's group settings (v0.18), sent in gi as "gs".
@@ -1322,6 +1323,9 @@ func (a *App) groupHandlers(mux *http.ServeMux) {
 			}
 			g.Members = ms
 			g.Admins = cleanAdmins(g.Admins, g)
+		}
+		if !was {
+			g.QuitAt = time.Now().Unix()
 		}
 		g.Left, g.Req, g.Quit = true, false, true
 		a.store.Groups[g.ID] = g

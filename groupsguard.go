@@ -40,6 +40,7 @@ const (
 	maxBan        = 256
 	goneSlack     = 120 // clock slack when dropping posts made after a removal
 	pendKeep      = 3 * 86400 // a full request list drops requests older than this
+	leaveRepeat   = 3 * 86400 // our gl is repeated on reconnects for this long
 )
 
 var lateState = struct {
@@ -331,6 +332,22 @@ func (a *App) handNotice(heir string, g Group) {
 	}()
 }
 
+// repeatLeave sends our gl for group g we left again to everyone (the heir
+// gets the hand-over first).
+func (a *App) repeatLeave(g Group) {
+	lw := wire{T: "gl", G: g.ID, TS: g.QuitAt}
+	for _, m := range g.Members {
+		if m == a.addr {
+			continue
+		}
+		if g.Hand && m == g.Owner {
+			a.handNotice(m, g)
+			continue
+		}
+		a.sendWire(m, lw)
+	}
+}
+
 // leftNotice answers a packet about a group we are out of: the heir gets our
 // hand-over again, anyone else our leave.
 func (a *App) leftNotice(peer string, g Group) {
@@ -341,7 +358,7 @@ func (a *App) leftNotice(peer string, g Group) {
 		a.handNotice(peer, g)
 		return
 	}
-	a.leaveNotice(peer, g.ID)
+	a.leaveNoticeAt(peer, g.ID, g.QuitAt)
 }
 
 // replaceRelayed swaps a relayed version of a post (history from someone

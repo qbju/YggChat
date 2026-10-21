@@ -599,3 +599,28 @@ func TestBanClearedWhenAddedBack(t *testing.T) {
 		t.Fatalf("re-add by admin: %+v", g)
 	}
 }
+
+// Chaos 6b rerun: a member that left while cut off sent all its gl rounds
+// into the void; a lost answer to a later copy then kept the others
+// thinking it was in for 5 minutes. The gl is repeated on reconnects for a
+// while, and each answer goes twice.
+func TestLeaveRepeatedAfterCut(t *testing.T) {
+	gid := "abab3333abab3333"
+	b, pc := tAppPC(t, tMem)
+	now := time.Now().Unix()
+	b.store.Groups[gid] = Group{ID: gid, Name: "G", Members: cleanMembers([]string{tHost, tX}, ""), Owner: tHost, Left: true, Quit: true, QuitAt: now - 100}
+	b.store.Groups["abab4444abab4444"] = Group{ID: "abab4444abab4444", Name: "old", Members: []string{tHost}, Owner: tHost, Left: true, Quit: true, QuitAt: now - leaveRepeat - 1}
+	b.syncAllGroups()
+	ws := pc.sent(tX, "gl")
+	if len(ws) != 1 || ws[0].G != gid || ws[0].TS != now-100 || len(pc.sent(tHost, "gl")) != 1 {
+		t.Fatalf("repeat: %+v / %+v", ws, pc.sent(tHost, "gl"))
+	}
+	pc.mu.Lock()
+	pc.pkts = nil
+	pc.mu.Unlock()
+	b.onGroupMsg(tX, wire{T: "msg", ID: "a1g1", G: gid, Text: "x", TS: now}, "")
+	time.Sleep(3300 * time.Millisecond)
+	if n := len(pc.sent(tX, "gl")); n != 2 {
+		t.Fatalf("answer gl sent %d times", n)
+	}
+}
