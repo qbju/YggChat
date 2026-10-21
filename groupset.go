@@ -185,7 +185,8 @@ func (a *App) admit(g Group, from, nick, how string) {
 	}
 	noteGone(&g, before, 0)
 	g.Pend = dropPend(g.Pend, from)
-	g.V++
+	unban(&g, from) // let in again (approved, or a direct add)
+	bumpV(&g)
 	a.store.Groups[g.ID] = g
 	a.store.save()
 	var hist []Message
@@ -198,7 +199,7 @@ func (a *App) admit(g Group, from, nick, how string) {
 		nick = a.nameOf(from)
 	}
 	a.groupSys(g, nick+" が"+how)
-	a.sendMembers(g, []string{from}, nil)
+	a.sendMembers(g, []string{from}, nil, false)
 	if len(hist) > 0 {
 		go a.sendHistory(from, g.ID, hist)
 	}
@@ -290,9 +291,26 @@ func (a *App) onHistory(from string, w wire, g Group, known bool) {
 		a.store.mu.Unlock()
 		return
 	}
-	if at := goneAt(g, by); !hasMember(g, by) && at != 0 && (at < 0 || w.TS <= 0 || w.TS > at) {
-		a.store.mu.Unlock() // posted after they left or were removed (v0.19.2)
+	// An ordinary member relays only when we asked it (ghq); the host and
+	// admins also send history to new members unasked (v0.19.3).
+	if !canManage(g, from) && !histAsked(g.ID, from) {
+		a.store.mu.Unlock()
 		return
+	}
+	if !hasMember(g, by) {
+		at := goneAt(g, by)
+		if at != 0 && (at < 0 || w.TS <= 0 || w.TS > at) {
+			a.store.mu.Unlock() // posted after they left or were removed (v0.19.2)
+			return
+		}
+		if at == 0 && !canManage(g, from) {
+			// Someone who was never a member as far as we know: only the
+			// host or an admin (history from before we joined) may relay
+			// such a post, an ordinary member can't make up posts by
+			// strangers (v0.19.3).
+			a.store.mu.Unlock()
+			return
+		}
 	}
 	key := gKey(g.ID)
 	for i := len(a.store.Messages) - 1; i >= 0; i-- {
@@ -312,8 +330,17 @@ func (a *App) onHistory(from string, w wire, g Group, known bool) {
 	if m.TS <= 0 || m.TS > time.Now().Unix()+300 {
 		m.TS = time.Now().Unix()
 	}
-	if w.TTL > 0 {
-		m.Exp = time.Now().Unix() + int64(w.TTL)
+	// The group's timer applies to relayed posts too, counted from when they were posted (v0.19.3).
+	exp, live := histExp(g, m.TS, w.TTL)
+	if !live {
+		return
+	}
+	m.Exp = exp
+	if exp > 0 {
+		m.TTL = int(exp - m.TS)
+		if m.TTL <= 0 {
+			m.TTL = int(exp - time.Now().Unix())
+		}
 	}
 	a.addMessage(m)
 }
@@ -393,8 +420,16 @@ func (a *App) onHistReq(from string, w wire, g Group, known bool) {
 		a.store.mu.Unlock()
 		if known && !g.Left && !hasMember(g, from) {
 			a.goneNotice(from, g) // a removed member catching up: tell it it is out
+		} else if known && g.Left {
+			a.leftNotice(from, g) // our heir catching up gets the hand-over (v0.19.3)
 		}
 		return
+	}
+	// Without history sharing: only what was said since they were added,
+	// whatever "since" they ask for (v0.19.3).
+	since := w.TS
+	if t := g.AddAt[from]; !g.Set.Hist && t > since {
+		since = t
 	}
 	hist := a.historyLocked(g.ID)
 	a.store.mu.Unlock()
@@ -413,7 +448,11 @@ func (a *App) onHistReq(from string, w wire, g Group, known bool) {
 	out := hist[:0:0]
 	for _, m := range hist {
 		// Without history sharing, only what was said since they were in the group.
-		if m.From == from || (!g.Set.Hist && m.TS < w.TS) {
+		if m.From == from || (!g.Set.Hist && m.TS < since) {
+			continue
+		}
+		// Never relay what a removed member posted after its removal.
+		if at := goneAt(g, m.From); m.From != a.addr && !hasMember(g, m.From) && at > 0 && m.TS > at+goneSlack {
 			continue
 		}
 		out = append(out, m)
@@ -453,6 +492,7 @@ func (a *App) syncGroup(gid string) {
 		add(g.Members[i])
 	}
 	for _, x := range ask {
+		noteHistAsk(gid, x) // their answer (ghs) is taken for a while
 		a.sendWire(x, wire{T: "ghq", G: gid, TS: since})
 	}
 }

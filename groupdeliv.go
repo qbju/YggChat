@@ -66,6 +66,7 @@ func noteGone(g *Group, before []string, at int64) {
 	if len(g.GoneAt) == 0 {
 		g.GoneAt = nil
 	}
+	noteAdded(g, before, 0) // and when the new ones came (history without sharing, v0.19.3)
 }
 
 // goneAt returns when addr dropped out of g (0 = not known as a former member).
