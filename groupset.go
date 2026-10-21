@@ -544,7 +544,7 @@ func (a *App) syncAllGroups() {
 	// Groups we left lately: our gl again (it may all have been lost while
 	// we were cut off; a member that has it ignores it), v0.19.3.
 	for _, g := range gone {
-		a.repeatLeave(g)
+		go a.repeatLeave(g)
 	}
 	for _, id := range ids {
 		a.syncGroup(id)

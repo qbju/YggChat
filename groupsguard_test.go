@@ -610,7 +610,15 @@ func TestLeaveRepeatedAfterCut(t *testing.T) {
 	now := time.Now().Unix()
 	b.store.Groups[gid] = Group{ID: gid, Name: "G", Members: cleanMembers([]string{tHost, tX}, ""), Owner: tHost, Left: true, Quit: true, QuitAt: now - 100}
 	b.store.Groups["abab4444abab4444"] = Group{ID: "abab4444abab4444", Name: "old", Members: []string{tHost}, Owner: tHost, Left: true, Quit: true, QuitAt: now - leaveRepeat - 1}
+	b.store.Messages = append(b.store.Messages,
+		Message{ID: "p1", Peer: gKey(gid), From: tMem, Out: true, Text: "pre", TS: now - 200, Status: "failed"},
+		Message{ID: "p1g1", Peer: tX, From: tMem, Out: true, Text: "pre", TS: now - 200, Status: "failed", Hid: true, Grp: gid, Of: "p1"})
 	b.syncAllGroups()
+	time.Sleep(200 * time.Millisecond)
+	if cp := waitSent(pc, tX, "msg"); len(cp) == 0 || cp[0].ID != "p1g1" {
+		t.Fatalf("pre-leave post not pushed again: %+v", cp)
+	}
+	time.Sleep(8500 * time.Millisecond)
 	ws := pc.sent(tX, "gl")
 	if len(ws) != 1 || ws[0].G != gid || ws[0].TS != now-100 || len(pc.sent(tHost, "gl")) != 1 {
 		t.Fatalf("repeat: %+v / %+v", ws, pc.sent(tHost, "gl"))

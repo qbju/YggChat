@@ -333,8 +333,24 @@ func (a *App) handNotice(heir string, g Group) {
 }
 
 // repeatLeave sends our gl for group g we left again to everyone (the heir
-// gets the hand-over first).
+// gets the hand-over first). Posts we made before leaving that never got
+// through (we were cut off while leaving) get another push first: members
+// on v0.19.2+ still take them by their time.
 func (a *App) repeatLeave(g Group) {
+	a.store.mu.Lock()
+	var cs []Message
+	for i := range a.store.Messages {
+		m := &a.store.Messages[i]
+		if m.Hid && m.Out && m.Grp == g.ID && m.Status != "sent" && m.TS > 0 && m.TS <= g.QuitAt {
+			m.Status = "queued" // (setStatus won't revive a failed copy of a group we are out of)
+			cs = append(cs, *m)
+		}
+	}
+	a.store.mu.Unlock()
+	if len(cs) > 0 {
+		a.flushBeforeLeave(g.ID, cs, 8*time.Second)
+		a.failLeftCopies(g.ID)
+	}
 	lw := wire{T: "gl", G: g.ID, TS: g.QuitAt}
 	for _, m := range g.Members {
 		if m == a.addr {
