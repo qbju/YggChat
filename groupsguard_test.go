@@ -587,3 +587,15 @@ func TestMergedVersionKeepsRemovalTime(t *testing.T) {
 		t.Fatal("member's gt purged posts")
 	}
 }
+
+// An admin adding a removed member back clears the host's bar too.
+func TestBanClearedWhenAddedBack(t *testing.T) {
+	gid := "abab2222abab2222"
+	h := tApp(t, tHost)
+	ms := cleanMembers([]string{tAdm, tX}, tHost)
+	h.store.Groups[gid] = Group{ID: gid, Name: "G", Members: ms, Owner: tHost, Admins: []string{tAdm}, V: 3, Ban: []string{tMem}, Gone: []string{tMem}}
+	h.onGroupCtl(tAdm, wire{T: "gi", G: gid, GN: "G", GM: append(append([]string{}, ms...), tMem), GO: tHost, GAD: []string{tAdm}, GV: 4})
+	if g := h.store.Groups[gid]; !hasMember(g, tMem) || banned(g, tMem) {
+		t.Fatalf("re-add by admin: %+v", g)
+	}
+}
