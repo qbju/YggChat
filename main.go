@@ -270,7 +270,11 @@ func localOnly(uiAddr string, h http.Handler) http.Handler {
 				http.Error(w, "content-type must be application/json", 415)
 				return
 			}
-			if r.Header.Get("Sec-Fetch-Site") == "cross-site" {
+			// Browsers say where a request comes from: only our own page
+			// ("same-origin") or a typed URL ("none") may use the API. A page
+			// on another localhost port is "same-site" and gets the
+			// SameSite cookie, so it is refused too (no Origin on <img> GETs).
+			if sfs := r.Header.Get("Sec-Fetch-Site"); sfs != "" && sfs != "same-origin" && sfs != "none" {
 				http.Error(w, "forbidden", 403)
 				return
 			}
