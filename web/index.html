@@ -958,6 +958,11 @@ select { font:inherit; font-size:16px; color:var(--fg); background:var(--surface
 .bubble, .img-cap { unicode-bidi:plaintext; text-align:start; }
 .contact-row .name, .contact-row .last, .sys-line, .row-title, .row-sub, #chat-name, #chat-addr, #ci-nick, #ci-bio, #ci-dom, #gi-name { unicode-bidi:isolate; }
 .avatar { white-space:nowrap; line-height:1; text-overflow:clip; }
+/* A long name ellipsizes; the member count / リクエスト / ⏱ badges after it stay visible. */
+.contact-row .name { display:flex; align-items:center; gap:4px; min-width:0; }
+.contact-row .name .nm { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; flex:0 1 auto; unicode-bidi:isolate; }
+.contact-row .name > :not(.nm) { flex-shrink:0; white-space:nowrap; }
+.contact-row .name .req-tag { margin-left:2px; }
 #attach-btn { flex:0 0 auto; font-size:20px; }
 .img-viewer { position:fixed; inset:0; z-index:90; background:rgba(0,0,0,.92); display:none; align-items:center; justify-content:center; flex-direction:column; padding:calc(12px + env(safe-area-inset-top)) 12px calc(12px + env(safe-area-inset-bottom)); }
 .img-viewer.active { display:flex; }
@@ -1034,10 +1039,10 @@ img.emoji { height:1.2em; width:1.2em; margin:0 .05em 0 .1em; vertical-align:-0.
     <div class="header">
       <button class="icon-btn" id="back-to-list" title="戻る">←</button>
       <div class="avatar small" id="chat-avatar"></div>
-      <div class="header" style="flex:1; border-bottom:none; padding:0; min-height:auto;">
+      <div class="header" style="flex:1; min-width:0; border-bottom:none; padding:0; min-height:auto;">
         <div style="flex:1; min-width:0;">
           <div id="chat-name" style="font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;"></div>
-          <div id="chat-ttl" class="ttl-badge" style="display:none;"></div>
+          <div id="chat-ttl" class="ttl-badge" style="display:none; max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;"></div>
           <div id="chat-addr" style="font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:11px; color:var(--dim); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;"></div>
         </div>
       </div>
@@ -1814,7 +1819,7 @@ function renderList(){
     const name = (g && g.nick && g.nick !== 'グループ') ? g.nick : ('グループ' + (j.hostnick ? '（' + j.hostnick + '）' : ''));
     html += '<div class="contact-row join-row" data-join="' + escapeHtml(j.addr) + '">'
       + '<div class="avatar small" style="background:' + hashColor(j.addr) + '; border:none; color:#111;">👥</div>'
-      + '<div class="info"><div class="name">' + escapeHtml(name) + '</div>'
+      + '<div class="info"><div class="name"><span class="nm">' + escapeHtml(name) + '</span></div>'
       + '<div class="last">' + (j.wait ? '参加申請中…（ホストの承認待ち）' : '参加申請中…') + '</div></div>'
       + '<button class="join-cancel" data-g="' + escapeHtml(j.addr) + '">取り消す</button>'
       + '</div>';
@@ -1843,7 +1848,7 @@ function renderList(){
     html += '<div class="contact-row" data-addr="' + escapeHtml(a) + '">'
       + '<div class="avatar small" style="background:' + avc + '; border:none; color:#111;">' + escapeHtml(av) + '</div>'
       + '<div class="info">'
-      + '<div class="name">' + escapeHtml(c.nick || addrShort(a)) + (c.group ? ' <span class="ttl-badge">' + (c.members||[]).length + '人</span>' : '') + (c.req ? '<span class="req-tag">' + (c.group ? '招待' : 'リクエスト') + '</span>' : '') + (c.ttl ? ' <span class="ttl-badge">⏱' + escapeHtml(ttlLabel(c.ttl)) + '</span>' : '') + '</div>'
+      + '<div class="name"><span class="nm">' + escapeHtml(c.nick || addrShort(a)) + '</span>' + (c.group ? ' <span class="ttl-badge">' + (c.members||[]).length + '人</span>' : '') + (c.req ? '<span class="req-tag">' + (c.group ? '招待' : 'リクエスト') + '</span>' : '') + (c.ttl ? ' <span class="ttl-badge">⏱' + escapeHtml(ttlLabel(c.ttl)) + '</span>' : '') + '</div>'
       + '<div class="last">' + escapeHtml(lastText) + '</div>'
       + '</div>'
       + '<div style="display:flex; flex-direction:column; align-items:flex-end; gap:4px;">'
@@ -3711,6 +3716,13 @@ async function openMsgMenu(id){
     row.addEventListener('click', e => { if(!sw.contains(e.target) && !e.target.closest('button, a, input, select, textarea')) sw.click(); });
     sw.addEventListener('keydown', e => { if(e.key === ' ' || e.key === 'Enter'){ e.preventDefault(); sw.click(); } });
   });
+})();
+// Accessible names: icon-only buttons (twemoji turns their text into images)
+// and fields that only had a placeholder; toasts are announced.
+(function(){
+  document.querySelectorAll('button.icon-btn, .fab').forEach(b => { if(!b.getAttribute('aria-label')) b.setAttribute('aria-label', b.title || (b.textContent.trim() === '←' ? '戻る' : b.textContent.trim())); });
+  document.querySelectorAll('input[placeholder], textarea[placeholder]').forEach(i => { if(!i.getAttribute('aria-label') && !(i.id && document.querySelector('label[for="' + i.id + '"]'))) i.setAttribute('aria-label', i.placeholder); });
+  const t = $('toast'); if(t){ t.setAttribute('role', 'status'); t.setAttribute('aria-live', 'polite'); }
 })();
 // ---------- Twemoji: every emoji drawn from the bundled images (no CDN) ----------
 (function(){
