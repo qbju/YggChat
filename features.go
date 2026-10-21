@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"os"
@@ -93,7 +94,13 @@ func (s *Store) load() {
 		s.locked, s.env = true, &env
 		return
 	}
-	_ = json.Unmarshal(b, s)
+	if err := json.Unmarshal(b, s); err != nil {
+		// A damaged file would be overwritten by the first save and every
+		// chat lost: keep a copy and start from whatever could be read.
+		bak := fmt.Sprintf("%s.corrupt-%d", s.path, time.Now().Unix())
+		_ = writeAtomic(bak, b)
+		log.Printf("store: %s is damaged (%v); saved a copy as %s", s.path, err, bak)
+	}
 }
 
 func (s *Store) fix() {
@@ -149,6 +156,7 @@ func (s *Store) setPass(old, nw string) error {
 			return errors.New("現在のパスコードが違います")
 		}
 	}
+	oldKey, oldSalt := s.key, s.salt
 	if nw == "" {
 		s.key, s.salt = nil, nil
 	} else {
@@ -165,7 +173,10 @@ func (s *Store) setPass(old, nw string) error {
 		}
 		s.key, s.salt = k, salt
 	}
-	s.save()
+	if err := s.saveErr(); err != nil {
+		s.key, s.salt = oldKey, oldSalt
+		return fmt.Errorf("保存できませんでした: %v", err)
+	}
 	return nil
 }
 
@@ -175,14 +186,19 @@ func (s *Store) lockNow() error {
 	if s.key == nil {
 		return errors.New("パスコードが未設定です")
 	}
-	s.save()
-	b, err := os.ReadFile(s.path)
-	if err != nil {
-		return err
+	// Lock exactly what we hold now: re-reading the file after a failed
+	// write would lock (and later unlock) an older history.
+	b, err := s.encode()
+	if err == nil {
+		err = writeAtomic(s.path, b)
 	}
+	if err != nil {
+		return fmt.Errorf("保存できませんでした: %v", err)
+	}
+	s.dirty = false
 	var env envelope
-	if err := json.Unmarshal(b, &env); err != nil {
-		return err
+	if err := json.Unmarshal(b, &env); err != nil || len(env.CT) == 0 {
+		return errors.New("bad envelope")
 	}
 	s.env, s.locked, s.key = &env, true, nil
 	s.resetData()

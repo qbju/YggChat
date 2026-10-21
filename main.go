@@ -127,14 +127,24 @@ type Store struct {
 	Joins map[string]joinWait `json:"joins,omitempty"`
 }
 
-func (s *Store) save() {
+func (s *Store) save() { _ = s.saveErr() }
+
+// saveErr is save that reports a failed write (passcode changes must not
+// claim success when the file on disk is still the old one).
+func (s *Store) saveErr() error {
 	s.dirty = false
 	if s.locked {
-		return
+		return nil
 	}
-	if b, err := s.encode(); err == nil {
-		_ = writeAtomic(s.path, b)
+	b, err := s.encode()
+	if err == nil {
+		err = writeAtomic(s.path, b)
 	}
+	if err != nil {
+		s.dirty = true
+		log.Printf("store: save failed: %v", err)
+	}
+	return err
 }
 
 // saveSoon coalesces many saves into one within half a second. Caller holds s.mu.
@@ -171,8 +181,17 @@ func writeAtomic(path string, b []byte) error {
 		os.Remove(tmp)
 		return err
 	}
-	_ = os.Chmod(path, 0600)
-	return os.Rename(tmp, path)
+	if err := os.Rename(tmp, path); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	// Make the rename itself durable: without syncing the directory a power
+	// loss can bring back the old file (or none) after we acked a message.
+	if d, err := os.Open(filepath.Dir(path)); err == nil {
+		_ = d.Sync()
+		d.Close()
+	}
+	return nil
 }
 
 var msgIDRe = regexp.MustCompile(`^[0-9A-Za-z_-]{1,40}$`)
@@ -399,89 +418,97 @@ func (a *App) serveChat() {
 		if err != nil {
 			continue
 		}
-		var w wire
-		if json.Unmarshal(buf[:n], &w) != nil {
-			continue
-		}
 		// The source IP is cryptographically bound to the sender's key by Yggdrasil.
-		rip := raddr.(*net.UDPAddr).IP
-		if len(rip) != 16 || (rip[0]&0xfe) != 0x02 {
-			continue // only Yggdrasil sources (system mode listens on the OS stack)
-		}
-		from := rip.String()
-		if w.T == "fca" {
-			a.onFileAck(from, w)
+		ua, ok := raddr.(*net.UDPAddr)
+		if !ok {
 			continue
 		}
-		if w.T == "pow" {
-			a.onPowNeed(from, w)
-			continue
+		a.handlePacket(ua.IP, buf[:n])
+	}
+}
+
+// handlePacket decodes and dispatches one datagram from rip.
+func (a *App) handlePacket(rip net.IP, pkt []byte) {
+	if len(rip) != 16 || (rip[0]&0xfe) != 0x02 {
+		return // only Yggdrasil sources (system mode listens on the OS stack)
+	}
+	var w wire
+	if json.Unmarshal(pkt, &w) != nil {
+		return
+	}
+	from := rip.String()
+	if w.T == "fca" {
+		a.onFileAck(from, w)
+		return
+	}
+	if w.T == "pow" {
+		a.onPowNeed(from, w)
+		return
+	}
+	if w.T == "ack" {
+		a.ackMu.Lock()
+		if ch, ok := a.acks[w.ID]; ok && a.ackFrom[w.ID] == from {
+			close(ch)
+			delete(a.acks, w.ID)
+			delete(a.ackFrom, w.ID)
 		}
-		if w.T == "ack" {
-			a.ackMu.Lock()
-			if ch, ok := a.acks[w.ID]; ok && a.ackFrom[w.ID] == from {
-				close(ch)
-				delete(a.acks, w.ID)
-				delete(a.ackFrom, w.ID)
-			}
-			a.ackMu.Unlock()
+		a.ackMu.Unlock()
+		a.askPK(from)
+		return
+	}
+	a.store.mu.Lock()
+	locked, blocked := a.store.locked, a.store.Blocked[from]
+	a.store.mu.Unlock()
+	if blocked {
+		return
+	}
+	switch w.T {
+	case "mh", "mc":
+		a.onMoveIn(from, w)
+		return
+	case "mha", "mca", "mok", "mng":
+		a.onMoveAck(from, w)
+		return
+	case "fq", "fr":
+		a.onFingerUDP(from, w)
+		return
+	case "nq", "nr":
+		a.onLANUDP(from, w)
+		return
+	}
+	// While locked we can't store anything: stay silent so the sender keeps it queued.
+	if locked {
+		return
+	}
+	if w.PK != "" {
+		a.learnPK(from, w.PK)
+	}
+	if isGroupCtl(w.T) {
+		a.onGroupCtl(from, w)
+		return
+	}
+	switch w.T {
+	case "hi", "hiack":
+		if w.T == "hi" {
+			a.sendWire(from, wire{T: "hiack", PK: hex.EncodeToString(a.pub())})
+		}
+		a.maybeProf(from)
+		go a.flush(from)
+	case "fh":
+		a.onFileHeader(from, w)
+	case "fc":
+		a.onFileChunk(from, w)
+	case "prof", "ttl":
+		a.handleCtl(from, w)
+	case "edit", "del":
+		if a.onCtl(from, w) {
+			a.sendWire(from, wire{T: "ack", ID: w.ID})
+		}
+	case "msg":
+		if a.handleMsg(from, w) {
+			a.sendWire(from, wire{T: "ack", ID: w.ID})
 			a.askPK(from)
-			continue
-		}
-		a.store.mu.Lock()
-		locked, blocked := a.store.locked, a.store.Blocked[from]
-		a.store.mu.Unlock()
-		if blocked {
-			continue
-		}
-		switch w.T {
-		case "mh", "mc":
-			a.onMoveIn(from, w)
-			continue
-		case "mha", "mca", "mok", "mng":
-			a.onMoveAck(from, w)
-			continue
-		case "fq", "fr":
-			a.onFingerUDP(from, w)
-			continue
-		case "nq", "nr":
-			a.onLANUDP(from, w)
-			continue
-		}
-		// While locked we can't store anything: stay silent so the sender keeps it queued.
-		if locked {
-			continue
-		}
-		if w.PK != "" {
-			a.learnPK(from, w.PK)
-		}
-		if isGroupCtl(w.T) {
-			a.onGroupCtl(from, w)
-			continue
-		}
-		switch w.T {
-		case "hi", "hiack":
-			if w.T == "hi" {
-				a.sendWire(from, wire{T: "hiack", PK: hex.EncodeToString(a.pub())})
-			}
-			a.maybeProf(from)
 			go a.flush(from)
-		case "fh":
-			a.onFileHeader(from, w)
-		case "fc":
-			a.onFileChunk(from, w)
-		case "prof", "ttl":
-			a.handleCtl(from, w)
-		case "edit", "del":
-			if a.onCtl(from, w) {
-				a.sendWire(from, wire{T: "ack", ID: w.ID})
-			}
-		case "msg":
-			if a.handleMsg(from, w) {
-				a.sendWire(from, wire{T: "ack", ID: w.ID})
-				a.askPK(from)
-				go a.flush(from)
-			}
 		}
 	}
 }
@@ -1422,7 +1449,7 @@ func main() {
 	if !st.locked {
 		st.fix()
 	} else {
-		st.Contacts, st.Blocked = map[string]Contact{}, map[string]bool{}
+		st.Contacts, st.Blocked, st.Groups = map[string]Contact{}, map[string]bool{}, map[string]Group{}
 	}
 
 	a := &App{core: c, ns: ns, sys: sys, vpn: vpn, store: st, subs: map[chan []byte]struct{}{}, acks: map[string]chan struct{}{}, inflight: map[string]bool{}, seen: map[string]bool{}, profAt: map[string]time.Time{}, cfg: cfg, cfgPath: filepath.Join(*dataDir, "node.json"), dataDir: *dataDir}
