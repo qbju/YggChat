@@ -5,7 +5,11 @@ KS=${YGG_KEYSTORE:-$HOME/android/yggchat.jks}; export KP=${YGG_KS_PASS:-yggchat}
 cd "$(dirname "$0")"; rm -rf out; mkdir -p out/classes out/apk/lib
 $BT/aapt2 compile --dir res -o out/res.zip
 $BT/aapt2 link -o out/base.apk -I $JAR --manifest AndroidManifest.xml out/res.zip --java out/gen
-javac --release 11 -nowarn -classpath $JAR -d out/classes $(find src out/gen -name '*.java') 2>&1 | grep -v "^warning\|^Note" || true
+# A javac error must stop the build (it used to be filtered away by grep || true).
+if ! javac --release 11 -nowarn -classpath $JAR -d out/classes $(find src out/gen -name '*.java') > out/javac.log 2>&1; then
+  cat out/javac.log >&2; echo "build.sh: javac failed" >&2; exit 1
+fi
+grep -v "^warning\|^Note" out/javac.log >&2 || true
 $BT/d8 --min-api 24 --lib $JAR --output out $(find out/classes -name '*.class')
 cp out/base.apk out/unsigned.apk
 # Native libs: every ABI in ${YGG_JNI:-../dist/jni}/<abi>/libyggchat.so, else ./libyggchat.so as arm64-v8a.

@@ -6,8 +6,10 @@ on:
   pull_request:
   workflow_dispatch:
 
+# Builds and uploads an artifact only; pull_request runs must not get a token
+# that can write to the repository.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
