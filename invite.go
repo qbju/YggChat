@@ -203,6 +203,17 @@ func (a *App) onJoin(from string, w wire, g Group, known bool) {
 		}
 		if fresh {
 			if len(g.Pend) >= maxPending {
+				// Requests nobody answered for days make room (else a burst of
+				// throwaway addresses keeps the list full for good), v0.19.3.
+				var keep []Pend
+				for _, p := range g.Pend {
+					if time.Now().Unix()-p.TS < pendKeep {
+						keep = append(keep, p)
+					}
+				}
+				g.Pend = keep
+			}
+			if len(g.Pend) >= maxPending {
 				no("参加申請がいっぱいです。しばらくしてからもう一度開いてね")
 				return
 			}

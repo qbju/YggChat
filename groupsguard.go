@@ -39,6 +39,7 @@ const (
 	histAskTTL    = 120       // seconds we take relayed history from a member we asked
 	maxBan        = 256
 	goneSlack     = 120 // clock slack when dropping posts made after a removal
+	pendKeep      = 3 * 86400 // a full request list drops requests older than this
 )
 
 var lateState = struct {

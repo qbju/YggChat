@@ -461,3 +461,69 @@ func TestJoinOverFakeInvitation(t *testing.T) {
 		t.Fatalf("join: %+v", g)
 	}
 }
+
+// Member limit 1024: a full list with 10 admins, a worst-case name and every
+// setting still fits the datagrams; the 1025th is refused at the host.
+func TestMaxGroupBoundary(t *testing.T) {
+	h, pc := tAppPC(t, tHost)
+	var ms []string
+	for i := 0; len(ms) < maxGroupCap-2; i++ {
+		ms = append(ms, fmt.Sprintf("2%02x:ffff:ffff:ffff:ffff:ffff:%04x:%04x", 0x10+i%200, i, 0xffff-i))
+	}
+	ms = cleanMembers(ms, tHost)
+	if len(ms) != maxGroupCap-1 {
+		t.Fatal(len(ms))
+	}
+	g := Group{ID: tgid, Name: strings.Repeat("<", 32), Members: ms, Owner: tHost, V: 1 << 40, SV: 1 << 40, VAt: time.Now().Unix(), Tok: "0011223344556677",
+		Set: GroupSet{Max: maxGroupCap, PoW: 16, TTL: 2419200, NoFiles: true, Hist: true}}
+	g.Admins = cleanAdmins(ms[len(ms)-maxAdmins:], g)
+	h.store.Groups[tgid] = g
+	h.onGroupCtl(tX, wire{T: "gj", G: tgid, Tok: "0011223344556677"})
+	g = h.store.Groups[tgid]
+	if len(g.Members) != maxGroupCap {
+		t.Fatalf("1024th not admitted: %d", len(g.Members))
+	}
+	for _, p := range h.infoPackets(g) {
+		if n := wireLen(p); n > dgramMax {
+			t.Fatalf("%s is %d bytes", p.T, n)
+		}
+	}
+	h.onGroupCtl(tNew, wire{T: "gj", G: tgid, Tok: "0011223344556677"})
+	if hasMember(h.store.Groups[tgid], tNew) || waitSent(pc, tNew, "gjn") == nil {
+		t.Fatal("1025th admitted")
+	}
+}
+
+// While we wait for the host of a link we opened, someone else's info for
+// the group (without the host) arrived first and the host's was refused.
+func TestJoinHijackByOtherInfo(t *testing.T) {
+	gid := "eeee0000eeee0000"
+	a := tApp(t, tMe)
+	code := encodeJoin(tHost, gid, "0011223344556677")
+	if rec := tPost(t, tMux(a), "/api/group/join", `{"Code":"`+code+`"}`); rec.Code != 200 {
+		t.Fatal(rec.Code, rec.Body)
+	}
+	a.onGroupCtl(tX, wire{T: "gi", G: gid, GN: "fake", GM: []string{tX, tMe}, GO: tX, GV: 9})
+	a.onGroupCtl(tHost, wire{T: "gi", G: gid, GN: "Real", GM: cleanMembers([]string{tHost, tMem}, tMe), GO: tHost, GV: 2})
+	g := a.store.Groups[gid]
+	if g.Owner != tHost || g.Name != "Real" || g.Req || hasMember(g, tX) || g.V != 2 {
+		t.Fatalf("join: %+v", g)
+	}
+}
+
+// A full request list stayed full for good; requests left for days make room.
+func TestPendingListExpires(t *testing.T) {
+	gid := "ffff0000ffff0000"
+	h := tApp(t, tHost)
+	old := time.Now().Unix() - pendKeep - 10
+	var ps []Pend
+	for i := 0; i < maxPending; i++ {
+		ps = append(ps, Pend{Addr: fmt.Sprintf("2%02x::%x", 0x10+i, i+1), TS: old})
+	}
+	h.store.Groups[gid] = Group{ID: gid, Name: "G", Members: cleanMembers([]string{tMem}, tHost), Owner: tHost, Tok: "0011223344556677", Set: GroupSet{Approve: true}, Pend: ps}
+	h.onGroupCtl(tX, wire{T: "gj", G: gid, Tok: "0011223344556677"})
+	g := h.store.Groups[gid]
+	if len(g.Pend) != 1 || g.Pend[0].Addr != tX {
+		t.Fatalf("pending: %+v", g.Pend)
+	}
+}

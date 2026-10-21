@@ -737,6 +737,15 @@ func (a *App) onGroupCtl(from string, w wire) {
 		if known && g.Stub && !g.Left {
 			known = false // a placeholder from a message: take this info as the first one
 		}
+		if known && g.Req && !g.Left {
+			// An unanswered invitation while we wait for the host whose link we
+			// opened: another member (or anyone who saw the group id) may have
+			// sent it first, maybe without the host in it; the host's own info
+			// starts the group afresh (v0.19.3).
+			if jh, ok := a.joinHostLocked(w.G); ok && jh == from {
+				known = false
+			}
+		}
 		if len(w.GM) == 0 || (known && !g.Left && !hasMember(g, from)) {
 			a.store.mu.Unlock()
 			return
