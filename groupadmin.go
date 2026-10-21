@@ -49,15 +49,20 @@ const (
 	giMaxBytes      = 1180 // a classic gi (full list inline) must fit one datagram
 	partAddrs       = 40   // addresses per gp / gd datagram (640 bytes packed)
 	nostrGroupMax   = 64   // bigger groups don't park copies on Nostr
+	maxStubs        = 50   // placeholder groups made from strangers' messages
+	copyTries       = 3    // direct tries per member copy before it waits in the queue
 )
 
 // groupSem limits how many member copies are being delivered at once.
 var groupSem = make(chan struct{}, 48)
 
+// A copy gets only a few direct tries; then it waits in the queue (hello /
+// flush retry it like any queued message), so offline members don't hold the
+// slots other posts need (v0.19.2).
 func (a *App) deliverCopy(m Message) {
 	groupSem <- struct{}{}
 	defer func() { <-groupSem }()
-	a.deliver(m)
+	a.deliverN(m, copyTries)
 }
 
 // pruneSentCopies drops delivered hidden group copies kept by versions before v0.19. Caller holds s.mu.
@@ -259,9 +264,27 @@ type gpState struct {
 	bufs map[string]*partBuf // gid|from
 	qAt  map[string]time.Time
 	rAt  map[string]time.Time
+	lAt  map[string]time.Time // leave notices sent
 }
 
-var gps = &gpState{bufs: map[string]*partBuf{}, qAt: map[string]time.Time{}, rAt: map[string]time.Time{}}
+var gps = &gpState{bufs: map[string]*partBuf{}, qAt: map[string]time.Time{}, rAt: map[string]time.Time{}, lAt: map[string]time.Time{}}
+
+// leaveNotice re-sends gl to a peer that still treats us as a member of a
+// group we left (it missed our gl), at most every 5 minutes (v0.19.2).
+func (a *App) leaveNotice(peer, gid string) {
+	gps.mu.Lock()
+	k := gid + "|" + peer
+	if time.Since(gps.lAt[k]) < 5*time.Minute {
+		gps.mu.Unlock()
+		return
+	}
+	if len(gps.lAt) > 4096 {
+		gps.lAt = map[string]time.Time{}
+	}
+	gps.lAt[k] = time.Now()
+	gps.mu.Unlock()
+	a.sendWire(peer, wire{T: "gl", G: gid})
+}
 
 // askInfo sends gq to peer, at most every 15 s per group.
 func (a *App) askInfo(peer, gid string) {
@@ -401,11 +424,26 @@ func cleanNickOr(n string) string {
 // onDelta applies a membership change from the host or an admin.
 // Caller holds a.store.mu; released here.
 func (a *App) onDelta(from string, w wire, g Group, known bool) {
-	if !known || g.Left || !canManage(g, from) || !hasMember(g, a.addr) || w.GV < g.V {
+	if !known || g.Left || !canManage(g, from) || !hasMember(g, a.addr) {
+		a.store.mu.Unlock()
+		return
+	}
+	host := g.Owner == a.addr
+	// An admin's delta the host gets late or from an old base (v <= ours) is
+	// merged into a new version: its additions (not the ones the host removed
+	// since), and its removals only when it is the same version (v0.19.2).
+	merge := host && w.GV <= g.V
+	if w.GV < g.V && !merge {
 		a.store.mu.Unlock()
 		return
 	}
 	add, rm := unpackAddrs(w.GA), unpackAddrs(w.GR)
+	if merge {
+		add = mergeAdds(g, add)
+		if w.GV < g.V {
+			rm = nil
+		}
+	}
 	byHost := from == g.Owner
 	old := g
 	var added, removed []string
@@ -432,10 +470,32 @@ func (a *App) onDelta(from string, w wire, g Group, known bool) {
 			kept = append(kept, m)
 		}
 	}
+	if len(added) == 0 && len(removed) == 0 && w.GV <= g.V {
+		a.store.mu.Unlock() // a repeat of what we have
+		return
+	}
+	if !host && w.GV == g.V {
+		// Same version, different change: keep ours, let the host merge.
+		a.store.mu.Unlock()
+		if from == g.Owner {
+			a.answerInfo(g.Owner, g)
+		} else {
+			a.askInfo(g.Owner, g.ID)
+		}
+		return
+	}
 	sort.Strings(kept)
 	g.Members = kept
 	g.Admins = cleanAdmins(g.Admins, g)
-	g.V = w.GV
+	if merge {
+		g.V++
+	} else {
+		g.V = w.GV
+	}
+	if host {
+		trackGone(&g, old.Members)
+	}
+	noteGone(&g, old.Members, 0)
 	for _, x := range added {
 		g.Pend = dropPend(g.Pend, x)
 	}
@@ -448,10 +508,14 @@ func (a *App) onDelta(from string, w wire, g Group, known bool) {
 	a.broadcast("contact", groupView(g))
 	if out {
 		a.groupSys(g, "グループから外されました")
+		go a.failLeftCopies(g.ID)
 		return
 	}
 	a.memberSys(g, from, added, removed)
-	_ = old
+	if merge {
+		a.sendMembers(g, added, removed) // everyone (the admin too) gets the merged version
+		return
+	}
 	// The host re-sends the classic list so pre-v0.19 members learn an admin's change.
 	if a.addr == g.Owner && !byHost && (len(added) > 0 || len(removed) > 0) {
 		if ps := a.infoPackets(g); classicFits(ps) {
@@ -472,7 +536,7 @@ func (a *App) onDelta(from string, w wire, g Group, known bool) {
 
 // memberSys writes the "X added Y" lines (summarised for many).
 func (a *App) memberSys(g Group, by string, added, removed []string) {
-	who := a.nameOf(by)
+	who := a.gNameOf(g, by)
 	if by == a.addr {
 		who = "あなた"
 	}
@@ -488,7 +552,7 @@ func (a *App) memberSys(g Group, by string, added, removed []string) {
 			return
 		}
 		for _, m := range others {
-			a.groupSys(g, who+" が "+a.nameOf(m)+" を"+verb+"ました")
+			a.groupSys(g, who+" が "+a.gNameOf(g, m)+" を"+verb+"ました")
 		}
 	}
 	line(added, "追加し")
@@ -505,15 +569,15 @@ func (a *App) adminSys(g Group, by string, old, now []string) {
 		}
 		return false
 	}
-	who := a.nameOf(by)
+	who := a.gNameOf(g, by)
 	for _, x := range now {
 		if !has(old, x) {
-			a.groupSys(g, who+" が "+a.nameOf(x)+" を副管理者にしました")
+			a.groupSys(g, who+" が "+a.gNameOf(g, x)+" を副管理者にしました")
 		}
 	}
 	for _, x := range old {
 		if !has(now, x) && hasMember(g, x) {
-			a.groupSys(g, who+" が "+a.nameOf(x)+" を副管理者から外しました")
+			a.groupSys(g, who+" が "+a.gNameOf(g, x)+" を副管理者から外しました")
 		}
 	}
 }

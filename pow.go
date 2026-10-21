@@ -179,9 +179,20 @@ func (a *App) withPow(m Message, w *wire, sha string) {
 // recvBits is what we ask of a message from `from` (caller holds a.store.mu).
 func (a *App) recvBitsLocked(from string, w wire) (need int, legacyOK bool) {
 	if w.G != "" {
+		// A group we don't know (or only hold as a placeholder / unanswered
+		// invitation) from someone we haven't accepted is a message request:
+		// it needs the request work, and PowStrict applies (v0.19.2).
 		g, ok := a.store.Groups[w.G]
+		c, cok := a.store.Contacts[from]
+		accepted := cok && !c.Req
 		if !ok {
-			return powRequest, false
+			if accepted {
+				return powDefault, true
+			}
+			return powRequest, !a.store.PowStrict
+		}
+		if (g.Stub || g.Req) && !accepted {
+			return max(groupPow(g), powRequest), !a.store.PowStrict && g.Set.PoW == 0
 		}
 		return groupPow(g), g.Set.PoW == 0
 	}

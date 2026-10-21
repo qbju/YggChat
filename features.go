@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/yggdrasil-network/yggdrasil-go/src/config"
@@ -106,6 +107,7 @@ func (s *Store) fix() {
 		s.Groups = map[string]Group{}
 	}
 	s.pruneSentCopies()
+	s.dedupeGroupMsgs()
 	if s.Nick == "" {
 		s.Nick = "anon"
 	}
@@ -131,11 +133,7 @@ func (s *Store) unlock(pass string) error {
 		return err
 	}
 	s.key, s.salt, s.locked, s.env = key, s.env.Salt, false, nil
-	for i := range s.Messages {
-		if s.Messages[i].Status == "sending" || s.Messages[i].Status == "failed" {
-			s.Messages[i].Status = "queued"
-		}
-	}
+	s.requeueAfterRestart()
 	return nil
 }
 
@@ -197,6 +195,7 @@ func (s *Store) resetData() {
 	s.Nick, s.Bio, s.Avatar, s.Domain = "", "", "", ""
 	s.Contacts, s.Messages, s.Blocked, s.Groups, s.Ctl = nil, nil, nil, nil, nil
 	s.NostrOn, s.NostrRelays, s.NostrLegacy, s.PowStrict = false, nil, false, false
+	s.Joins = nil
 }
 
 // loadData replaces all saved fields with the JSON b (every field, so new
@@ -221,7 +220,17 @@ func (a *App) sendWire(peer string, w wire) {
 		return
 	}
 	b, _ := json.Marshal(w)
-	_, _ = a.udp.WriteTo(b, &net.UDPAddr{IP: net.ParseIP(peer), Port: chatPort})
+	a.udpWrite(b, &net.UDPAddr{IP: net.ParseIP(peer), Port: chatPort})
+}
+
+// udpWriteMu serialises datagram writes: the userspace stack's UDP
+// endpoint is not safe for concurrent WriteTo (found with -race).
+var udpWriteMu sync.Mutex
+
+func (a *App) udpWrite(b []byte, dst *net.UDPAddr) {
+	udpWriteMu.Lock()
+	defer udpWriteMu.Unlock()
+	_, _ = a.udp.WriteTo(b, dst)
 }
 
 func (a *App) profWire() wire {
@@ -260,6 +269,11 @@ func sysID() string { return fmt.Sprintf("s%x", time.Now().UnixNano()) }
 // setTTL changes a conversation's disappearing timer and logs a system line.
 // Caller must NOT hold store.mu.
 func (a *App) setTTL(peer string, ttl int, byMe bool) {
+	a.setTTLAt(peer, ttl, byMe, time.Now().Unix())
+}
+
+// setTTLAt is setTTL for a change made at time at (a message's timestamp).
+func (a *App) setTTLAt(peer string, ttl int, byMe bool, at int64) {
 	if ttl < 0 || ttl > 4*7*86400 {
 		return
 	}
@@ -269,7 +283,7 @@ func (a *App) setTTL(peer string, ttl int, byMe bool) {
 		a.store.mu.Unlock()
 		return
 	}
-	c.TTL = ttl
+	c.TTL, c.TTLAt = ttl, at
 	a.store.Contacts[peer] = c
 	m := Message{ID: sysID(), Peer: peer, Sys: fmt.Sprintf("ttl:%d", ttl), TS: time.Now().Unix(), Out: byMe}
 	a.store.Messages = append(a.store.Messages, m)
@@ -391,7 +405,7 @@ func (a *App) resetIdentity() error {
 	a.store.Ctl = nil
 	a.store.Domain = ""
 	a.store.Blocked = map[string]bool{}
-	a.joins = nil
+	a.store.Joins = nil
 	a.store.save()
 	a.store.mu.Unlock()
 	go func() {
@@ -536,7 +550,7 @@ func (a *App) featureHandlers(mux *http.ServeMux) {
 			delete(a.store.Contacts, addr)
 			kept := a.store.Messages[:0]
 			for _, m := range a.store.Messages {
-				if m.Peer != addr {
+				if m.Peer != addr || m.Hid { // pending group copies to them still count for the group (v0.19.2)
 					kept = append(kept, m)
 				}
 			}

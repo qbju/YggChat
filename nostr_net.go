@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -202,6 +203,13 @@ func (a *App) nostrFetch() {
 		}(r)
 	}
 	wg.Wait()
+	// Handle them oldest first (by the message's own time; created_at is
+	// blurred), so per-chat state like the timer ends at the newest (v0.19.2).
+	type parked struct {
+		id, from, del string
+		w             wire
+	}
+	var ps []parked
 	for id, ev := range evs {
 		if _, done := nostrSeen.Load(id); done {
 			continue
@@ -212,11 +220,20 @@ func (a *App) nostrFetch() {
 			continue
 		}
 		a.learnPK(from, hex.EncodeToString(pk))
-		if a.handleMsg(from, w) {
-			nostrSeen.Store(id, struct{}{})
-			go a.sendWire(from, wire{T: "ack", ID: w.ID}) // tell the sender directly if it is online
-			if del != "" {
-				go nostrPublish(relays, del)
+		ps = append(ps, parked{id, from, del, w})
+	}
+	sort.SliceStable(ps, func(i, j int) bool {
+		if ps[i].w.TS != ps[j].w.TS {
+			return ps[i].w.TS < ps[j].w.TS
+		}
+		return ps[i].w.ID < ps[j].w.ID
+	})
+	for _, p := range ps {
+		if a.handleMsg(p.from, p.w) {
+			nostrSeen.Store(p.id, struct{}{})
+			go a.sendWire(p.from, wire{T: "ack", ID: p.w.ID}) // tell the sender directly if it is online
+			if p.del != "" {
+				go nostrPublish(relays, p.del)
 			}
 		}
 	}

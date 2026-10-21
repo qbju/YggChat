@@ -75,6 +75,7 @@ type Message struct {
 	Hist bool `json:"hist,omitempty"` // relayed by the group host as history for a new member (v0.18)
 	Via  string `json:"via,omitempty"` // history relayed by another member, not the sender (v0.19.1)
 	Dlv  int    `json:"dlv,omitempty"` // group copies delivered so far (v0.19.1)
+	Tot  int    `json:"tot,omitempty"` // group copies made when sent (recipients then)
 	Pn   string `json:"pn,omitempty"`  // proof-of-work nonce (pow.go)
 }
 
@@ -92,6 +93,7 @@ type Contact struct {
 	Dom     string `json:"dom,omitempty"`    // domain the peer claims in its profile
 	DomOK   bool   `json:"domok,omitempty"`  // its AAAA is this peer's address (checked by us)
 	DomAt   int64  `json:"domat,omitempty"`  // last check
+	TTLAt   int64  `json:"ttlat,omitempty"`  // time of the message/setting the current TTL came from (local)
 }
 
 type Store struct {
@@ -121,6 +123,8 @@ type Store struct {
 	Groups map[string]Group `json:"groups,omitempty"`
 	// Refuse message requests and invite-link joins without proof of work (v0.19, opt-in).
 	PowStrict bool `json:"pow_strict,omitempty"`
+	// Our pending invite-link joins: group id -> host, until they expire (invite.go).
+	Joins map[string]joinWait `json:"joins,omitempty"`
 }
 
 func (s *Store) save() {
@@ -271,7 +275,6 @@ type App struct {
 	ackMu    sync.Mutex
 	acks     map[string]chan struct{}
 	ackFrom  map[string]string // id -> the peer whose ack counts (ackMu)
-	joins    map[string]string // group id -> host, while our invite-link join is pending (guarded by store.mu)
 	pwMu     sync.Mutex
 	pwFails  map[string]*pwFail // wrong group passwords per address (groupset.go)
 	flMu     sync.Mutex
@@ -304,6 +307,15 @@ func (a *App) broadcast(kind string, v any) {
 
 func (a *App) addMessage(m Message) {
 	a.store.mu.Lock()
+	if isGroupKey(m.Peer) && !m.Out && m.Sys == "" && m.From != "" {
+		// One post, one message: member copies and relays carry different ids (v0.19.2).
+		for i := len(a.store.Messages) - 1; i >= 0; i-- {
+			if x := a.store.Messages[i]; x.Peer == m.Peer && x.From == m.From && !x.Out && samePost(x.ID, m.ID) {
+				a.store.mu.Unlock()
+				return
+			}
+		}
+	}
 	a.store.Messages = append(a.store.Messages, m)
 	if isGroupKey(m.Peer) {
 		// group conversations have no contact entry
@@ -443,6 +455,10 @@ func (a *App) serveChat() {
 		if w.PK != "" {
 			a.learnPK(from, w.PK)
 		}
+		if isGroupCtl(w.T) {
+			a.onGroupCtl(from, w)
+			continue
+		}
 		switch w.T {
 		case "hi", "hiack":
 			if w.T == "hi" {
@@ -456,8 +472,6 @@ func (a *App) serveChat() {
 			a.onFileChunk(from, w)
 		case "prof", "ttl":
 			a.handleCtl(from, w)
-		case "gq", "gi", "gl", "gj", "gjn", "ghs", "gd", "gp", "gk", "gkq":
-			a.onGroupCtl(from, w)
 		case "edit", "del":
 			if a.onCtl(from, w) {
 				a.sendWire(from, wire{T: "ack", ID: w.ID})
@@ -470,6 +484,17 @@ func (a *App) serveChat() {
 			}
 		}
 	}
+}
+
+// isGroupCtl reports whether t is a group control packet (onGroupCtl). "ghq"
+// (catch-up request) was missing before v0.19.2, so native nodes never
+// answered it; it is only safe together with the post-id dedupe.
+func isGroupCtl(t string) bool {
+	switch t {
+	case "gq", "gi", "gl", "gj", "gjn", "ghs", "ghq", "gd", "gp", "gk", "gkq":
+		return true
+	}
+	return false
 }
 
 // handleMsg validates and stores an incoming message (direct or from the
@@ -516,8 +541,20 @@ func (a *App) acceptMsg(from string, w wire, img string) bool {
 		a.seenMu.Unlock()
 		return false
 	}
-	if known && c.TTL != w.TTL {
-		a.setTTL(from, w.TTL, false)
+	// Only a message newer than the last change moves the timer (late Nostr
+	// copies arrive in any order), v0.19.2.
+	if at := min(w.TS, time.Now().Unix()+300); known && at >= c.TTLAt {
+		if c.TTL != w.TTL {
+			a.setTTLAt(from, w.TTL, false, at)
+		} else {
+			a.store.mu.Lock()
+			if x, ok := a.store.Contacts[from]; ok && at > x.TTLAt {
+				x.TTLAt = at
+				a.store.Contacts[from] = x
+				a.store.saveSoon()
+			}
+			a.store.mu.Unlock()
+		}
 	}
 	m := Message{ID: w.ID, Peer: from, From: from, Nick: cleanNick(w.Nick), Text: w.Text, TS: w.TS, TTL: w.TTL, Img: img}
 	if w.TTL > 0 {
@@ -551,6 +588,10 @@ func (a *App) setStatus(peer, id, status string) {
 	grp, of := "", ""
 	for i := len(a.store.Messages) - 1; i >= 0; i-- {
 		if m := &a.store.Messages[i]; m.ID == id && m.Peer == peer {
+			if m.Hid && m.Status == "failed" && status != "sent" && a.groupOutLocked(m.Grp) {
+				a.store.mu.Unlock() // given up when we left the group: a retry still finishing can't revive it
+				return
+			}
 			m.Status = status
 			if m.Hid {
 				grp, of = m.Grp, m.Of
@@ -664,6 +705,17 @@ func (a *App) deliverN(m Message, tries int) bool {
 	a.inflight[m.ID] = true
 	a.flMu.Unlock()
 	defer func() { a.flMu.Lock(); delete(a.inflight, m.ID); a.flMu.Unlock() }()
+	if m.Hid {
+		a.store.mu.Lock()
+		out := a.groupOutLocked(m.Grp)
+		a.store.mu.Unlock()
+		if out && !isLeaving(m.Grp) {
+			if !m.Nostr {
+				a.setStatus(m.Peer, m.ID, "failed") // we left (or were removed): not retried
+			}
+			return true
+		}
+	}
 	if m.Status != "sending" {
 		a.setStatus(m.Peer, m.ID, "sending")
 	}
@@ -701,7 +753,7 @@ func (a *App) deliverN(m Message, tries int) bool {
 			m.Pn = ""
 			b, _ = json.Marshal(a.msgWire(m))
 		}
-		_, _ = a.udp.WriteTo(b, dst)
+		a.udpWrite(b, dst)
 		select {
 		case <-ch:
 			a.setStatus(m.Peer, m.ID, "sent")
@@ -775,7 +827,7 @@ func (a *App) queued(peer string) []Message {
 	defer a.store.mu.Unlock()
 	var out []Message
 	for _, m := range a.store.Messages {
-		if m.Out && (m.Status == "queued" || m.Status == "stored") && !isGroupKey(m.Peer) && (peer == "" || m.Peer == peer) {
+		if m.Out && (m.Status == "queued" || m.Status == "stored") && !isGroupKey(m.Peer) && (peer == "" || m.Peer == peer) && !(m.Hid && a.groupOutLocked(m.Grp)) {
 			out = append(out, m)
 		}
 	}
@@ -1019,6 +1071,7 @@ func (a *App) httpHandlers(mux *http.ServeMux) {
 			"contacts": a.contactsViewLocked(), "messages": a.visibleMessagesLocked(), "peers": peers, "platform": "native",
 			"locked": false, "haspass": a.store.key != nil, "blocked": blocked,
 			"nostr": a.nostrStateLocked(), "socks": a.socksState(), "powstrict": a.store.PowStrict,
+			"joins": a.joinsViewLocked(),
 		})
 	})
 	mux.HandleFunc("/api/send", func(w http.ResponseWriter, r *http.Request) {
@@ -1137,7 +1190,7 @@ func (a *App) httpHandlers(mux *http.ServeMux) {
 		delete(a.store.Contacts, addr)
 		kept := a.store.Messages[:0]
 		for _, m := range a.store.Messages {
-			if m.Peer != addr {
+			if m.Peer != addr || m.Hid { // pending group copies to them still count for the group (v0.19.2)
 				kept = append(kept, m)
 			}
 		}
@@ -1220,6 +1273,9 @@ func (a *App) httpHandlers(mux *http.ServeMux) {
 		a.subs[ch] = struct{}{}
 		a.subMu.Unlock()
 		defer func() { a.subMu.Lock(); delete(a.subs, ch); a.subMu.Unlock() }()
+		// Send the headers now: the UI resyncs on "open", which otherwise waits for the first event.
+		fmt.Fprint(w, ": ok\n\n")
+		fl.Flush()
 		tick := time.NewTicker(20 * time.Second)
 		defer tick.Stop()
 		for {
@@ -1371,11 +1427,7 @@ func main() {
 
 	a := &App{core: c, ns: ns, sys: sys, vpn: vpn, store: st, subs: map[chan []byte]struct{}{}, acks: map[string]chan struct{}{}, inflight: map[string]bool{}, seen: map[string]bool{}, profAt: map[string]time.Time{}, cfg: cfg, cfgPath: filepath.Join(*dataDir, "node.json"), dataDir: *dataDir}
 	// Messages left "sending" by a previous run never got an ack.
-	for i := range st.Messages {
-		if st.Messages[i].Status == "sending" || st.Messages[i].Status == "failed" {
-			st.Messages[i].Status = "queued"
-		}
-	}
+	st.requeueAfterRestart()
 	go func() {
 		last := -1
 		for range time.Tick(3 * time.Second) {

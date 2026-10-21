@@ -194,6 +194,15 @@ func (a *App) onFileHeader(from string, w wire) {
 		a.sendWire(from, wire{T: "ack", ID: w.ID})
 		return
 	}
+	if w.G != "" && validGID(w.G) {
+		if left, quit := a.groupLeft(w.G); left {
+			a.sendWire(from, wire{T: "ack", ID: w.ID}) // we're out: the sender can stop (v0.19.2)
+			if quit {
+				a.leaveNotice(from, w.G)
+			}
+			return
+		}
+	}
 	if !a.powCheck(from, w) {
 		return // told the sender how much work we want
 	}

@@ -22,8 +22,73 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"sort"
+	"strings"
 	"time"
 )
+
+// joinWait is a pending invite-link join of ours. It is saved (v0.19.2), so
+// a restart while waiting for approval still turns the host's gi into
+// "joined" instead of a plain invitation.
+type joinWait struct {
+	Host string `json:"host"`
+	Exp  int64  `json:"exp"`            // unix time it is forgotten
+	Wait bool   `json:"wait,omitempty"` // the host said "wait for approval"
+}
+
+const (
+	joinWaitTTL     = 10 * 60      // a join request is answered within seconds
+	joinApproveWait = 24 * 60 * 60 // the host said "wait for approval"
+)
+
+// joinHostLocked returns the host our join of gid waits for. Caller holds a.store.mu.
+func (a *App) joinHostLocked(gid string) (string, bool) {
+	j, ok := a.store.Joins[gid]
+	if !ok {
+		return "", false
+	}
+	if j.Exp < time.Now().Unix() {
+		delete(a.store.Joins, gid)
+		return "", false
+	}
+	return j.Host, true
+}
+
+// setJoinLocked remembers a pending join for ttl seconds. Caller holds a.store.mu (and saves).
+func (a *App) setJoinLocked(gid, host string, ttl int64) {
+	now := time.Now().Unix()
+	if a.store.Joins == nil {
+		a.store.Joins = map[string]joinWait{}
+	}
+	for k, j := range a.store.Joins {
+		if j.Exp < now {
+			delete(a.store.Joins, k)
+		}
+	}
+	a.store.Joins[gid] = joinWait{Host: host, Exp: now + ttl, Wait: ttl > joinWaitTTL}
+	a.joinsChangedLocked()
+}
+
+// joinsViewLocked lists our pending joins for the UI. Caller holds a.store.mu.
+func (a *App) joinsViewLocked() []map[string]any {
+	now := time.Now().Unix()
+	out := []map[string]any{}
+	for gid, j := range a.store.Joins {
+		if j.Exp < now {
+			continue
+		}
+		v := map[string]any{"addr": gKey(gid), "host": j.Host, "exp": j.Exp, "wait": j.Wait}
+		if c, ok := a.store.Contacts[j.Host]; ok && c.Nick != "" {
+			v["hostnick"] = c.Nick
+		}
+		out = append(out, v)
+	}
+	sort.Slice(out, func(i, k int) bool { return out[i]["addr"].(string) < out[k]["addr"].(string) })
+	return out
+}
+
+// joinsChangedLocked tells the UI the pending joins changed. Caller holds a.store.mu.
+func (a *App) joinsChangedLocked() { a.broadcast("joins", a.joinsViewLocked()) }
 
 func newGroupToken() string {
 	b := make([]byte, 8)
@@ -181,8 +246,29 @@ func (a *App) inviteHandlers(mux *http.ServeMux) {
 		json.NewEncoder(w).Encode(map[string]string{"code": code, "link": "https://yggchat.surge.sh/#j=" + code})
 	})
 	mux.HandleFunc("/api/group/join", func(w http.ResponseWriter, r *http.Request) {
-		var req struct{ Code, Pw string }
+		var req struct {
+			Code, Pw, ID string
+			Cancel       bool
+		}
 		if !readJSON(w, r, &req) {
+			return
+		}
+		if req.Cancel {
+			// Stop waiting for this join (the host's pending entry stays until it answers).
+			gid := strings.TrimPrefix(req.ID, "g:")
+			if req.Code != "" {
+				if _, g2, _, err := decodeJoin(req.Code); err == nil {
+					gid = g2
+				}
+			}
+			a.store.mu.Lock()
+			if _, ok := a.store.Joins[gid]; ok {
+				delete(a.store.Joins, gid)
+				a.store.save()
+				a.joinsChangedLocked()
+			}
+			a.store.mu.Unlock()
+			w.Write([]byte("{}"))
 			return
 		}
 		host, gid, tok, err := decodeJoin(req.Code)
@@ -208,10 +294,8 @@ func (a *App) inviteHandlers(mux *http.ServeMux) {
 		if g, ok := a.store.Groups[gid]; ok && g.Left {
 			delete(a.store.Groups, gid) // joining again starts fresh
 		}
-		if a.joins == nil {
-			a.joins = map[string]string{}
-		}
-		a.joins[gid] = host
+		a.setJoinLocked(gid, host, joinWaitTTL)
+		a.store.save()
 		nick := a.store.Nick
 		a.store.mu.Unlock()
 		jw := wire{T: "gj", G: gid, Tok: tok, Nick: nick, Pw: req.Pw, PN: joinPow(a.addr, gid, tok)}
@@ -220,7 +304,7 @@ func (a *App) inviteHandlers(mux *http.ServeMux) {
 			for _, d := range []time.Duration{1, 2, 2, 3, 4, 5, 6} {
 				time.Sleep(d * time.Second)
 				a.store.mu.Lock()
-				_, waiting := a.joins[gid]
+				_, waiting := a.joinHostLocked(gid)
 				a.store.mu.Unlock()
 				if !waiting {
 					return

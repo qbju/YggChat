@@ -178,7 +178,12 @@ func (a *App) pwLimited(from string, failed bool) bool {
 // approval), tells everyone and shares the history if that is on.
 // Caller holds a.store.mu; it is released here.
 func (a *App) admit(g Group, from, nick, how string) {
+	before := g.Members
 	g.Members = cleanMembers(append(append([]string{}, g.Members...), from), a.addr)
+	if g.Owner == a.addr {
+		trackGone(&g, before)
+	}
+	noteGone(&g, before, 0)
 	g.Pend = dropPend(g.Pend, from)
 	g.V++
 	a.store.Groups[g.ID] = g
@@ -243,7 +248,8 @@ func (a *App) sendHistory(to, gid string, hist []Message) {
 				text = "📷 " + text
 			}
 		}
-		w := wire{T: "ghs", G: gid, ID: m.ID, By: m.From, Nick: m.Nick, Text: text, TS: m.TS}
+		// The post id, not our copy's "<post>g<i>": every member then has the same one to dedupe on (v0.19.2).
+		w := wire{T: "ghs", G: gid, ID: postID(m.ID), By: m.From, Nick: m.Nick, Text: text, TS: m.TS}
 		if m.Exp > 0 {
 			r := m.Exp - now - 20 // it takes a few seconds to send
 			if r <= 0 {
@@ -284,9 +290,13 @@ func (a *App) onHistory(from string, w wire, g Group, known bool) {
 		a.store.mu.Unlock()
 		return
 	}
+	if at := goneAt(g, by); !hasMember(g, by) && at != 0 && (at < 0 || w.TS <= 0 || w.TS > at) {
+		a.store.mu.Unlock() // posted after they left or were removed (v0.19.2)
+		return
+	}
 	key := gKey(g.ID)
 	for i := len(a.store.Messages) - 1; i >= 0; i-- {
-		if m := a.store.Messages[i]; m.Peer == key && m.From == by && m.ID == w.ID {
+		if m := a.store.Messages[i]; m.Peer == key && m.From == by && samePost(m.ID, w.ID) {
 			a.store.mu.Unlock()
 			return
 		}
@@ -295,7 +305,7 @@ func (a *App) onHistory(from string, w wire, g Group, known bool) {
 	if by == a.addr {
 		return
 	}
-	m := Message{ID: w.ID, Peer: key, From: by, Nick: cleanNick(w.Nick), Text: w.Text, TS: w.TS, Hist: true}
+	m := Message{ID: postID(w.ID), Peer: key, From: by, Nick: cleanNick(w.Nick), Text: w.Text, TS: w.TS, Hist: true}
 	if by != from && !canManage(g, from) {
 		m.Via = from
 	}
@@ -381,6 +391,9 @@ var (
 func (a *App) onHistReq(from string, w wire, g Group, known bool) {
 	if !known || g.Left || !hasMember(g, from) || !hasMember(g, a.addr) || from == a.addr {
 		a.store.mu.Unlock()
+		if known && !g.Left && !hasMember(g, from) {
+			a.goneNotice(from, g) // a removed member catching up: tell it it is out
+		}
 		return
 	}
 	hist := a.historyLocked(g.ID)
