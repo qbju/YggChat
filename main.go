@@ -428,7 +428,10 @@ type wire struct {
 	checked bool // local only: proof of work already verified (file header)
 }
 
-func (a *App) serveChat() {
+// listenChat opens the chat socket. It runs before any goroutine can send,
+// so a.udp is set once and never written again (it was set inside
+// serveChat's goroutine while senders polled it: a data race).
+func (a *App) listenChat() {
 	var pc net.PacketConn
 	var err error
 	if a.sys || a.vpn {
@@ -440,6 +443,10 @@ func (a *App) serveChat() {
 		log.Fatal("listen: ", err)
 	}
 	a.udp = pc
+}
+
+func (a *App) serveChat() {
+	pc := a.udp
 	buf := make([]byte, 65535)
 	for {
 		n, raddr, err := pc.ReadFrom(buf)
@@ -1627,6 +1634,7 @@ func main() {
 	a.fingerInit(*dataDir)
 	a.siteInit(*dataDir)
 	a.lanInit(*dataDir, logger)
+	a.listenChat()
 	go a.serveChat()
 	go a.sweep()
 	go a.nostrLoop()
