@@ -4,9 +4,12 @@
 package main
 
 import (
+	"encoding/json"
 	"net"
+	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // Regression: in system/VPN mode the profile site listened on [::]:80/8080 of
@@ -42,5 +45,23 @@ func TestYggOnlyListenerDropsNonYgg(t *testing.T) {
 	case <-got:
 		t.Fatal("non-Yggdrasil connection accepted")
 	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+func TestCleanLANPass(t *testing.T) {
+	p := strings.Repeat("あ", 30) // 90 bytes
+	got := cleanLANPass(p)
+	if len(got) > 64 || !utf8.ValidString(got) || got != strings.Repeat("あ", 21) {
+		t.Fatalf("got %q (%d bytes)", got, len(got))
+	}
+	// What lan.json would hold after a save/load must equal what is in use.
+	b, _ := json.Marshal(lanCfg{Pass: got})
+	var back lanCfg
+	_ = json.Unmarshal(b, &back)
+	if back.Pass != got {
+		t.Fatal("password changes across save/load")
+	}
+	if cleanLANPass("  short  ") != "short" {
+		t.Fatal("trim")
 	}
 }

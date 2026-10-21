@@ -20,6 +20,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/yggdrasil-network/yggdrasil-go/src/address"
 	"github.com/yggdrasil-network/yggdrasil-go/src/core"
@@ -85,6 +86,19 @@ func (a *App) lanApply() {
 		return
 	}
 	l.mc = mc
+}
+
+// cleanLANPass trims the LAN password to Yggdrasil's 64-byte limit (it is a
+// BLAKE2b key) without cutting a character in half: a split UTF-8 sequence was
+// saved to lan.json as U+FFFD, so after a restart the password silently
+// differed from the one other devices typed and LAN peering stopped.
+func cleanLANPass(s string) string {
+	s = strings.ToValidUTF8(strings.TrimSpace(s), "")
+	for len(s) > 64 {
+		_, n := utf8.DecodeLastRuneInString(s)
+		s = s[:len(s)-n]
+	}
+	return s
 }
 
 func isLANPeer(p core.PeerInfo) bool {
@@ -224,11 +238,7 @@ func (a *App) lanHandlers(mux *http.ServeMux) {
 			a.lan.mu.Lock()
 			a.lan.cfg.On = req.On
 			if req.Pass != nil {
-				p := strings.TrimSpace(*req.Pass)
-				if len(p) > 64 {
-					p = p[:64]
-				}
-				a.lan.cfg.Pass = p
+				a.lan.cfg.Pass = cleanLANPass(*req.Pass)
 			}
 			b, _ := json.Marshal(a.lan.cfg)
 			err := writeAtomic(a.lan.path, b)
