@@ -58,11 +58,27 @@ href="https://yggchat.surge.sh/">https://yggchat.surge.sh/</a></td>
 </tr>
 <tr class="odd">
 <td>Android</td>
-<td>APK版推奨。Termuxなら <code>yggchat-android-arm64</code></td>
+<td>APK版推奨（arm64・armv7・x86_64・x86、v0.19.2〜）。Termuxなら
+<code>yggchat-android-arm64</code></td>
 </tr>
 <tr class="even">
 <td>Linux</td>
-<td><code>./yggchat-linux-amd64</code></td>
+<td><code>./yggchat-linux-amd64</code>（Raspberry Piなどは
+<code>yggchat-linux-arm64</code> /
+<code>yggchat-linux-armv7</code>）</td>
+</tr>
+<tr class="odd">
+<td>macOS</td>
+<td><code>chmod +x yggchat-darwin-arm64</code>（Intel Macは
+<code>yggchat-darwin-amd64</code>）してターミナルから実行し、表示された
+<code>http://127.0.0.1:7780/?k=…</code>
+をブラウザで開きます（自動では開きません）。未署名なので、止められたら
+<code>xattr -d com.apple.quarantine yggchat-darwin-arm64</code></td>
+</tr>
+<tr class="even">
+<td>その他</td>
+<td>Windows on ARM <code>yggchat-windows-arm64.exe</code>、FreeBSD
+<code>yggchat-freebsd-amd64</code>（v0.19.2〜）</td>
 </tr>
 </tbody>
 </table></div>
@@ -268,11 +284,14 @@ Browser（9150）を先に起動してください。</p>
 でノードが動いていればそれにつながり、なければその場でノードを起動します（ノードのログは
 <code>データ/node.log</code> へ）。</p>
 <p><code>/help</code>
-でコマンド一覧。<code>/list</code>、<code>/open &lt;番号|名前&gt;</code>、<code>/add &lt;アドレス&gt; [名前]</code>。それ以外の入力は開いている相手に送信。受信はリアルタイムで表示されます。</p>
+でコマンド一覧。<code>/list</code>、<code>/open &lt;番号|名前&gt;</code>、<code>/add &lt;アドレス&gt; [名前]</code>、<code>/hist</code>、<code>/accept</code>、<code>/retry</code>、<code>/leave yes</code>、<code>/block yes</code>、<code>/nick</code>
+など。それ以外の入力は開いている相手に送信（「/」で始まる文は
+<code>//</code>
+と書く）。受信はリアルタイムで表示され、相手の文中の制御文字は取り除いて表示します。</p>
 </div></div>
 
 <footer><div class="wrap">
-  <span>🌲 YggChat v0.19.1 · GPL-3.0</span>
+  <span>🌲 YggChat v0.19.2 · GPL-3.0</span>
   <div class="r">
     <a href="/guide">使い方</a><a href="/security">セキュリティ</a><a href="/faq">FAQ</a><a href="/changelog">更新履歴</a>
     <a href="https://github.com/qbju/YggChat">GitHub</a><a href="https://yggchat.surge.sh/">ブラウザ版</a>

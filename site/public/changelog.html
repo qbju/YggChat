@@ -21,7 +21,7 @@
   <a class="brand" href="/"><img src="/icon.png" alt="">YggChat</a>
   <div class="links"><a class="opt" href="/guide">使い方</a><a class="opt" href="/security">セキュリティ</a><a class="opt" href="/faq">FAQ</a><a class="on opt" href="/changelog">更新履歴</a><a class="" href="/download">ダウンロード</a><a class="opt" href="https://github.com/qbju/YggChat">GitHub</a></div>
 </div></nav>
-<header class="phead"><div class="wrap"><h1>更新履歴</h1><p>最新はv0.19.1。リリースごとのファイルは<a href="https://github.com/qbju/YggChat/releases">GitHub Releases</a>にあります。</p></div></header>
+<header class="phead"><div class="wrap"><h1>更新履歴</h1><p>最新はv0.19.2。リリースごとのファイルは<a href="https://github.com/qbju/YggChat/releases">GitHub Releases</a>にあります。</p></div></header>
 <div class="wrap" style="padding:28px 22px 80px"><div class="prose" style="max-width:none"><div class="tbl"><table>
 <thead>
 <tr class="header">
@@ -31,136 +31,149 @@
 </thead>
 <tbody>
 <tr class="odd">
+<td>v0.19.2</td>
+<td>グループの配送を直しました（混雑・切断・強制終了を組み合わせたテストで見つかった取りこぼしと重複）:
+中継や履歴で同じ投稿が二重に出る／退出・削除の前後に送った投稿が一部のメンバーに届かない、または退出後もずっと再送し続ける（退出前の投稿は時刻で受け付け、退出後のものは捨てる。送れなかった分は「未送信のまま退出」と表示）／外された人が外されたことに気づかない／アプリ版がほかのメンバーの取りこぼし問い合わせに答えていない／PWAで送信直後に再読み込み・タブを閉じると消える。画面の見直し:
+最初に名前を決める画面と自分のIDの共有シート、設定を「基本・プライバシー」と折りたたみ（ネットワーク（上級）・端末移行・アプリ情報）に整理、グループ情報は操作を上に・詳細設定を折りたたみ、参加申請中の表示と取り消し、承認・拒否をトーク内で、「あなたが参加しました」「〇〇があなたを追加しました」の表示、送信中アイコンを消えるメッセージと区別、届いた人数（グループ）、ノード再起動後の自動再接続と切断表示
+など。修正: 連絡先を追加の欄に「[object
+PointerEvent]」と入る。端末チャット（CLI）を作り直し:
+相手のメッセージに含まれる制御文字で端末を操作できた問題（表示前に除去）、並行アクセスで落ちる問題、長い行で黙って終了、別のデータフォルダのノードにつなぐと新しいIDを作ってしまう問題、パスコードが画面に出る問題などを修正。グループの発言者表示、取り消し・編集・ロックの反映、<code>/leave</code>・<code>/block</code>
+を追加。新しいダウンロード: Linux arm64・armv7、Windows arm64、macOS
+amd64・arm64（未署名・表示されたURLをブラウザで開く）、FreeBSD
+amd64。APKはarm64・armv7・x86_64・x86の4種類入りに。注意:
+v0.19.1以前のメンバーは、退出した人が退出前に送った投稿でも退出の後に届くと落とすことがあります（全員の更新で直ります）。</td>
+</tr>
+<tr class="even">
 <td>v0.19.1</td>
 <td>グループのメッセージは、メンバーの1人にでも届いたら「送信済み」と表示するように（全員に届くまで「オンライン待ち」のままだった。残りの人には引き続き自動で再送）。グループの上部にメンバーの生アドレスを並べず、人数と分かる名前だけを表示するように。グループを開いたときやオンラインに戻ったときに、オンラインのメンバー（ホスト・副管理者・ほかのメンバー）から最近30件を取り寄せるように（誰か1人がオンラインなら置き配の代わりになる。ホスト・副管理者・本人以外が中継した分は「〇〇が中継」と表示）。新しいグループは過去メッセージ共有を最初からオンに、ホストが直接追加した人にも共有。PWAを複数のタブで開いたとき、1つのタブだけが動くように（別タブは「このタブで使う」で切り替え）。修正:
 記号の多いメッセージがあると参加受付時にホストが落ちる／抜けていた間のメンバー変更が直らない（ホストに問い合わせるように）／PWAで古いメッセージを消すときに未送信のグループ分まで消える／PWAで作ったグループの人数上限・バージョン／参加待ちが再送より先にタイムアウトする。</td>
 </tr>
-<tr class="even">
+<tr class="odd">
 <td>v0.19.0</td>
 <td>グループの人数上限を24〜1024人から選べるように（25人以上はメンバー一覧を分割送信・変更は差分で送信）。副管理者（承認・招待リンク・メンバーの追加削除、ホスト不在でも参加を受け付け、ホスト退出時に引き継ぎ）。投稿の軽いPoW（1対1は3ビット、リクエスト・参加は8ビット、グループはホストが選択、PoW必須化は設定で任意）。長い文章（約400字以上）を分割して送るように（PWA・Android
 VPNモードに届かなかった）。「旧式の置き配も通す」をv0.24まで延長。修正:
 パスコード設定時に再起動するとグループ・置き配設定などが消える／細工したパケットでアプリが落ちる／先にメンバーのメッセージが届くとホストが分からなくなる／外された人を戻せない／グループ写真やNostrの状態表示、公開ピアの信頼度表示、再接続後の取りこぼし、履歴共有で大量通知、新しいIDに古いグループが残る
 など22件。</td>
 </tr>
-<tr class="odd">
+<tr class="even">
 <td>v0.18.0</td>
 <td>グループ設定（ホストのみ）:
 写真の送信可否、参加の承認制（ホストが承認・拒否）、新メンバーへの過去メッセージ共有（最新30件）、グループの消えるメッセージ、参加パスワード。</td>
 </tr>
-<tr class="even">
+<tr class="odd">
 <td>v0.17.0</td>
 <td>グループの招待リンク（ホストがリンク・QRを発行、開くとホストに参加をお願いして自動で参加、リセット可）。URLスキーム
 <code>yggchat://add/…</code>・<code>yggchat://join/…</code>（Android）、<code>web+yggchat://</code>（Android・インストールしたPWA）。Androidで
 yggchat.surge.sh の招待リンクをアプリで開けるように。</td>
 </tr>
-<tr class="odd">
+<tr class="even">
 <td>v0.16.0</td>
 <td>QRコードリーダー（新しいチャットで相手のQR、端末移行で移行コードのQRをカメラで読む。Androidはカメラ権限を使用）。グループで写真を送れるように。グループのホスト（作成者）だけがメンバーを追加・削除できるように。端末移行がPWAから大きなデータを送る時に進まないことがある問題を改善（受け取り側の応答を待ってから少しずつ速度を上げて送る）。届かなかったメッセージを3・5・10秒後に再確認して、相手が見つかり次第すぐ届けるように。</td>
 </tr>
-<tr class="even">
+<tr class="odd">
 <td>v0.15.1</td>
 <td>Android版（APK）で写真の添付ができなかった問題を修正（WebViewのファイル選択を実装）。</td>
 </tr>
-<tr class="odd">
+<tr class="even">
 <td>v0.15.0</td>
 <td>端末移行：使い捨てコードでYggdrasil経由の直接転送（X25519で封をして分割送信・再送）と、パスフレーズ付きバックアップファイル。設定に「プロフィールを保存」ボタン。ドメイン欄はEnterや設定を閉じた時にも保存。PWAで新しいIDを作った直後に再読み込みすると鍵が消えることがある問題を修正。エラー表示（uiAlert）が未定義で、ドメイン確認の失敗が表示されなかった問題を修正。</td>
 </tr>
-<tr class="even">
+<tr class="odd">
 <td>v0.14.0</td>
 <td>PWA：途中までしか読み込めなかったygg.wasmがキャッシュに残ると起動できなくなる問題に対処（壊れていたらキャッシュを捨てて取り直す）。確認済みドメイン：プロフィールにドメインを入れると、相手側で「アドレス→ドメイン（本人の鍵から届いたプロフィール）」と「ドメイン→アドレス（AAAAレコード）」が一致したときだけ
 ✓付きで表示。自分で設定するときもAAAAが自分のアドレスか確認。</td>
 </tr>
-<tr class="odd">
+<tr class="even">
 <td>v0.13.9</td>
 <td>修正:
 PWAの新規インストールで置き配が既定オンにならなかった。連絡先がまだいないときにNostrリレーへ問い合わせない（PWAではエラーになっていた）。</td>
 </tr>
-<tr class="even">
+<tr class="odd">
 <td>v0.13.8</td>
 <td>PWAの更新直後に新しい画面と古いshim.jsが混ざり、新しい設定（旧式の置き配トグルなど）が動かないことがあったのを修正（新しいService
 Workerに切り替わったら自動で再読み込み）。ドメイン名で連絡先を追加（AAAAレコードがYggdrasilアドレスなら、そのアドレスと会話。DNS-over-HTTPSで引き、SOCKS5オン時はプロキシ経由）。</td>
 </tr>
-<tr class="odd">
+<tr class="even">
 <td>v0.13.7</td>
 <td>新規インストールでは置き配（Nostr）を既定オンに（既存ユーザーの設定は変えない）。「旧式の置き配も通す」トグル（既定オフ、v0.20まで）：オンでv0.12以前の相手向けに旧式の箱も送り、旧式タグも取りに行く。設定画面の説明文は各項目の
 ⓘ ボタンで開閉。</td>
 </tr>
-<tr class="even">
+<tr class="odd">
 <td>v0.13.6</td>
 <td>プロフィールサイト（ベータ、Yggdrasilの80番で自作HTMLを1ページ公開、相手のページをアプリ内で安全に表示）。グループ作成・メンバー追加でチェックボックスが表示されず選べなかった不具合を修正（スマホ／PWA）。</td>
 </tr>
-<tr class="odd">
+<tr class="even">
 <td>v0.13.5</td>
 <td>グループチャット（ベータ、文字のみ、最大20人、サーバーなしでメンバーごとに直接配送）。Tor
 / SOCKS5
 プロキシ設定（ベータ、アプリ版のみ。ピア・Nostr・公開ピア一覧をプロキシ経由に、止まっていても直接つながらない）。READMEにベータ版の注意書きを追加。</td>
 </tr>
-<tr class="even">
+<tr class="odd">
 <td>v0.13.0</td>
 <td>置き配（Nostr）を強化。宛先タグを相手ごと・日ごとに変わるペア専用の値に（連絡先以外は宛先を計算できない）、送信時刻を最大48時間ぼかし、期限もぼかし、中身の長さを段階的にそろえるパディングを追加。v0.12以前から預けられた分も受け取れます（旧タグの取得はv0.14で廃止予定）。v0.12以前の相手はv0.13からの置き配を受け取れないので、双方の更新が必要です。</td>
 </tr>
-<tr class="odd">
+<tr class="even">
 <td>v0.12.3</td>
 <td>速い回線で送信直後に配達通知が先に届くと、送ったメッセージが「送信中」のまま表示される不具合を修正。</td>
 </tr>
-<tr class="even">
+<tr class="odd">
 <td>v0.12.2</td>
 <td>ローカルUI/APIに鍵を導入。データフォルダの
 <code>ui-key</code>（所有者のみ読める）の鍵がないと使えず、同じ端末の他アプリ・他ユーザーからの操作を防ぎます。ブラウザでは起動時に表示される
 <code>?k=</code> 付きURLで開きます。</td>
 </tr>
-<tr class="odd">
+<tr class="even">
 <td>v0.12.1</td>
 <td>ローカルAPIが接続元アドレスもループバックか検証し、<code>-ui</code>
 をループバック以外にすると起動を拒否。AndroidのWebViewはアプリ自身の画面以外を開かず外部URLはブラウザへ渡し、JavaScriptブリッジはアプリの画面からしか動かないように。</td>
 </tr>
-<tr class="even">
+<tr class="odd">
 <td>v0.12</td>
 <td>Windows版がWebView2のアプリウィンドウで開くように（ブラウザ不要、ダブルクリック起動時は黒いコンソールも閉じる）。</td>
 </tr>
-<tr class="odd">
+<tr class="even">
 <td>v0.11</td>
 <td>メッセージの編集・削除、VPNの受信ファイアウォール、Twemoji同梱、スクロール修正。</td>
 </tr>
-<tr class="even">
+<tr class="odd">
 <td>v0.10</td>
 <td>LANチャット、finger。ライセンス表記（GPL-3.0-or-later）。</td>
 </tr>
-<tr class="odd">
+<tr class="even">
 <td>v0.9</td>
 <td>AndroidのVPNモード（YggChatが端末のYggdrasilになり、他アプリも
 <code>200::/7</code> へ）。</td>
 </tr>
-<tr class="even">
+<tr class="odd">
 <td>v0.8</td>
 <td>CLIチャット（<code>-cli</code>）。端末のYggdrasil（VPN型アプリ／TUN）を使うモード。Android版はアプリ自身が通知を出すように（WebViewには通知機能がないため）、画面を閉じていても受信通知が出ます。設定に「置き配（Nostr）」を追加（非推奨・既定オフ）。届かなかった文章を相手の鍵で暗号化し、使い捨て鍵で署名したNostrイベントとして公開リレーに最大7日預ける。受信側は読んだら削除イベントを出す。リレーには宛先タグ・時刻・IPが見える。写真は対象外。</td>
 </tr>
-<tr class="odd">
+<tr class="even">
 <td>v0.7.1</td>
 <td>PWAの自前入口ピアを撤去し、公開ピア <code>ygg.being.pet</code>
 のみに。</td>
 </tr>
-<tr class="even">
+<tr class="odd">
 <td>v0.7</td>
 <td>Cloudflare中継と中継メールボックス（置き配）を廃止。PWAはOrigin許可済みピアにwssで直接接続。旧メールボックスのデータはサーバー側で削除済み。</td>
 </tr>
-<tr class="odd">
+<tr class="even">
 <td>v0.6</td>
 <td>写真の送信（端末内で最大1600px・約400KB以下のJPEGに縮小し、Ygg越しに約1KBずつ分割送信、SHA-256で検証）。タップで拡大・保存。PWAの保存先をIndexedDBに移行（自動移行）。写真は中継メールボックスを使わず、相手がオンラインになったときに直接送ります。</td>
 </tr>
-<tr class="even">
+<tr class="odd">
 <td>v0.5</td>
 <td>パスコードによる履歴暗号化とロック、消えるメッセージ（会話ごと・相手にも反映）、メッセージリクエストと承認時のプロフィール共有（名前・自己紹介・絵文字アイコン）、ブロック、新しいIDの作成、通知の内容を隠す、画面のセキュリティ（Android）、中継メールボックス、テーマ（システム／ライト／ダーク）。</td>
 </tr>
-<tr class="odd">
+<tr class="even">
 <td>v0.4.2</td>
 <td>日付をまたぐとチャット画面が空になる不具合を修正。属性値のエスケープ、招待リンクの検証、受信IDとニックネームの検証、ローカルAPIのHost／Origin／Content-Type検証、鍵・履歴のアトミック書き込みと0600化。</td>
 </tr>
-<tr class="even">
+<tr class="odd">
 <td>v0.4</td>
 <td>相手がオフラインのときは「オンライン待ち」になり、双方オンラインで自動再送。</td>
 </tr>
-<tr class="odd">
+<tr class="even">
 <td>v0.3</td>
 <td>Signal/Session風UI、送信状態、QRと招待リンク、ピア管理、公式public-peers一覧、通知。</td>
 </tr>
@@ -170,7 +183,7 @@ Workerに切り替わったら自動で再読み込み）。ドメイン名で�
 </div></div>
 
 <footer><div class="wrap">
-  <span>🌲 YggChat v0.19.1 · GPL-3.0</span>
+  <span>🌲 YggChat v0.19.2 · GPL-3.0</span>
   <div class="r">
     <a href="/guide">使い方</a><a href="/security">セキュリティ</a><a href="/faq">FAQ</a><a href="/changelog">更新履歴</a>
     <a href="https://github.com/qbju/YggChat">GitHub</a><a href="https://yggchat.surge.sh/">ブラウザ版</a>
