@@ -505,7 +505,7 @@ func (a *App) featureHandlers(mux *http.ServeMux) {
 				return
 			}
 			if dom != "" {
-				ad, err := resolveYgg(dom)
+				ad, err := resolveYggFor(dom, a.addr) // any of its Ygg AAAA records
 				if err != nil {
 					http.Error(w, err.Error(), 400)
 					return

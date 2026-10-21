@@ -9,6 +9,7 @@ package main
 
 import (
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -20,10 +21,53 @@ func cleanDomain(s string) string {
 	return s
 }
 
+// Lookups a peer's profile packets can trigger: a peer flipping its claimed
+// domain on every prof made us run one DoH lookup per packet.
+var domCheck struct {
+	sync.Mutex
+	last map[string]time.Time // peer -> last lookup started
+	busy int
+}
+
+const domCheckEvery = 30 * time.Second
+const domCheckMax = 4 // concurrent lookups
+
+func domCheckStart(peer string) bool {
+	domCheck.Lock()
+	defer domCheck.Unlock()
+	if domCheck.last == nil {
+		domCheck.last = map[string]time.Time{}
+	}
+	now := time.Now()
+	if t, ok := domCheck.last[peer]; ok && now.Sub(t) < domCheckEvery || domCheck.busy >= domCheckMax {
+		return false
+	}
+	if len(domCheck.last) > 4096 {
+		for p, t := range domCheck.last {
+			if now.Sub(t) >= domCheckEvery {
+				delete(domCheck.last, p)
+			}
+		}
+	}
+	domCheck.last[peer] = now
+	domCheck.busy++
+	return true
+}
+
+func domCheckDone() {
+	domCheck.Lock()
+	domCheck.busy--
+	domCheck.Unlock()
+}
+
 func (a *App) verifyDomain(peer, dom string) {
-	ad, err := resolveYgg(dom)
+	if !domCheckStart(peer) {
+		return // checked again on a later profile (DomAt stays 0 / stale)
+	}
+	defer domCheckDone()
+	ad, err := resolveYggFor(dom, peer)
 	ok := err == nil && ad == peer
-	if err != nil && !strings.Contains(err.Error(), "AAAA") {
+	if err != nil && !isNoAAAA(err) {
 		return // lookup failed (offline, DoH blocked): keep the old result, retry next profile
 	}
 	a.store.mu.Lock()

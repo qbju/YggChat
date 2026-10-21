@@ -11,6 +11,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -31,9 +32,48 @@ func isYgg6(ip net.IP) bool {
 
 // resolveYgg returns the first Yggdrasil address among name's AAAA records.
 func resolveYgg(name string) (string, error) {
+	ads, err := resolveYggAll(name)
+	if err != nil {
+		return "", err
+	}
+	return ads[0], nil
+}
+
+// resolveYggFor is resolveYgg for checking a claim: when any of the name's
+// Yggdrasil AAAA records is want, it returns want. A domain may list several
+// Yggdrasil hosts, and DoH answers come in any order, so comparing only the
+// first record made verification fail (or flap) for all but one of them.
+func resolveYggFor(name, want string) (string, error) {
+	ads, err := resolveYggAll(name)
+	if err != nil {
+		return "", err
+	}
+	for _, ad := range ads {
+		if ad == want {
+			return ad, nil
+		}
+	}
+	return ads[0], nil
+}
+
+// noAAAAError: the name resolved, but has no Yggdrasil AAAA record (as
+// opposed to the lookup itself failing).
+type noAAAAError struct{ name string }
+
+func (e noAAAAError) Error() string {
+	return e.name + " にはYggdrasilアドレス（200::/7）のAAAAレコードがありません"
+}
+
+func noAAAA(name string) error { return noAAAAError{name} }
+
+func isNoAAAA(err error) bool { var e noAAAAError; return errors.As(err, &e) }
+
+// resolveYggAll returns every Yggdrasil address among name's AAAA records
+// (at least one, else an error).
+func resolveYggAll(name string) ([]string, error) {
 	name = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(name)), ".")
 	if len(name) > 253 || !domainRE.MatchString(name) {
-		return "", errors.New("ドメイン名ではありません")
+		return nil, errors.New("ドメイン名ではありません")
 	}
 	cl := netHTTP(10 * time.Second)
 	var lastErr error
@@ -52,35 +92,55 @@ func resolveYgg(name string) (string, error) {
 				Data string `json:"data"`
 			}
 		}
+		if r.StatusCode != 200 {
+			r.Body.Close()
+			lastErr = errors.New("DoH: " + r.Status)
+			continue
+		}
 		err = json.NewDecoder(io.LimitReader(r.Body, 64<<10)).Decode(&res)
 		r.Body.Close()
 		if err != nil {
 			lastErr = err
 			continue
 		}
+		// 0 = NOERROR, 3 = NXDOMAIN are real answers; SERVFAIL, REFUSED and
+		// the like say nothing about the name, so ask the next server instead
+		// of reporting "no AAAA" (which also un-verified a contact's domain).
+		if res.Status != 0 && res.Status != 3 {
+			lastErr = fmt.Errorf("DNS rcode %d", res.Status)
+			continue
+		}
+		var out []string
 		for _, a := range res.Answer {
 			if ip := net.ParseIP(a.Data); a.Type == 28 && isYgg6(ip) {
-				return ip.String(), nil
+				out = append(out, ip.String())
 			}
 		}
-		return "", errors.New(name + " にはYggdrasilアドレス（200::/7）のAAAAレコードがありません")
+		if len(out) == 0 {
+			return nil, noAAAA(name)
+		}
+		return out, nil
 	}
 	if !socks.On {
 		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 		defer cancel()
 		if ips, err := net.DefaultResolver.LookupIPAddr(ctx, name); err == nil {
+			var out []string
 			for _, ip := range ips {
 				if isYgg6(ip.IP) {
-					return ip.IP.String(), nil
+					out = append(out, ip.IP.String())
 				}
 			}
-			return "", errors.New(name + " にはYggdrasilアドレス（200::/7）のAAAAレコードがありません")
+			if len(out) == 0 {
+				return nil, noAAAA(name)
+			}
+			return out, nil
 		}
 	}
 	if lastErr == nil {
 		lastErr = errors.New("DNSに問い合わせできませんでした")
 	}
-	return "", lastErr
+	return nil, lastErr
 }
 
 func (a *App) resolveHandlers(mux *http.ServeMux) {

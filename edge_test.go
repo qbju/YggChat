@@ -5,7 +5,10 @@ package main
 
 import (
 	"encoding/json"
+	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -64,4 +67,52 @@ func TestCleanLANPass(t *testing.T) {
 	if cleanLANPass("  short  ") != "short" {
 		t.Fatal("trim")
 	}
+}
+
+func fakeDoH(t *testing.T, body string) string {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/dns-json")
+		io.WriteString(w, body)
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL
+}
+
+// Regression: a domain with several Yggdrasil AAAA records verified only for
+// the first one in the answer, and a SERVFAIL from the first DoH server was
+// reported as "no AAAA" (un-verifying the contact) instead of trying the next.
+func TestResolveYggFor(t *testing.T) {
+	old := dohServers
+	defer func() { dohServers = old }()
+	two := `{"Status":0,"Answer":[{"type":5,"data":"x.example."},{"type":28,"data":"200::a"},{"type":28,"data":"2001:db8::1"},{"type":28,"data":"201::b"}]}`
+	dohServers = []string{fakeDoH(t, `{"Status":2}`), fakeDoH(t, two)}
+	ad, err := resolveYggFor("x.example", "201::b")
+	if err != nil || ad != "201::b" {
+		t.Fatalf("got %q %v", ad, err)
+	}
+	if ad, _ := resolveYgg("x.example"); ad != "200::a" {
+		t.Fatalf("first: %q", ad)
+	}
+	dohServers = []string{fakeDoH(t, `{"Status":0,"Answer":[{"type":28,"data":"2001:db8::1"}]}`)}
+	if _, err := resolveYggFor("x.example", "201::b"); !isNoAAAA(err) {
+		t.Fatalf("want no-AAAA, got %v", err)
+	}
+	dohServers = []string{fakeDoH(t, `{"Status":2}`)}
+	if _, err := resolveYggFor("x.example", "201::b"); err == nil || isNoAAAA(err) {
+		t.Fatalf("SERVFAIL must be a lookup failure, got %v", err)
+	}
+}
+
+func TestDomCheckRateLimit(t *testing.T) {
+	if !domCheckStart("200::77") {
+		t.Fatal("first check refused")
+	}
+	domCheckDone()
+	if domCheckStart("200::77") {
+		t.Fatal("second check within 30 s allowed")
+	}
+	if !domCheckStart("200::78") {
+		t.Fatal("other peer refused")
+	}
+	domCheckDone()
 }
