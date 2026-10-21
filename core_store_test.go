@@ -102,7 +102,11 @@ func TestWrongPasscodeAndTamper(t *testing.T) {
 	// Flip a ciphertext byte on disk: a fresh load must refuse it.
 	b, _ := os.ReadFile(p)
 	i := strings.Index(string(b), `"ct":"`) + 10
-	b[i] ^= 1
+	if b[i] == 'A' { // stay valid base64, change the bytes
+		b[i] = 'B'
+	} else {
+		b[i] = 'A'
+	}
 	os.WriteFile(p, b, 0600)
 	s2 := &Store{path: p}
 	s2.load()
@@ -111,5 +115,29 @@ func TestWrongPasscodeAndTamper(t *testing.T) {
 	}
 	if err := s.unlock("pass1234"); err != nil || s.Nick != "me" {
 		t.Fatalf("unlock: %v %q", err, s.Nick)
+	}
+}
+
+// An envelope damaged so badly it doesn't parse must not be taken for an
+// empty plaintext store and overwritten.
+func TestBrokenEnvelopeKept(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "chat.json")
+	s := &Store{path: p}
+	s.fix()
+	if err := s.setPass("", "pass1234"); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(p)
+	i := strings.Index(string(b), `"ct":"`) + 10
+	b[i] = '!'
+	os.WriteFile(p, b, 0600)
+	s2 := &Store{path: p}
+	s2.load()
+	s2.fix()
+	s2.save()
+	m, _ := filepath.Glob(p + ".corrupt-*")
+	if len(m) != 1 {
+		t.Fatal("damaged encrypted store overwritten without a copy")
 	}
 }

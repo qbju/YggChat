@@ -94,7 +94,19 @@ func (s *Store) load() {
 		s.locked, s.env = true, &env
 		return
 	}
-	if err := json.Unmarshal(b, s); err != nil {
+	var keys map[string]json.RawMessage
+	_ = json.Unmarshal(b, &keys)
+	_, hasCT := keys["ct"]
+	_, hasKDF := keys["kdf"]
+	err = nil
+	if hasCT || hasKDF {
+		// An encrypted store we can't parse would otherwise read as an empty
+		// plaintext one (unknown fields are ignored) and be overwritten.
+		err = errors.New("damaged encrypted store")
+	} else {
+		err = json.Unmarshal(b, s)
+	}
+	if err != nil {
 		// A damaged file would be overwritten by the first save and every
 		// chat lost: keep a copy and start from whatever could be read.
 		bak := fmt.Sprintf("%s.corrupt-%d", s.path, time.Now().Unix())
