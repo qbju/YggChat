@@ -427,8 +427,10 @@
     save(); emit('contact', gView(g)); gSys(g, (nick || nameOf(src)) + ' が' + how); gMembers(g, [src], [], false);
     if (g.set && g.set.hi) { const h = historyOf(g.id); if (h.length) sendHistory(src, g.id, h); }
   }
+  const histHeard = {}; // gid -> last history answer from a member (keys are only our groups)
   async function onHistory(src, w) {
     const g = st.groups[w.g], by = norm(String(w.by || ''));
+    if (g && g.members.includes(src)) histHeard[g.id] = Date.now(); // an answer reached us (syncGroup's third ask)
     // Any member may relay what it has (v0.19.1); copies not from the sender, host or an admin show who relayed them.
     if (!g || g.left || !g.members.includes(src) || !by || !isYgg(by) || by === addr || !w.text || typeof w.text !== 'string' || w.text.length > 2000 || !/^[0-9A-Za-z_-]{1,40}$/.test(String(w.id)) || (w.ttl | 0) < 0) return;
     // An ordinary member relays only when we asked it (ghq); the host and admins also send history to new members unasked (v0.19.3).
@@ -477,6 +479,9 @@
     for (const x of g.members.slice().sort(() => Math.random() - 0.5)) add(x);
     // Their answer (ghs) is taken for a while. Asked twice a few seconds apart: members that aren't contacts get no
     // hello first, so the first packet to one often goes nowhere while its route is looked up (answers are rate-limited).
+    // No answer at all after both (packets toward a node that just came back can be lost for half a minute): once more
+    // after the answerers' 20 s limit (as Go).
+    if (ask.length) { const t0 = Date.now(); setTimeout(() => { const g2 = st.groups[gid]; if ((histHeard[gid] || 0) >= t0 || !g2 || g2.left || g2.req || locked) return; for (const x of ask) if (g2.members.includes(x)) { noteHistAsk(gid, x); send(x, { t: 'ghq', g: gid, ts: since }); } }, 24000); }
     for (const x of ask) { noteHistAsk(gid, x); send(x, { t: 'ghq', g: gid, ts: since }); setTimeout(() => { if (st.groups[gid] && !st.groups[gid].left) { noteHistAsk(gid, x); send(x, { t: 'ghq', g: gid, ts: since }); } }, 4000); }
     // History doesn't tell us about membership changes made while we were away: ask the host and admins for the info too (as Go).
     const mgr = [g.owner].concat(g.admins || []).filter(x => x && x !== addr && g.members.includes(x)).slice(0, 4);
@@ -715,14 +720,15 @@
     for (let r = 0; r < 3; r++) setTimeout(async () => { let n = 0; for (const m of to) for (const p of ps) { send(m, p); if (++n % 64 === 0) await sleep(20); } }, r * 2000);
   }
   // Group info that may not have arrived (as groupinv.go): the info sent on create/add is plain datagrams, and a
-  // member that just came online often misses all three rounds. Sent again at 10/30/90 s and on its hello until
+  // member that just came online often misses all three rounds. Sent again at about 8/28/58/118 s and on its hello until
   // any packet about the group comes from it. In memory, at most a week.
   const invAt = {}, invSent = {};
   function noteInvited(gid, ms) {
     if (Object.keys(invAt).length > 4096) for (const x in invAt) { delete invAt[x]; delete invSent[x]; }
     ms = (ms || []).filter(m => m && m !== addr); if (!ms.length) return;
     for (const m of ms) { const k = gid + '|' + m; if (!invAt[k]) invAt[k] = Date.now(); invSent[k] = Date.now(); }
-    let i = 0; const step = () => { if (i >= 3) return; setTimeout(() => { let left = 0; for (const m of ms) if (pushInvite(gid, m)) left++; i++; if (left) step(); }, [10000, 30000, 90000][i]); };
+    const gaps = [8000, 20000, 30000, 60000];
+    let i = 0; const step = () => { if (i >= gaps.length) return; setTimeout(() => { let left = 0; for (const m of ms) if (pushInvite(gid, m)) left++; i++; if (left) step(); }, gaps[i]); };
     step();
   }
   function invHeard(gid, peer) { const k = gid + '|' + peer; if (invAt[k]) { delete invAt[k]; delete invSent[k]; } }
@@ -730,7 +736,7 @@
     const k = gid + '|' + peer, at = invAt[k];
     if (at && Date.now() - at > 7 * 86400000) { invHeard(gid, peer); return false; }
     if (!at) return false;
-    if (Date.now() - (invSent[k] || 0) < 10000) return true;
+    if (Date.now() - (invSent[k] || 0) < 8000) return true;
     invSent[k] = Date.now();
     const g = st.groups[gid];
     if (!g || g.left || locked || !canMng(g, addr) || !g.members.includes(peer)) { invHeard(gid, peer); return false; }

@@ -70,7 +70,7 @@ func TestGroupInfoResentUntilHeard(t *testing.T) {
 		t.Fatal("no info sent")
 	}
 	inv.mu.Lock()
-	inv.sent[g.ID+"|"+tMem] = time.Time{} // as if 10 s had passed
+	inv.sent[g.ID+"|"+tMem] = time.Time{} // as if 8 s had passed
 	inv.sent[g.ID+"|"+tAdm] = time.Time{}
 	inv.mu.Unlock()
 	invHeard(g.ID, tAdm) // tAdm asked something about the group: it has it
@@ -82,7 +82,7 @@ func TestGroupInfoResentUntilHeard(t *testing.T) {
 	if n := len(pc.sent(tAdm, "gi")); n != n0 {
 		t.Fatalf("re-sent to a member we heard from: %d", n)
 	}
-	h.pushInvites(tMem) // within 10 s: held back
+	h.pushInvites(tMem) // within 8 s: held back
 	if n := len(pc.sent(tMem, "gi")); n != n0+1 {
 		t.Fatalf("re-sent too often: %d", n)
 	}
@@ -105,5 +105,30 @@ func TestSyncGroupAsksInfo(t *testing.T) {
 	time.Sleep(4500 * time.Millisecond)
 	if len(pc.sent(tHost, "gq")) != 2 {
 		t.Fatalf("second gq: %d", len(pc.sent(tHost, "gq")))
+	}
+}
+
+// No history answer at all after the two asks: catch-up asks once more after
+// the answerers' 20 s limit; an answer that came in holds it back (r2-matrix G2).
+func TestSyncGroupReasksWhenNothingCame(t *testing.T) {
+	old := histReask
+	histReask = 5 * time.Second
+	defer func() { histReask = old }()
+	gid := "abab7777abab7777"
+	b, pc := tAppPC(t, tMem)
+	b.store.Groups[gid] = Group{ID: gid, Name: "G", Members: cleanMembers([]string{tHost, tMem, tAdm}, ""), Owner: tHost, Admins: []string{tAdm}}
+	b.syncGroup(gid)
+	time.Sleep(5500 * time.Millisecond)
+	if n := len(pc.sent(tHost, "ghq")); n != 3 {
+		t.Fatalf("ghq to host after silence: %d, want 3", n)
+	}
+	gid2 := "abab8888abab8888"
+	b.store.Groups[gid2] = Group{ID: gid2, Name: "G2", Members: cleanMembers([]string{tHost, tMem, tAdm}, ""), Owner: tHost, Admins: []string{tAdm}}
+	b.syncGroup(gid2)
+	time.Sleep(1 * time.Second)
+	noteHistHeard(gid2)
+	time.Sleep(4500 * time.Millisecond)
+	if n := len(pc.sent(tHost, "ghq")); n != 3+2 {
+		t.Fatalf("re-asked although an answer came: %d", n)
 	}
 }

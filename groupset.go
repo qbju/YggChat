@@ -298,6 +298,9 @@ func utf8Start(b byte) bool { return b&0xc0 != 0x80 }
 
 // onHistory stores one history message from the host. Caller holds a.store.mu; released here.
 func (a *App) onHistory(from string, w wire, g Group, known bool) {
+	if known && hasMember(g, from) {
+		noteHistHeard(g.ID) // an answer reached us (syncGroup's third ask)
+	}
 	by, ok := yggAddr(w.By)
 	// Any member may relay what it has (it stands in as the mailbox for
 	// members who were away); only the sender's own copy and the host's or
@@ -446,7 +449,24 @@ func (a *App) groupSetHandlers(mux *http.ServeMux) {
 var (
 	histReqMu   sync.Mutex
 	histReqSeen = map[string]int64{}
+	histHeard   = map[string]time.Time{} // gid -> last history answer from a member
+	histReask   = 24 * time.Second       // past the answerers' 20 s limit
 )
+
+func noteHistHeard(gid string) {
+	histReqMu.Lock()
+	if len(histHeard) > 4096 {
+		histHeard = map[string]time.Time{}
+	}
+	histHeard[gid] = time.Now()
+	histReqMu.Unlock()
+}
+
+func histHeardSince(gid string, t time.Time) bool {
+	histReqMu.Lock()
+	defer histReqMu.Unlock()
+	return !histHeard[gid].Before(t)
+}
 
 func (a *App) onHistReq(from string, w wire, g Group, known bool) {
 	if !known || g.Left || !hasMember(g, from) || !hasMember(g, a.addr) || from == a.addr {
@@ -543,6 +563,28 @@ func (a *App) syncGroup(gid string) {
 	// contacts get no hello first, so the first packet to one often goes
 	// nowhere while its route is looked up (answers are rate-limited), v0.19.3.
 	if len(ask) > 0 {
+		// No answer at all after both asks (packets toward a node that just
+		// came back can be lost for half a minute, and the answers are
+		// rate-limited to one per 20 s): ask once more (r2-matrix G2).
+		t0 := time.Now()
+		time.AfterFunc(histReask, func() {
+			if histHeardSince(gid, t0) {
+				return
+			}
+			a.store.mu.Lock()
+			g, ok := a.store.Groups[gid]
+			still := ok && !g.Left && !g.Req && !a.store.locked
+			a.store.mu.Unlock()
+			if !still {
+				return
+			}
+			for _, x := range ask {
+				if hasMember(g, x) {
+					noteHistAsk(gid, x)
+					a.sendWire(x, wire{T: "ghq", G: gid, TS: since})
+				}
+			}
+		})
 		time.AfterFunc(4*time.Second, func() {
 			a.store.mu.Lock()
 			g, ok := a.store.Groups[gid]

@@ -7,7 +7,7 @@
 // being looked up) often misses all three and then never learns it is in the
 // group: it doesn't take part in catch-up, and posts reach it only as
 // message requests. So the manager remembers whom it hasn't heard from in
-// that group yet and sends the info again a little later, and whenever that
+// that group yet and sends the info again a few times over two minutes, and whenever that
 // member's node says hello (it reached us). Hearing any packet about the
 // group from the member settles it. Kept in memory only; at most a week.
 package main
@@ -20,10 +20,12 @@ import (
 const (
 	invKeep  = 7 * 86400 // seconds
 	invMax   = 4096      // remembered (gid, member) pairs
-	invEvery = 10 * time.Second
+	invEvery = 8 * time.Second
 )
 
-var invRetry = []time.Duration{10 * time.Second, 30 * time.Second, 90 * time.Second}
+// Gaps between the re-sends (at about 8, 28, 58 and 118 s). Losses toward a
+// node that just (re)started can last well over half a minute (r2-matrix G4/G7).
+var invRetry = []time.Duration{8 * time.Second, 20 * time.Second, 30 * time.Second, 60 * time.Second}
 
 var inv = struct {
 	mu   sync.Mutex
