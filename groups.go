@@ -677,7 +677,11 @@ func (a *App) onGroupCtl(from string, w wire) {
 		return
 	case "gjn":
 		host, waiting := a.joinHostLocked(w.G)
+		if waiting && host == from && staleJoinAnswer(a, w.G, w) {
+			waiting = false // answers an older request without the password: keep waiting for ours
+		}
 		if waiting && host == from {
+			joinAttempt(a, w.G, true) // answered: stop re-sending this request
 			if w.K == "wait" {
 				a.setJoinLocked(w.G, host, joinApproveWait) // approval pending: keep listening for the host's gi
 			} else {
