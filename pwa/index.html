@@ -1982,6 +1982,7 @@ function renderMessages(){
       if(inGroup && /^.+ が参加を申請しています$/.test(m.sys)){
         const p = reqFor(gc, m, reqUsed);
         if(p) btns = '<div class="sys-btns"><button class="btn-accent sys-ok" data-addr="' + escapeHtml(p.addr) + '">承認</button><button class="sys-no btn-danger" data-addr="' + escapeHtml(p.addr) + '">拒否</button></div>';
+        else if(!gc.left && (gc.owner === state.addr || (gc.admins || []).includes(state.addr))) t += '（対応済み）'; // the buttons just vanished before
       }
       html += '<div class="sys-line">' + escapeHtml(t) + btns + '</div>';
       continue;
