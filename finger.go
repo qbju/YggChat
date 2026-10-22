@@ -43,6 +43,54 @@ type fingerState struct {
 	waitMu  sync.Mutex
 	wait    map[string]chan wire
 	sem     chan struct{}
+	busy    map[string]int // open connections per peer (fingerPeerKey)
+}
+
+// fingerPerPeer caps one peer's share of the 8 slots, so a single node
+// holding connections open for the 10 s deadline can't lock everyone else
+// out (v0.19.3).
+const fingerPerPeer = 2
+
+// fingerPeerKey groups a client by its Yggdrasil node: 200::/8 addresses are
+// one per key, 300::/8 hand each key a /64.
+func fingerPeerKey(ra net.Addr) string {
+	ta, _ := ra.(*net.TCPAddr)
+	if ta == nil || len(ta.IP) != 16 {
+		return ""
+	}
+	ip := ta.IP
+	if ip[0] == 0x03 {
+		return net.IP(append(append([]byte{}, ip[:8]...), make([]byte, 8)...)).String()
+	}
+	return ip.String()
+}
+
+// fingerTake claims a slot for peer k; fingerDone gives it back.
+func (f *fingerState) fingerTake(k string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.busy == nil {
+		f.busy = map[string]int{}
+	}
+	if f.busy[k] >= fingerPerPeer {
+		return false
+	}
+	select {
+	case f.sem <- struct{}{}:
+	default:
+		return false
+	}
+	f.busy[k]++
+	return true
+}
+
+func (f *fingerState) fingerDone(k string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	<-f.sem
+	if f.busy[k]--; f.busy[k] <= 0 {
+		delete(f.busy, k)
+	}
 }
 
 func cleanPlan(s string, max int) string {
@@ -151,12 +199,12 @@ func (a *App) fingerListen() {
 				time.Sleep(200 * time.Millisecond)
 				continue
 			}
-			select {
-			case a.fing.sem <- struct{}{}:
-				go func() { a.fingerServe(c); <-a.fing.sem }()
-			default:
+			k := fingerPeerKey(c.RemoteAddr())
+			if !a.fing.fingerTake(k) {
 				c.Close()
+				continue
 			}
+			go func() { a.fingerServe(c); a.fing.fingerDone(k) }()
 		}
 	}()
 }
