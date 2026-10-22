@@ -152,6 +152,7 @@ func (s *Store) unlock(pass string) error {
 		return err
 	}
 	s.key, s.salt, s.locked, s.env = key, s.env.Salt, false, nil
+	s.replayJournalLocked()
 	s.requeueAfterRestart()
 	return nil
 }
@@ -200,10 +201,7 @@ func (s *Store) lockNow() error {
 	}
 	// Lock exactly what we hold now: re-reading the file after a failed
 	// write would lock (and later unlock) an older history.
-	b, err := s.encode()
-	if err == nil {
-		err = writeAtomic(s.path, b)
-	}
+	b, err := s.writeSnapshotLocked()
 	if err != nil {
 		return fmt.Errorf("保存できませんでした: %v", err)
 	}
@@ -224,6 +222,7 @@ func (s *Store) resetData() {
 	s.Contacts, s.Messages, s.Blocked, s.Groups, s.Ctl = nil, nil, nil, nil, nil
 	s.NostrOn, s.NostrRelays, s.NostrLegacy, s.PowStrict = false, nil, false, false
 	s.Joins, s.Gone, s.Early, s.GDel = nil, nil, nil, nil
+	s.JGen = ""
 }
 
 // loadData replaces all saved fields with the JSON b (every field, so new

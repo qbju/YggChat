@@ -106,6 +106,9 @@ type Store struct {
 	env      *envelope
 	dirty    bool
 	saveT    *time.Timer
+	jn       int                // journal entries since the last full save (journal.go)
+	jbytes   int64              // ... and their size
+	jT       *time.Timer        // full save after journalEvery
 	Nick     string             `json:"nick"`
 	Bio      string             `json:"bio,omitempty"`
 	Avatar   string             `json:"avatar,omitempty"`
@@ -135,6 +138,8 @@ type Store struct {
 	// Group posts that must not (re)appear: unsent / deleted for everyone,
 	// or deleted here ("gid/author/postID", groupunsend.go).
 	GDel map[string]gTomb `json:"gdel,omitempty"`
+	// Generation of this file; journal lines of another one are stale (journal.go).
+	JGen string `json:"jgen,omitempty"`
 }
 
 func (s *Store) save() { _ = s.saveErr() }
@@ -146,10 +151,7 @@ func (s *Store) saveErr() error {
 	if s.locked {
 		return nil
 	}
-	b, err := s.encode()
-	if err == nil {
-		err = writeAtomic(s.path, b)
-	}
+	_, err := s.writeSnapshotLocked()
 	if err != nil {
 		s.dirty = true
 		log.Printf("store: save failed: %v", err)
@@ -326,6 +328,44 @@ type App struct {
 	lan      *lanState
 }
 
+// serveState answers /api/state. The reply is encoded under the store lock
+// and written after it: with a long history it is many MB, and a client that
+// stops reading (a frozen WebView, a stalled socket) used to hold the lock
+// and freeze the whole node, receiving included (r2).
+func (a *App) serveState(w http.ResponseWriter, r *http.Request) {
+	b := a.stateJSON()
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(b)
+}
+
+// stateJSON is the /api/state reply.
+func (a *App) stateJSON() []byte {
+	a.store.mu.Lock()
+	defer a.store.mu.Unlock()
+	peers := a.upPeers()
+	var v any
+	if a.store.locked {
+		v = map[string]any{"locked": true, "addr": a.addr, "peers": peers, "platform": "native"}
+	} else {
+		blocked := []string{}
+		for b := range a.store.Blocked {
+			blocked = append(blocked, b)
+		}
+		sort.Strings(blocked)
+		v = map[string]any{
+			"addr": a.addr, "pubkey": hex.EncodeToString(a.pub()), "system": a.sys, "vpn": a.vpn,
+			"nick": a.store.Nick, "bio": a.store.Bio, "avatar": a.store.Avatar, "domain": a.store.Domain,
+			"contacts": a.contactsViewLocked(), "messages": a.visibleMessagesLocked(), "peers": peers, "platform": "native",
+			"locked": false, "haspass": a.store.key != nil, "blocked": blocked,
+			"nostr": a.nostrStateLocked(), "socks": a.socksState(), "powstrict": a.store.PowStrict,
+			"joins": a.joinsViewLocked(),
+		}
+	}
+	var buf bytes.Buffer
+	json.NewEncoder(&buf).Encode(v) // (Encoder: same output as before, trailing newline)
+	return buf.Bytes()
+}
+
 func (a *App) broadcast(kind string, v any) {
 	b, _ := json.Marshal(map[string]any{"type": kind, "data": v})
 	a.subMu.Lock()
@@ -377,7 +417,13 @@ func (a *App) addMessageErr(m Message) error {
 		a.store.Contacts[m.Peer] = c
 		cb = &c
 	}
-	if err := a.store.saveErr(); err != nil && !m.Out && m.Sys == "" {
+	var err error
+	if !m.Out && m.Sys == "" {
+		err = a.store.journalLocked(m, cb) // durable without rewriting the whole history (journal.go)
+	} else {
+		err = a.store.saveErr()
+	}
+	if err != nil && !m.Out && m.Sys == "" {
 		for i := len(a.store.Messages) - 1; i >= 0; i-- {
 			if x := a.store.Messages[i]; x.Peer == m.Peer && x.ID == m.ID && x.From == m.From && !x.Out {
 				a.store.Messages = append(a.store.Messages[:i], a.store.Messages[i+1:]...)
@@ -710,11 +756,11 @@ var (
 )
 
 func strangerOK(from string) bool {
-	now := time.Now().UnixMilli()
+	now := monoMs() // not wall time: a clock set back must not freeze the limiter (clock.go)
 	cut := now - 60000
 	trim := func(ts []int64) []int64 {
 		i := 0
-		for i < len(ts) && ts[i] <= cut {
+		for i < len(ts) && (ts[i] <= cut || ts[i] > now) {
 			i++
 		}
 		return ts[i:]
@@ -1275,29 +1321,7 @@ func (a *App) httpHandlers(mux *http.ServeMux) {
 	sub, _ := fs.Sub(webFS, "web")
 	mux.Handle("/", http.FileServer(http.FS(sub)))
 	mux.HandleFunc("/twemoji/", twemojiHandler)
-	mux.HandleFunc("/api/state", func(w http.ResponseWriter, r *http.Request) {
-		a.store.mu.Lock()
-		defer a.store.mu.Unlock()
-		peers := a.upPeers()
-		w.Header().Set("Content-Type", "application/json")
-		if a.store.locked {
-			json.NewEncoder(w).Encode(map[string]any{"locked": true, "addr": a.addr, "peers": peers, "platform": "native"})
-			return
-		}
-		blocked := []string{}
-		for b := range a.store.Blocked {
-			blocked = append(blocked, b)
-		}
-		sort.Strings(blocked)
-		json.NewEncoder(w).Encode(map[string]any{
-			"addr": a.addr, "pubkey": hex.EncodeToString(a.pub()), "system": a.sys, "vpn": a.vpn,
-			"nick": a.store.Nick, "bio": a.store.Bio, "avatar": a.store.Avatar, "domain": a.store.Domain,
-			"contacts": a.contactsViewLocked(), "messages": a.visibleMessagesLocked(), "peers": peers, "platform": "native",
-			"locked": false, "haspass": a.store.key != nil, "blocked": blocked,
-			"nostr": a.nostrStateLocked(), "socks": a.socksState(), "powstrict": a.store.PowStrict,
-			"joins": a.joinsViewLocked(),
-		})
-	})
+	mux.HandleFunc("/api/state", a.serveState)
 	mux.HandleFunc("/api/send", func(w http.ResponseWriter, r *http.Request) {
 		var req struct{ To, Text, Retry, Img string }
 		if r.Method != "POST" || json.NewDecoder(http.MaxBytesReader(w, r.Body, 2<<20)).Decode(&req) != nil {
@@ -1655,6 +1679,7 @@ func main() {
 	}
 	if !st.locked {
 		st.fix()
+		st.replayJournalLocked()
 	} else {
 		st.Contacts, st.Blocked, st.Groups = map[string]Contact{}, map[string]bool{}, map[string]Group{}
 	}
@@ -1668,6 +1693,9 @@ func main() {
 	}
 	// Messages left "sending" by a previous run never got an ack.
 	st.requeueAfterRestart()
+	if !*cliMode {
+		flushOnSignal(st)
+	}
 	go func() {
 		last := -1
 		for range time.Tick(3 * time.Second) {
@@ -1702,6 +1730,9 @@ func main() {
 		tick := 0
 		for range time.Tick(20 * time.Second) {
 			tick++
+			if tick%180 == 1 {
+				go a.pruneCopies() // stale group copies, hourly (copyprune.go)
+			}
 			if a.upPeers() == 0 {
 				continue
 			}

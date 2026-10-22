@@ -208,13 +208,15 @@ func noteHistAsk(gid, peer string) {
 	if len(histAsk.at) > 4096 {
 		histAsk.at = map[string]int64{}
 	}
-	histAsk.at[gid+"|"+peer] = time.Now().Unix()
+	histAsk.at[gid+"|"+peer] = monoMs()
 }
 
 func histAsked(gid, peer string) bool {
 	histAsk.Lock()
 	defer histAsk.Unlock()
-	return time.Now().Unix()-histAsk.at[gid+"|"+peer] <= histAskTTL
+	t, ok := histAsk.at[gid+"|"+peer]
+	now := monoMs()
+	return ok && now >= t && now-t <= histAskTTL*1000
 }
 
 // histExp is when a relayed post expires: its own timer, and the group's

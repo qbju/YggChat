@@ -481,7 +481,7 @@ func (a *App) onGroupMsg(from string, w wire, img string) bool {
 		return false
 	}
 	g, known := a.store.Groups[w.G]
-	ask, late := false, false
+	ask, late, stubbed := false, false, false
 	if !known {
 		// A group we've never heard of is a message request: it needs the
 		// request proof of work (and PowStrict) before anything is stored,
@@ -517,7 +517,7 @@ func (a *App) onGroupMsg(from string, w wire, img string) bool {
 		c, ok = a.store.Contacts[from]
 		g = Group{ID: w.G, Name: "グループ", Members: cleanMembers([]string{from}, a.addr), Req: !(ok && c.Shared && !c.Req), Stub: true}
 		a.store.Groups[w.G] = g
-		ask = true
+		ask, stubbed = true, true
 	} else if g.Left {
 		// We're out: ack and drop so the sender stops retrying; if we left
 		// ourselves and they missed it, tell them again (v0.19.2).
@@ -576,7 +576,9 @@ func (a *App) onGroupMsg(from string, w wire, img string) bool {
 	if ttl < 0 || ttl > 4*7*86400 {
 		ttl = 0
 	}
-	a.store.save()
+	if stubbed {
+		a.store.save() // only a new placeholder group needs it: a post (or a retried duplicate) used to rewrite the whole store here too (r2)
+	}
 	a.store.mu.Unlock()
 	if !known {
 		a.broadcast("contact", groupView(g))

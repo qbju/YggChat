@@ -165,6 +165,19 @@ func (a *App) pwLimited(from string, failed bool) bool {
 	}
 	f := a.pwFails[from]
 	if f == nil || time.Since(f.at) > 10*time.Minute {
+		if f == nil && len(a.pwFails) >= 4096 {
+			// One entry per address that ever tried: drop the expired ones
+			// so join attempts from ever new addresses can't grow it
+			// without end (the global PBKDF2 cap still limits guessing).
+			for k, v := range a.pwFails {
+				if time.Since(v.at) > 10*time.Minute {
+					delete(a.pwFails, k)
+				}
+			}
+			if len(a.pwFails) >= 16384 {
+				a.pwFails = map[string]*pwFail{}
+			}
+		}
 		f = &pwFail{at: time.Now()}
 		a.pwFails[from] = f
 	}
@@ -471,10 +484,10 @@ func (a *App) onHistReq(from string, w wire, g Group, known bool) {
 	hist := a.historyLocked(g.ID)
 	dels := a.gdelWiresLocked(g.ID)
 	a.store.mu.Unlock()
-	now := time.Now().Unix()
+	now := monoMs() // monotonic: a clock set back must not silence us (clock.go)
 	histReqMu.Lock()
 	k := from + "/" + g.ID
-	if t := histReqSeen[k]; now-t < 20 {
+	if t, ok := histReqSeen[k]; ok && now >= t && now-t < 20000 {
 		histReqMu.Unlock()
 		return
 	}
