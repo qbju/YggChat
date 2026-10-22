@@ -379,6 +379,7 @@ func (a *App) onHistory(from string, w wire, g Group, known bool) {
 	}
 	if m.TS <= 0 || m.TS > time.Now().Unix()+300 {
 		m.TS = time.Now().Unix()
+		m.Sg = "" // a clamped time no longer matches what was signed: relayed with it, others would drop it as forged
 	}
 	// The group's timer applies to relayed posts too, counted from when they were posted (v0.19.3).
 	exp, live := histExp(g, m.TS, w.TTL)

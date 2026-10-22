@@ -15,6 +15,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/url"
 	"os"
@@ -103,8 +104,20 @@ func readLoop(onPacket js.Value) {
 			continue
 		}
 		src := net.IP(append([]byte(nil), p[8:24]...)).String()
-		onPacket.Invoke(src, string(u[8:ulen]))
+		deliverPacket(onPacket, src, string(u[8:ulen]))
 	}
+}
+
+// deliverPacket hands one datagram to the page. A JavaScript exception in the
+// handler panics inside Invoke; unrecovered it ended the whole Go program (the
+// node went silent until a reload), so one bad packet could stop it.
+func deliverPacket(onPacket js.Value, src, payload string) {
+	defer func() {
+		if r := recover(); r != nil {
+			println("yggchat: packet handler:", fmt.Sprint(r))
+		}
+	}()
+	onPacket.Invoke(src, payload)
 }
 
 // yggStart(privKeyHex|"", peers[], onPacket(src, json)) -> {addr, key}
@@ -226,6 +239,7 @@ func pub(this js.Value, args []js.Value) any {
 func sign(this js.Value, args []js.Value) any {
 	return hex.EncodeToString(ed25519.Sign(priv, []byte(args[0].String())))
 }
+
 // yggVerify(addr, pkHex, msg, sigB64) -> bool: sigB64 (base64, no padding)
 // is pk's Ed25519 signature of msg and pk belongs to addr (signed group
 // posts, groupssig.go; v0.19.3).
