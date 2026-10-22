@@ -43,7 +43,7 @@
   const idbPut = (k, v) => idbDo(db => new Promise((res, rej) => { const t = db.transaction('kv', 'readwrite'); t.objectStore('kv').put(v, k); t.oncomplete = res; t.onerror = () => rej(t.error); t.onabort = () => rej(t.error || new DOMException('transaction aborted', 'AbortError')); }));
   let raw = {};
   const outer = { key: '', peers: null, enc: null };
-  const blank = () => ({ nick: 'anon', bio: '', avatar: '', contacts: {}, messages: [], blocked: {}, nostrOn: true, nostrRelays: [], ctl: [], groups: {}, powStrict: false, joins: {}, gone: {}, early: {}, gdel: {} });
+  const blank = () => ({ nick: 'anon', bio: '', avatar: '', contacts: {}, messages: [], blocked: {}, nostrOn: true, nostrRelays: [], ctl: [], groups: {}, powStrict: false, joins: {}, gone: {}, early: {}, gdel: {}, gdelh: {}, nrecall: [] });
   let st = blank();
   let locked = false;
   let aesKey = null; // CryptoKey while unlocked with a passcode
@@ -93,7 +93,7 @@
     if (!outer.peers) outer.peers = RECOMMENDED.slice();
     locked = !!outer.enc;
     if (!locked) restoreOutbox(raw);
-    if (!locked) { Object.assign(st, { nick: raw.nick || 'anon', bio: raw.bio || '', avatar: raw.avatar || '', contacts: raw.contacts || {}, messages: raw.messages || [], blocked: raw.blocked || {}, domain: raw.domain || undefined, nostrOn: raw.key ? !!raw.nostrOn : true, nostrLegacy: !!raw.nostrLegacy, nostrRelays: raw.nostrRelays || [], ctl: raw.ctl || [], groups: raw.groups || {}, powStrict: !!raw.powStrict, joins: raw.joins || {}, gone: raw.gone || {}, early: raw.early || {}, gdel: raw.gdel || {} }); migrate(); }
+    if (!locked) { Object.assign(st, { nick: raw.nick || 'anon', bio: raw.bio || '', avatar: raw.avatar || '', contacts: raw.contacts || {}, messages: raw.messages || [], blocked: raw.blocked || {}, domain: raw.domain || undefined, nostrOn: raw.key ? !!raw.nostrOn : true, nostrLegacy: !!raw.nostrLegacy, nostrRelays: raw.nostrRelays || [], ctl: raw.ctl || [], groups: raw.groups || {}, powStrict: !!raw.powStrict, joins: raw.joins || {}, gone: raw.gone || {}, early: raw.early || {}, gdel: raw.gdel || {}, gdelh: raw.gdelh || {}, nrecall: raw.nrecall || [] }); migrate(); }
   }
 
   // Outbox (v0.19.2): a message we just sent is also written to localStorage at
@@ -253,8 +253,8 @@
   function lateAck(from, id) {
     let found = false;
     for (let i = st.messages.length - 1; i >= 0; i--) { const m = st.messages[i]; if (m.id === id && m.peer === from && m.out) { found = m.status === 'queued' || m.status === 'stored'; break; } }
-    const n = (st.ctl || []).length; st.ctl = (st.ctl || []).filter(c => !(c.peer === from && c.w.id === id));
-    if (st.ctl.length !== n) save();
+    const done = (st.ctl || []).filter(c => c.peer === from && c.w.id === id);
+    if (done.length) { st.ctl = st.ctl.filter(c => !(c.peer === from && c.w.id === id)); save(); nostrRecall(ctlRefs(done)); } // a parked copy of it isn't needed now (v0.19.4)
     if (found) setStatus(from, id, 'sent');
   }
   // Message requests (stranger / not yet accepted) are limited: 20/min per address,
@@ -306,9 +306,12 @@
   // ---- edit / unsend (only our own messages; receiver checks the sender address) ----
   const ctlID = () => 'c' + Date.now().toString(16) + Math.random().toString(16).slice(2, 6);
   const isSent = m => m.status === 'sent' || m.status === 'sending' || !!m.nostr;
-  function queueCtl(peer, w) {
+  // park: the message went out as a Nostr box, so this goes that way too when the peer can't be reached (v0.19.4).
+  function queueCtl(peer, w, park) {
+    const old = (st.ctl || []).filter(c => c.peer === peer && c.w.ref === w.ref);
     st.ctl = (st.ctl || []).filter(c => !(c.peer === peer && c.w.ref === w.ref));
-    st.ctl.push({ peer, w }); save(); flushCtl(peer);
+    const c = { peer, w }; if (park) c.park = true;
+    st.ctl.push(c); save(); nostrRecall(ctlRefs(old)); flushCtl(peer);
   }
   const ctlBusy = new Set();
   async function flushCtl(p) {
@@ -319,8 +322,9 @@
         let ok = false;
         for (let i = 0; i < 6 && !ok; i++) { send(p, c.w); ok = await Promise.race([acked.then(() => true), new Promise(r => setTimeout(() => r(false), 2500))]); }
         acks.delete(c.w.id);
-        if (!ok) return;
-        st.ctl = st.ctl.filter(x => !(x.peer === p && x.w.id === c.w.id)); save();
+        if (!ok) { parkCtl(p); return; } // the peer may only come back while we're away
+        const done = st.ctl.filter(x => x.peer === p && x.w.id === c.w.id);
+        st.ctl = st.ctl.filter(x => !(x.peer === p && x.w.id === c.w.id)); save(); nostrRecall(ctlRefs(done));
       }
     } finally { ctlBusy.delete(p); }
   }
@@ -656,7 +660,19 @@
   const GDELMAX = 5000, GDELSYNC = 64;
   const gdelKey = (gid, by, pid) => gid + '/' + by + '/' + postIDf(String(pid));
   const gdelMsg = (gid, pid, by, dby) => 'ygg-gdel1\n' + gid + '\n' + postIDf(String(pid)) + '\n' + by + '\n' + (dby || '');
-  const isGDel = (gid, by, pid) => { const t = st.gdel && st.gdel[gdelKey(gid, by, pid)]; return !!t && t.x > now(); };
+  // A short hash of every deleted post is kept 90 days (bounded) after the full tombstone (10 days) goes,
+  // so an old peer relaying the post can't bring it back (v0.19.4, as groupunsend.go).
+  const GDELHKEEP = 90 * 86400, GDELHMAX = 10000;
+  const gdelHash = k => hexOf(sha256s(new TextEncoder().encode('ygg-gdelh\n' + k))).slice(0, 24);
+  function markGDelH(k, n) {
+    st.gdelh = st.gdelh || {};
+    if (Object.keys(st.gdelh).length >= GDELHMAX) {
+      for (const x in st.gdelh) if (st.gdelh[x] <= n) delete st.gdelh[x];
+      const ks = Object.keys(st.gdelh); if (ks.length >= GDELHMAX) { ks.sort((a, b) => st.gdelh[a] - st.gdelh[b]); for (const x of ks.slice(0, ks.length - Math.floor(GDELHMAX * 0.9))) delete st.gdelh[x]; }
+    }
+    st.gdelh[gdelHash(k)] = n + GDELHKEEP;
+  }
+  const isGDel = (gid, by, pid) => { const k = gdelKey(gid, by, pid), t = st.gdel && st.gdel[k]; if (t && t.x > now()) return true; const h = st.gdelh && st.gdelh[gdelHash(k)]; return !!h && h > now(); };
   const mayDel = (g, deleter, author) => deleter === author || (canMng(g, deleter) && (deleter === g.owner || !canMng(g, author)));
   function markGDel(gid, by, pid, t) {
     const n = now(), k = gdelKey(gid, by, pid); st.gdel = st.gdel || {};
@@ -666,7 +682,7 @@
       const ks = Object.keys(st.gdel); if (ks.length >= GDELMAX * 0.9) { ks.sort((a, b) => st.gdel[a].x - st.gdel[b].x); for (const x of ks.slice(0, ks.length - Math.floor(GDELMAX * 0.9) + 1)) delete st.gdel[x]; }
     }
     const e = { x: n + TOMBKEEP, at: t.at || n }; if (t.d) e.d = t.d; if (t.sg) { e.sg = t.sg; e.pk = t.pk; }
-    st.gdel[k] = e;
+    st.gdel[k] = e; markGDelH(k, n);
   }
   async function verifySig(who, pk, sg, msg) { // true / false (forged) / null (can't check here)
     pk = String(pk || '').toLowerCase(); sg = String(sg || '');
@@ -676,14 +692,15 @@
   }
   function signDel(gid, pid, by) { try { const h = yggSign(gdelMsg(gid, pid, by, by === addr ? '' : addr)); return h ? [b64(hexBytes(h)).replace(/=+$/, ''), myPK()] : ['', '']; } catch { return ['', '']; } }
   // Removes author's post (and, for our own, the copies not delivered yet). Returns whether it was shown.
+  // Also returns the Nostr boxes of the dropped copies (to recall) and the members whose copy went out as a box (v0.19.4).
   function dropGroupPost(gid, by, pid) {
-    const key = 'g:' + gid, p = postIDf(String(pid)); let found = false;
+    const key = 'g:' + gid, p = postIDf(String(pid)); let found = false; const refs = [], parked = new Set();
     st.messages = st.messages.filter(m => {
       if (m.peer === key && m.from === by && !m.sys && samePost(m.id, p)) { found = true; return false; }
-      if (by === addr && m.hid && m.grp === gid && m.of === p) return false; // never goes out now
+      if (by === addr && m.hid && m.grp === gid && m.of === p) { if (m.nev) refs.push(...m.nev); if (m.nostr) parked.add(m.peer); return false; } // never goes out now
       return true;
     });
-    return found;
+    return { found, refs, parked };
   }
   function groupUnsend(gid, m) {
     const g = st.groups[gid];
@@ -691,11 +708,14 @@
     if (!mayDel(g, addr, m.from)) throw new Error('他の人のメッセージを全員から削除できるのは、ホスト（と、一般メンバーの投稿なら管理者）だけです');
     const pid = postIDf(m.id), by = m.from, dby = by === addr ? '' : addr, [sg, pk] = signDel(gid, pid, by), t = now();
     markGDel(gid, by, pid, { at: t, d: dby, sg, pk });
-    dropGroupPost(gid, by, pid);
+    const dr = dropGroupPost(gid, by, pid);
     const base = ctlID(), to = g.members.filter(x => x !== addr);
-    st.ctl = (st.ctl || []).filter(c => !(c.w.g && c.w.ts > 0 && c.w.ts < t - TOMBKEEP) && !(c.w.g === gid && c.w.ref === pid && to.includes(c.peer)));
-    to.forEach((p, i) => { const w = { t: 'del', id: base + '-' + i, g: gid, ref: pid, by, ts: t }; if (dby) w.dby = dby; if (sg) { w.sg = sg; w.pk = pk; } st.ctl.push({ peer: p, w }); });
+    const goneC = (st.ctl || []).filter(c => (c.w.g && c.w.ts > 0 && c.w.ts < t - TOMBKEEP) || (c.w.g === gid && c.w.ref === pid && to.includes(c.peer)));
+    st.ctl = (st.ctl || []).filter(c => !goneC.includes(c));
+    // A member whose copy went out as a Nostr box gets the unsend that way too when it can't be reached (v0.19.4).
+    to.forEach((p, i) => { const w = { t: 'del', id: base + '-' + i, g: gid, ref: pid, by, ts: t }; if (dby) w.dby = dby; if (sg) { w.sg = sg; w.pk = pk; } const c = { peer: p, w }; if (dr.parked.has(p)) c.park = true; st.ctl.push(c); });
     save(); emit('msg_del', { peer: 'g:' + gid, id: pid });
+    nostrRecall(dr.refs.concat(ctlRefs(goneC)));
     let busy = 0; const q = to.slice(); const next = () => { while (busy < 48 && q.length) { busy++; flushCtl(q.shift()).finally(() => { busy--; next(); }); } }; next();
   }
   // An incoming group unsend (direct or relayed); true = ack (anything well-formed, so the sender stops).
@@ -711,8 +731,10 @@
     const t = { d: w.dby ? deleter : '' }; if (w.sg) { t.sg = String(w.sg); t.pk = String(w.pk).toLowerCase(); }
     if (+w.ts > 0 && +w.ts <= now() + 600) t.at = Math.trunc(+w.ts);
     markGDel(w.g, by, w.ref, t);
-    const found = dropGroupPost(w.g, by, w.ref);
-    if (found) { save(); emit('msg_del', { peer: 'g:' + w.g, id: postIDf(String(w.ref)) }); } else saveSoon();
+    const { found, refs } = dropGroupPost(w.g, by, w.ref);
+    if (found || refs.length) save(); else saveSoon();
+    if (found) emit('msg_del', { peer: 'g:' + w.g, id: postIDf(String(w.ref)) });
+    nostrRecall(refs); // moderation of our own post: our boxes of it go too
     return true;
   }
   // Signed tombstones of gid for a catch-up answer, newest first.
@@ -1745,26 +1767,115 @@
       for (const [id, e] of evs) {
         if (nSeen.has(id)) continue;
         const r = yggNostrOpen(JSON.stringify(e)); if (r.error) continue;
-        const w = wireOf(r.w); if (!w || w.t !== 'msg') continue; // checked like a datagram (r2)
+        const w = wireOf(r.w); if (!w || (w.t !== 'msg' && w.t !== 'del' && w.t !== 'edit')) continue; // checked like a datagram (r2); unsends / edits are parked too since v0.19.4
         learnPK(r.from, r.pk);
         ps.push({ id, r, w });
       }
       // Oldest first (the message's own time; created_at is blurred), so per-chat state ends at the newest (v0.19.2).
-      ps.sort((a, b) => ((+a.w.ts || 0) - (+b.w.ts || 0)) || (String(a.w.id) < String(b.w.id) ? -1 : String(a.w.id) > String(b.w.id) ? 1 : 0));
-      for (const { id, r, w } of ps) if (await handleMsg(r.from, w)) { nSeen.add(id); send(r.from, { t: 'ack', id: w.id }); if (r.del) nostrPublish(rs, r.del); }
+      // Unsends / edits first: they leave a tombstone / early edit, so a copy of the post in the same round can't show (v0.19.4).
+      ps.sort((a, b) => ((a.w.t === 'msg') - (b.w.t === 'msg')) || ((+a.w.ts || 0) - (+b.w.ts || 0)) || (String(a.w.id) < String(b.w.id) ? -1 : String(a.w.id) > String(b.w.id) ? 1 : 0));
+      for (const { id, r, w } of ps) if (await handleParked(r.from, w)) { nSeen.add(id); send(r.from, { t: 'ack', id: w.id }); if (r.del) nostrPublish(rs, r.del); }
     } finally { nBusy = false; }
+  }
+  // A packet read from a box (the sender is proven by the box, like a datagram's source). true = ack.
+  async function handleParked(from, w) {
+    if (w.t === 'msg') return handleMsg(from, w);
+    if (st.blocked[from]) return false;
+    if (w.g) return w.t === 'del' ? onGroupDel(from, w) : /^[0-9A-Za-z_-]{1,40}$/.test(String(w.id || ''));
+    return onCtl(from, w);
+  }
+  // Seal w for peer and park it; returns the boxes made [{i: event id, k: throw-away key, r: relays, x: expiry}]
+  // so they can be recalled (unsend), or [] when nothing was accepted (v0.19.4).
+  async function nostrPutWire(peer, w) {
+    const rs = nRelays(); if (!rs) return [];
+    const c = st.contacts[peer]; if (!c || !c.pk) return [];
+    const pkt = JSON.stringify(w), refs = [];
+    for (const leg of st.nostrLegacy ? [false, true] : [false]) {
+      if (typeof yggNostrWrapK === 'function') {
+        let b; try { b = JSON.parse(yggNostrWrapK(c.pk, pkt, leg) || 'null'); } catch { b = null; }
+        if (b && b.ev && await nostrPublish(rs, b.ev)) refs.push({ i: b.id, k: b.nk, r: rs.slice(), x: now() + 8 * 86400 });
+      } else { // ygg.wasm before v0.19.4: parked, but can't be recalled
+        const ev = yggNostrWrap(c.pk, pkt, leg);
+        if (ev && await nostrPublish(rs, ev)) refs.push({ i: '', k: '', r: [], x: 0 });
+      }
+    }
+    return refs;
   }
   async function nostrPark(m) {
     const rs = nRelays(); if (!rs || m.img || m.nostr) return;
     if (m.grp && st.groups[m.grp] && st.groups[m.grp].members.length > NOSTRG) return; // don't flood relays for a big group
     const c = st.contacts[m.peer]; if (!c || !c.pk) return;
     { const x0 = st.messages.find(y => y.peer === m.peer && y.id === m.id); if (!x0 || x0.status !== 'queued') return; } // delivered, deleted or unsent meanwhile
-    const ev = yggNostrWrap(c.pk, JSON.stringify(await msgPkt(m)));
-    let ok = !!ev && await nostrPublish(rs, ev);
-    if (st.nostrLegacy) { const lev = yggNostrWrap(c.pk, JSON.stringify(await msgPkt(m)), true); if (lev && await nostrPublish(rs, lev)) ok = true; }
-    if (!ok) return;
+    const refs = await nostrPutWire(m.peer, await msgPkt(m));
+    if (!refs.length) return;
+    const real = refs.filter(r => r.i);
     const x = st.messages.find(y => y.peer === m.peer && y.id === m.id);
-    if (x && x.status === 'queued') { x.nostr = true; setStatus(m.peer, m.id, 'stored'); }
+    if (!x) { nostrRecall(real); return; } // unsent, deleted or (a group copy) delivered while we were parking it
+    if (real.length) { x.nev = (x.nev || []).concat(real); save(); } // to recall the boxes on unsend
+    if (x.status === 'queued') { x.nostr = true; setStatus(m.peer, m.id, 'stored'); }
+  }
+  // ---- recalling our boxes (v0.19.4, nostrrecall.go): NIP-09 deletions signed by each box's key, kept in
+  // st.nrecall until every relay took them (or the box expired), so an offline recall still happens later.
+  const NRECALLMAX = 2000;
+  const ctlRefs = cs => cs.reduce((a, c) => a.concat(c.nev || []), []);
+  function nostrRecall(refs) {
+    refs = (refs || []).filter(r => r && r.i && r.k && r.r && r.r.length && r.x > now());
+    if (!refs.length) return;
+    const n = now();
+    st.nrecall = (st.nrecall || []).filter(r => r.x > n && r.r && r.r.length).concat(refs.map(r => Object.assign({}, r, { r: r.r.slice() }))).slice(-NRECALLMAX);
+    save(); recallAgain = true; runRecall();
+  }
+  function relayPublishMany(url, evs) { // evs: Map id -> event JSON; resolves the Set of ids the relay took
+    const got = new Set(); let left = evs.size;
+    if (!left) return Promise.resolve(got);
+    return new Promise(res => {
+      let ws, done = false;
+      const fin = () => { if (done) return; done = true; clearTimeout(t); try { ws && ws.close(); } catch {} res(got); };
+      const t = setTimeout(fin, 20000);
+      try { ws = new WebSocket(url); } catch { return fin(); }
+      ws.onopen = () => { for (const ev of evs.values()) ws.send('["EVENT",' + ev + ']'); };
+      ws.onmessage = e => { let m; try { m = JSON.parse(e.data); } catch { return; } if (!Array.isArray(m) || m[0] !== 'OK' || !evs.has(m[1])) return; if (m[2] === true) got.add(m[1]); if (--left <= 0) fin(); };
+      ws.onerror = fin; ws.onclose = fin;
+    });
+  }
+  let recallBusy = false, recallAgain = false;
+  async function runRecall() {
+    if (recallBusy || locked) return;
+    recallBusy = true;
+    try {
+      do {
+        recallAgain = false;
+        const todo = (st.nrecall || []).slice(); if (!todo.length) break;
+        const byRelay = new Map(), boxOf = new Map(), bad = new Set();
+        for (const r of todo) {
+          let d = ''; try { d = typeof yggNostrDel === 'function' ? yggNostrDel(r.k, r.i) : ''; } catch {}
+          let id = ''; try { id = d ? JSON.parse(d).id : ''; } catch {}
+          if (!id) { if (typeof yggNostrDel === 'function') bad.add(r.i); continue; }
+          boxOf.set(id, r.i);
+          for (const u of r.r) { if (!byRelay.has(u)) byRelay.set(u, new Map()); byRelay.get(u).set(id, d); }
+        }
+        const done = new Map();
+        await Promise.all([...byRelay].map(async ([u, evs]) => { const g = await relayPublishMany(u, evs); done.set(u, new Set([...g].map(x => boxOf.get(x)))); }));
+        if (locked) break;
+        const n = now();
+        st.nrecall = (st.nrecall || []).filter(r => !bad.has(r.i) && r.x > n).map(r => Object.assign(r, { r: r.r.filter(u => !(done.get(u) && done.get(u).has(r.i))) })).filter(r => r.r.length);
+        save();
+      } while (recallAgain);
+    } finally { recallBusy = false; }
+  }
+  // Park the pending control packets for p whose message went out as a box (not parked yet).
+  const ctlParking = new Set();
+  async function parkCtl(p) {
+    if (typeof yggNostrWrapK !== 'function' || ctlParking.has(p)) return; // (an older ygg.wasm can't recall: don't park)
+    ctlParking.add(p);
+    try {
+      for (const c of (st.ctl || []).filter(x => x.peer === p && x.park && !(x.nev && x.nev.length))) {
+        const refs = (await nostrPutWire(p, c.w)).filter(r => r.i);
+        if (!refs.length) continue;
+        const x = (st.ctl || []).find(y => y.peer === p && y.w.id === c.w.id);
+        if (x) { x.nev = (x.nev || []).concat(refs); save(); } else nostrRecall(refs); // acked meanwhile
+      }
+    } finally { ctlParking.delete(p); }
   }
   const cleanRelays = l => [...new Set((Array.isArray(l) ? l : []).map(r => String(r).trim()).filter(r => { try { const u = new URL(r); return u.protocol === 'wss:' && !!u.host && r.length <= 200; } catch { return false; } }))].slice(0, 8);
 
@@ -1878,7 +1989,8 @@
     document.addEventListener('visibilitychange', () => { if (document.hidden) { saveNow(); return; } if (yggPeers() > 0) helloAll(); nostrFetch(); });
     addEventListener('pagehide', () => saveNow()); // write what is pending before the page goes away (v0.19.2)
     setTimeout(nostrFetch, 5000);
-    setInterval(nostrFetch, 180000);
+    setInterval(() => { runRecall(); nostrFetch(); }, 180000);
+    setTimeout(runRecall, 6000);
   })();
 
   // The node could not start: say why (the UI alone only shows "offline" forever).
@@ -2185,7 +2297,7 @@
       case 'identity/reset': {
         if (!body.Confirm) return bad('confirm required');
         // Everything tied to the old address goes (chats, groups, pending edits, the verified domain).
-        outer.key = ''; st.contacts = {}; st.messages = []; st.groups = {}; st.ctl = []; st.blocked = {}; st.joins = {}; st.gone = {}; st.early = {}; st.gdel = {}; delete st.domain; save(); saveOuter(); await saving;
+        outer.key = ''; st.contacts = {}; st.messages = []; st.groups = {}; st.ctl = []; st.blocked = {}; st.joins = {}; st.gone = {}; st.early = {}; st.gdel = {}; st.gdelh = {}; delete st.domain; save(); saveOuter(); await saving;
         setTimeout(() => location.reload(), 300);
         return ok({});
       }
@@ -2228,7 +2340,7 @@
         if (goLen({ t: 'edit', id: ctlID(), ref: m.id, text: t }) > DGRAM) return bad('長すぎて編集できません（日本語でおよそ350文字まで）。送り直してね', 400);
         // A "queued" message may have reached them already (lost ack), v0.19.3; group posts are edited here only.
         m.text = t; const remote = !isG(m.peer) && m.status !== 'failed'; if (remote) m.edited = true; save();
-        if (remote) queueCtl(m.peer, { t: 'edit', id: ctlID(), ref: m.id, text: t });
+        if (remote) queueCtl(m.peer, { t: 'edit', id: ctlID(), ref: m.id, text: t }, !!m.nostr);
         emit('msg_upd', m);
         return ok(m);
       }
@@ -2245,10 +2357,12 @@
         st.messages.splice(i, 1);
         if (!m.out && !m.sys && !isG(m.peer)) markGone(m.peer, m.id); // a late copy must not bring it back
         if (!m.out && !m.sys && isG(m.peer) && m.from) markGDel(m.peer.slice(2), m.from, m.id, {}); // nor a catch-up relay (local only), v0.19.4
+        const oldC = (st.ctl || []).filter(c => c.peer === m.peer && c.w.ref === m.id);
         st.ctl = (st.ctl || []).filter(c => !(c.peer === m.peer && c.w.ref === m.id));
         save();
+        if (body.Everyone && m.out) nostrRecall((m.nev || []).concat(ctlRefs(oldC))); // unsend: our boxes of it are recalled (v0.19.4)
         // "queued" may still have reached them (lost ack, retry, Nostr box): everything but a failed send gets the unsend (v0.19.3).
-        if (body.Everyone && !m.sys && m.status !== 'failed' && !isG(m.peer)) queueCtl(m.peer, { t: 'del', id: ctlID(), ref: m.id });
+        if (body.Everyone && !m.sys && m.status !== 'failed' && !isG(m.peer)) queueCtl(m.peer, { t: 'del', id: ctlID(), ref: m.id }, !!m.nostr);
         emit('msg_del', { peer: m.peer, id: m.id });
         return ok({});
       }
@@ -2290,5 +2404,5 @@
     return es;
   };
   // Test hook (test/pwa/harness.js defines __yggTest before loading; never set in a page).
-  if (typeof __yggTest === 'object' && __yggTest) Object.assign(__yggTest, { st: () => st, ready, onPacket, nostrFetch, wireOf });
+  if (typeof __yggTest === 'object' && __yggTest) Object.assign(__yggTest, { st: () => st, ready, onPacket, nostrFetch, wireOf, nostrPark, parkCtl, runRecall });
 })();

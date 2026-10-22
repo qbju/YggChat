@@ -78,6 +78,8 @@ type Message struct {
 	Tot  int    `json:"tot,omitempty"`  // group copies made when sent (recipients then)
 	Pn   string `json:"pn,omitempty"`   // proof-of-work nonce (pow.go)
 	Sg   string `json:"sg,omitempty"`   // group text post: sender's signature (groupssig.go, v0.19.3)
+	// Boxes this message was parked in, to recall them on unsend (nostrrecall.go, v0.19.4).
+	NEv []nostrRef `json:"nev,omitempty"`
 }
 
 type Contact struct {
@@ -138,6 +140,12 @@ type Store struct {
 	// Group posts that must not (re)appear: unsent / deleted for everyone,
 	// or deleted here ("gid/author/postID", groupunsend.go).
 	GDel map[string]gTomb `json:"gdel,omitempty"`
+	// Hashes of group posts deleted in the last 90 days, kept after the full
+	// tombstone above expires, so an old peer relaying the post can't bring
+	// it back (groupunsend.go, v0.19.4).
+	GDelH map[string]int64 `json:"gdelh,omitempty"`
+	// Nostr boxes of ours still to delete from relays (nostrrecall.go).
+	NRecall []nostrRef `json:"nrecall,omitempty"`
 	// Generation of this file; journal lines of another one are stale (journal.go).
 	JGen string `json:"jgen,omitempty"`
 }
@@ -316,6 +324,7 @@ type App struct {
 	inflight map[string]bool
 	probing  map[string]bool // peers with a quick re-probe running (flMu)
 	ctlBusy  map[string]bool // peers with flushCtl running (flMu)
+	ctlPark  map[string]bool // peers with parkCtl running (flMu)
 	fsOnce   sync.Once
 	fs       *fileState
 	seenMu   sync.Mutex
@@ -943,9 +952,12 @@ func (a *App) lateAck(from, id string) {
 	}
 	n := len(a.store.Ctl)
 	kept := a.store.Ctl[:0]
+	var done []ctlItem
 	for _, c := range a.store.Ctl {
 		if !(c.Peer == from && c.W.ID == id) {
 			kept = append(kept, c)
+		} else {
+			done = append(done, c)
 		}
 	}
 	a.store.Ctl = kept
@@ -953,6 +965,7 @@ func (a *App) lateAck(from, id string) {
 		a.store.save()
 	}
 	a.store.mu.Unlock()
+	a.nostrRecall(ctlRefs(done)) // a parked copy of it isn't needed now
 	if found {
 		a.setStatus(from, id, "sent")
 	}
@@ -1074,22 +1087,33 @@ func (a *App) nostrPark(m Message) {
 	if !still {
 		return // delivered, deleted or unsent meanwhile: nothing to park
 	}
-	if !a.nostrPut(m) {
+	refs := a.nostrPut(m)
+	if len(refs) == 0 {
 		return
 	}
 	a.store.mu.Lock()
-	st, grp, of := "", "", ""
+	st, grp, of, found := "", "", "", false
 	for i := range a.store.Messages {
 		x := &a.store.Messages[i]
-		if x.Peer == m.Peer && x.ID == m.ID && x.Status == "queued" {
-			x.Nostr, x.Status, st = true, "stored", "stored"
-			if x.Hid {
-				grp, of = x.Grp, x.Of
+		if x.Peer == m.Peer && x.ID == m.ID {
+			found = true
+			x.NEv = append(x.NEv, refs...) // to recall the boxes on unsend (v0.19.4)
+			if x.Status == "queued" {
+				x.Nostr, x.Status, st = true, "stored", "stored"
+				if x.Hid {
+					grp, of = x.Grp, x.Of
+				}
 			}
 			a.store.save()
+			break
 		}
 	}
 	a.store.mu.Unlock()
+	if !found {
+		// Unsent, deleted or (a group copy) delivered while we were parking it.
+		a.nostrRecall(refs)
+		return
+	}
 	if grp != "" {
 		a.groupStatus(grp, of) // the visible group message shows the combined status
 		return
@@ -1187,13 +1211,9 @@ func (a *App) upPeers() int {
 		}
 		return 0
 	}
-	n := 0
-	for _, p := range a.core.GetPeers() {
-		if p.Up {
-			n++
-		}
-	}
-	return n
+	// Not GetPeers: ironwood's peer debug info is read racily (seen in the
+	// r3 race chaos run), and this runs on every /api/state.
+	return a.core.UpPeerCount()
 }
 
 func (a *App) saveCfg() {
