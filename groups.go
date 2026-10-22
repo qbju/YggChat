@@ -34,33 +34,32 @@ import (
 	"time"
 )
 
-
 type Group struct {
-	ID      string   `json:"id"`
-	Name    string   `json:"name"`
-	Members []string `json:"members"`         // Yggdrasil addresses, including ours
-	Req     bool     `json:"req,omitempty"`   // invitation not accepted yet
-	Left    bool     `json:"left,omitempty"`  // we left or were removed
-	Owner   string   `json:"owner,omitempty"` // host (creator); "" for pre-v0.16 groups
-	Tok     string   `json:"tok,omitempty"`   // invite-link token (host only, v0.17)
-	Set     GroupSet `json:"set,omitempty"`   // host's settings (v0.18)
-	PwH     string   `json:"pwh,omitempty"`   // join password hash (host only, v0.18)
-	Pend    []Pend   `json:"pend,omitempty"`  // join requests waiting for approval (host/admin)
-	Admins  []string `json:"admins,omitempty"` // co-admins (v0.19, set by the host)
-	Stub    bool     `json:"stub,omitempty"`   // made from a message before any group info arrived
-	V       int      `json:"v,omitempty"`      // member-list version (v0.19)
-	SV      int      `json:"sv,omitempty"`     // version of the host's name/settings/admins (v0.19)
-	Quit    bool     `json:"quit,omitempty"`   // we left ourselves (not removed), v0.19.2
-	Tomb    bool     `json:"tomb,omitempty"`   // deleted after leaving: hidden, kept so late copies don't bring it back
-	Gone    []string `json:"gone,omitempty"`   // host only: members recently removed or left (merge guard)
-	GoneAt  map[string]int64 `json:"gat,omitempty"` // every node, local: when members dropped out (late posts from before are kept)
-	AddAt   map[string]int64 `json:"gaa,omitempty"` // every node, local: when members were added after we knew the group (v0.19.3)
-	VAt     int64    `json:"vat,omitempty"`  // when the current member-list version was made (from gi/gd "ts", v0.19.3)
-	By      string   `json:"by,omitempty"`   // local: who sent us the invitation (caps invitation spam)
-	Ban     []string `json:"ban,omitempty"`  // host/admin, local: removed by a manager; their link joins are refused
-	Hand    bool     `json:"hand,omitempty"` // we left as host and handed the group to Owner (re-sent if they missed it)
-	Keys    map[string]string `json:"keys,omitempty"` // local: members whose last post was signed -> their key (groupssig.go)
-	QuitAt  int64    `json:"qat,omitempty"`  // when we left (our gl is repeated for a while, v0.19.3)
+	ID      string            `json:"id"`
+	Name    string            `json:"name"`
+	Members []string          `json:"members"`          // Yggdrasil addresses, including ours
+	Req     bool              `json:"req,omitempty"`    // invitation not accepted yet
+	Left    bool              `json:"left,omitempty"`   // we left or were removed
+	Owner   string            `json:"owner,omitempty"`  // host (creator); "" for pre-v0.16 groups
+	Tok     string            `json:"tok,omitempty"`    // invite-link token (host only, v0.17)
+	Set     GroupSet          `json:"set,omitempty"`    // host's settings (v0.18)
+	PwH     string            `json:"pwh,omitempty"`    // join password hash (host only, v0.18)
+	Pend    []Pend            `json:"pend,omitempty"`   // join requests waiting for approval (host/admin)
+	Admins  []string          `json:"admins,omitempty"` // co-admins (v0.19, set by the host)
+	Stub    bool              `json:"stub,omitempty"`   // made from a message before any group info arrived
+	V       int               `json:"v,omitempty"`      // member-list version (v0.19)
+	SV      int               `json:"sv,omitempty"`     // version of the host's name/settings/admins (v0.19)
+	Quit    bool              `json:"quit,omitempty"`   // we left ourselves (not removed), v0.19.2
+	Tomb    bool              `json:"tomb,omitempty"`   // deleted after leaving: hidden, kept so late copies don't bring it back
+	Gone    []string          `json:"gone,omitempty"`   // host only: members recently removed or left (merge guard)
+	GoneAt  map[string]int64  `json:"gat,omitempty"`    // every node, local: when members dropped out (late posts from before are kept)
+	AddAt   map[string]int64  `json:"gaa,omitempty"`    // every node, local: when members were added after we knew the group (v0.19.3)
+	VAt     int64             `json:"vat,omitempty"`    // when the current member-list version was made (from gi/gd "ts", v0.19.3)
+	By      string            `json:"by,omitempty"`     // local: who sent us the invitation (caps invitation spam)
+	Ban     []string          `json:"ban,omitempty"`    // host/admin, local: removed by a manager; their link joins are refused
+	Hand    bool              `json:"hand,omitempty"`   // we left as host and handed the group to Owner (re-sent if they missed it)
+	Keys    map[string]string `json:"keys,omitempty"`   // local: members whose last post was signed -> their key (groupssig.go)
+	QuitAt  int64             `json:"qat,omitempty"`    // when we left (our gl is repeated for a while, v0.19.3)
 }
 
 // GroupSet are the host's group settings (v0.18), sent in gi as "gs".

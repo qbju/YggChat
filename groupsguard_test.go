@@ -564,7 +564,11 @@ func TestMergedVersionKeepsRemovalTime(t *testing.T) {
 	h := tApp(t, tHost)
 	ms := cleanMembers([]string{tAdm, tMem, tX}, tHost)
 	h.store.Groups[gid] = Group{ID: gid, Name: "G", Members: ms, Owner: tHost, Admins: []string{tAdm}, V: 3, VAt: now, GoneAt: map[string]int64{tMem: now - 500}}
-	h.store.Groups[gid] = func() Group { g := h.store.Groups[gid]; g.Members = cleanMembers([]string{tAdm, tX, tNew}, tHost); return g }()
+	h.store.Groups[gid] = func() Group {
+		g := h.store.Groups[gid]
+		g.Members = cleanMembers([]string{tAdm, tX, tNew}, tHost)
+		return g
+	}()
 	ps := h.infoPackets(h.store.Groups[gid])
 	if len(ps) != 1 || ps[0].GT[tMem] != now-500 {
 		t.Fatalf("gt not sent: %+v", ps)

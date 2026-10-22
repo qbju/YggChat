@@ -38,7 +38,7 @@ const (
 	maxInvitesPer = 3         // ... from one of them
 	histAskTTL    = 120       // seconds we take relayed history from a member we asked
 	maxBan        = 256
-	goneSlack     = 0   // clock slack (s) when dropping posts made after a removal (chaos 6d: a post 1 s after it; a removed member's skewed clock only costs its own last posts)
+	goneSlack     = 0         // clock slack (s) when dropping posts made after a removal (chaos 6d: a post 1 s after it; a removed member's skewed clock only costs its own last posts)
 	pendKeep      = 3 * 86400 // a full request list drops requests older than this
 	leaveRepeat   = 3 * 86400 // our gl is repeated on reconnects for this long
 )

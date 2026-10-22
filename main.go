@@ -71,13 +71,13 @@ type Message struct {
 	Of  string `json:"of,omitempty"`  // id of the visible group message
 	Hid bool   `json:"hid,omitempty"`
 	// GImg: a hidden group copy whose photo is on the visible message (Of).
-	GImg bool `json:"gimg,omitempty"`
-	Hist bool `json:"hist,omitempty"` // relayed by the group host as history for a new member (v0.18)
-	Via  string `json:"via,omitempty"` // history relayed by another member, not the sender (v0.19.1)
-	Dlv  int    `json:"dlv,omitempty"` // group copies delivered so far (v0.19.1)
-	Tot  int    `json:"tot,omitempty"` // group copies made when sent (recipients then)
-	Pn   string `json:"pn,omitempty"`  // proof-of-work nonce (pow.go)
-	Sg   string `json:"sg,omitempty"`  // group text post: sender's signature (groupssig.go, v0.19.3)
+	GImg bool   `json:"gimg,omitempty"`
+	Hist bool   `json:"hist,omitempty"` // relayed by the group host as history for a new member (v0.18)
+	Via  string `json:"via,omitempty"`  // history relayed by another member, not the sender (v0.19.1)
+	Dlv  int    `json:"dlv,omitempty"`  // group copies delivered so far (v0.19.1)
+	Tot  int    `json:"tot,omitempty"`  // group copies made when sent (recipients then)
+	Pn   string `json:"pn,omitempty"`   // proof-of-work nonce (pow.go)
+	Sg   string `json:"sg,omitempty"`   // group text post: sender's signature (groupssig.go, v0.19.3)
 }
 
 type Contact struct {
@@ -446,16 +446,16 @@ type wire struct {
 	K  string    `json:"k,omitempty"`  // gjn kind: "pw" (password needed/wrong), "wait" (approval pending)
 	By string    `json:"by,omitempty"` // ghs: original sender of a history message
 	// v0.19 large groups / co-admins (groupadmin.go)
-	GV  int      `json:"gv,omitempty"`  // member-list version
-	GAD []string `json:"gad,omitempty"` // co-admins (gi)
-	GSV int      `json:"gsv,omitempty"` // version of name/settings/admins (gi)
-	GC  int      `json:"gc,omitempty"`  // member count of a split gi
-	GMB string   `json:"gmb,omitempty"` // packed members (gp)
-	GA  string   `json:"ga,omitempty"`  // packed members added (gd)
-	GR  string   `json:"gr,omitempty"`  // packed members removed (gd)
-	PN  string   `json:"pn,omitempty"`  // proof-of-work nonce (msg, fh, gj)
-	GT  map[string]int64 `json:"gt,omitempty"` // gi: when recently removed members dropped out (v0.19.3)
-	Sg  string           `json:"sg,omitempty"` // group post signature (msg, fh, ghs; v0.19.3)
+	GV  int              `json:"gv,omitempty"`  // member-list version
+	GAD []string         `json:"gad,omitempty"` // co-admins (gi)
+	GSV int              `json:"gsv,omitempty"` // version of name/settings/admins (gi)
+	GC  int              `json:"gc,omitempty"`  // member count of a split gi
+	GMB string           `json:"gmb,omitempty"` // packed members (gp)
+	GA  string           `json:"ga,omitempty"`  // packed members added (gd)
+	GR  string           `json:"gr,omitempty"`  // packed members removed (gd)
+	PN  string           `json:"pn,omitempty"`  // proof-of-work nonce (msg, fh, gj)
+	GT  map[string]int64 `json:"gt,omitempty"`  // gi: when recently removed members dropped out (v0.19.3)
+	Sg  string           `json:"sg,omitempty"`  // group post signature (msg, fh, ghs; v0.19.3)
 
 	checked bool // local only: proof of work already verified (file header)
 }

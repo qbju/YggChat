@@ -237,7 +237,7 @@ func (a *App) historyLocked(gid string) []Message {
 
 func (a *App) sendHistory(to, gid string, hist []Message) {
 	defer func() { recover() }() // a bad message must never take the node down
-	time.Sleep(3 * time.Second) // let the gi land first
+	time.Sleep(3 * time.Second)  // let the gi land first
 	now := time.Now().Unix()
 	sigs := map[string][2]string{}
 	a.store.mu.Lock()

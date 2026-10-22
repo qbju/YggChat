@@ -51,6 +51,7 @@ const (
 	maxSendText = 12288 // bytes we let the UI send (about 4096 Japanese characters)
 	maxRecvText = 16384
 )
+
 var shaRe = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 // parseImg checks a data: URL and returns its mime type and bytes.
