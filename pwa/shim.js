@@ -494,12 +494,13 @@
   }
   const gHash = async g => hexOf(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(g.name + '\n' + g.members.slice().sort().join(',')))).slice(0, 8);
   const hasM = (g, a) => g.members.includes(a);
-  const nameOf = a => a === addr ? 'あなた' : ((st.contacts[a] && st.contacts[a].nick) || a.slice(0, 9) + '…');
+  const realNick = n => !!n && n !== 'anon'; // 'anon' = never named: system lines use the short address (the UI names it)
+  const nameOf = a => a === addr ? 'あなた' : ((st.contacts[a] && realNick(st.contacts[a].nick)) ? st.contacts[a].nick : a.slice(0, 9) + '…');
   // A member in a group's system lines: contact name, else their group-message or join nick, else a short address (the UI names it later).
   function gNameOf(g, a) {
-    if (a === addr || (st.contacts[a] && st.contacts[a].nick)) return nameOf(a);
-    for (let i = st.messages.length - 1; i >= 0; i--) { const m = st.messages[i]; if (m.peer === 'g:' + g.id && m.from === a && m.nick && !m.hid) return m.nick; }
-    const p = (g.pend || []).find(x => x.addr === a && x.nick); return p ? p.nick : nameOf(a);
+    if (a === addr || (st.contacts[a] && realNick(st.contacts[a].nick))) return nameOf(a);
+    for (let i = st.messages.length - 1; i >= 0; i--) { const m = st.messages[i]; if (m.peer === 'g:' + g.id && m.from === a && realNick(m.nick) && !m.hid) return m.nick; }
+    const p = (g.pend || []).find(x => x.addr === a && realNick(x.nick)); return p ? p.nick : nameOf(a);
   }
   function gSys(g, text) { addMessage({ id: 's' + Date.now().toString(16) + Math.random().toString(16).slice(2, 5), peer: 'g:' + g.id, from: addr, ts: now(), sys: text, out: true }); }
   const giWire = g => { const w = { t: 'gi', g: g.id, gn: g.name, gm: g.members, go: g.owner || undefined, gv: g.v || undefined, gsv: g.sv || undefined, gad: (g.admins && g.admins.length) ? g.admins : undefined, ts: g.vat || undefined }; if (g.owner) w.gs = cleanSet(g.set); return w; };
@@ -1110,6 +1111,11 @@
   const joinHost = gid => { const j = (st.joins || {})[gid]; if (!j) return ''; if (j.exp < now()) { delete st.joins[gid]; return ''; } return j.host; };
   function setJoin(gid, host, ttl) { st.joins = st.joins || {}; const t = now(); for (const k in st.joins) if (st.joins[k].exp < t) delete st.joins[k]; st.joins[gid] = { host, exp: t + ttl, wait: ttl > JOINTTL || undefined }; save(); emit('joins', joinsView()); }
   function delJoin(gid) { if (st.joins && st.joins[gid]) { delete st.joins[gid]; save(); emit('joins', joinsView()); } }
+  // Our join attempts per group: an older attempt's retries stop, and "password needed" can't
+  // answer a request that carries the password (it was for an older one); else it dropped the
+  // new join and the approval arrived as a plain invitation.
+  const joinTries = {};
+  const JOINPWNEEDED = 'このグループに入るにはパスワードが必要です';
   // Pending joins for the UI (same shape as Go's /api/state "joins").
   const joinsView = () => Object.entries(st.joins || {}).filter(([, j]) => j.exp >= now()).sort().map(([gid, j]) => { const v = { addr: 'g:' + gid, host: j.host, exp: j.exp, wait: !!j.wait }; const c = st.contacts[j.host]; if (c && c.nick) v.hostnick = c.nick; return v; });
   const b64u = b => btoa(String.fromCharCode(...b)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
@@ -1143,7 +1149,7 @@
     if (g.pwh) {
       if (pwLimited(src, false)) { send(src, { t: 'gjn', g: w.g, text: 'パスワードを何度も間違えたので、しばらく参加できません' }); return; }
       if (w.pw && !pwGlobalOK()) { send(src, { t: 'gjn', g: w.g, text: 'いま参加が混み合っています。少ししてからもう一度開いてね' }); return; }
-      if (!await checkPass(g.pwh, String(w.pw || ''))) { if (w.pw) pwLimited(src, true); send(src, { t: 'gjn', g: w.g, k: 'pw', text: w.pw ? 'パスワードが違います' : 'このグループに入るにはパスワードが必要です' }); return; }
+      if (!await checkPass(g.pwh, String(w.pw || ''))) { if (w.pw) pwLimited(src, true); send(src, { t: 'gjn', g: w.g, k: 'pw', text: w.pw ? 'パスワードが違います' : JOINPWNEEDED }); return; }
     }
     if (g.set && g.set.ap) {
       const fresh = !(g.pend || []).some(p => p.addr === src);
@@ -1159,7 +1165,7 @@
     if (!okGID(w.g) || locked) return;
     let g = st.groups[w.g];
     if (w.t === 'gj') { onJoin(src, w); return; }
-    if (w.t === 'gjn') { if (joinHost(w.g) === src) { if (w.k === 'wait') setJoin(w.g, src, JOINAPPROVE); else delJoin(w.g); emit('notice', { text: cleanText(w.text, 200), k: w.k || '', g: w.g }); } return; }
+    if (w.t === 'gjn') { if (w.k === 'pw' && w.text === JOINPWNEEDED && joinTries[w.g] && joinTries[w.g].pw) return; if (joinHost(w.g) === src) { joinTries[w.g] = { n: ((joinTries[w.g] || {}).n || 0) + 1, pw: (joinTries[w.g] || {}).pw }; if (w.k === 'wait') setJoin(w.g, src, JOINAPPROVE); else delJoin(w.g); emit('notice', { text: cleanText(w.text, 200), k: w.k || '', g: w.g }); } return; }
     if (w.t === 'ghs') { onHistory(src, w); return; }
     if (w.t === 'ghq') { onHistReq(src, w); return; }
     if (w.t === 'gd') { onDelta(src, w); return; }
@@ -2005,7 +2011,8 @@
         setJoin(j.gid, j.host, JOINTTL);
         const jw = { t: 'gj', g: j.gid, tok: j.tok, nick: st.nick, pw: body.Pw ? String(body.Pw) : undefined, pn: joinPow(addr, j.gid, j.tok) };
         hello(j.host); // the first packets to a new peer often go nowhere while its route is looked up
-        let wait = 0; for (const d of [1, 2, 2, 3, 4, 5, 6]) { wait += d; setTimeout(() => { if (joinHost(j.gid)) send(j.host, jw); }, wait * 1000); }
+        const jt = joinTries[j.gid] = { n: ((joinTries[j.gid] || {}).n || 0) + 1, pw: !!body.Pw };
+        let wait = 0; for (const d of [1, 2, 2, 3, 4, 5, 6]) { wait += d; setTimeout(() => { if (joinHost(j.gid) && joinTries[j.gid] === jt) send(j.host, jw); }, wait * 1000); }
         return ok({ addr: 'g:' + j.gid });
       }
       case 'group/approve': {

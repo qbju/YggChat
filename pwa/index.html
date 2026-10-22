@@ -923,7 +923,15 @@ body.screen-open .fab { display:none; }
     max-width:380px;
     border-right:1px solid var(--divider);
   }
+  /* wide window: list and chat side by side (the column layout stacked the chat under a 380px-tall list) */
+  body.two-pane .container { flex-direction:row; }
+  body.two-pane #chat-pane { border-left:none; position:relative; }
+  body.two-pane #back-to-list { display:none; }
+  /* no chat chosen: a hint instead of an empty header/composer (or a stale chat after delete/block) */
+  body.two-pane:not(.chat-open) #chat-pane > * { display:none !important; }
+  body.two-pane:not(.chat-open) #chat-pane > #chat-none { display:flex !important; }
 }
+#chat-none { display:none !important; flex:1; align-items:center; justify-content:center; color:var(--dim); font-size:14px; padding:24px; text-align:center; }
 /* iOS zooms into inputs under 16px, which shifts the layout */
 input, textarea { font-size:16px !important; }
 .bubble { -webkit-touch-callout:none; -webkit-user-select:none; user-select:none; }
@@ -1036,6 +1044,7 @@ img.emoji { height:1.2em; width:1.2em; margin:0 .05em 0 .1em; vertical-align:-0.
   </div>
 
   <div id="chat-pane">
+    <div id="chat-none">左の一覧からチャットを選ぶか、＋で新しいチャットを始めましょう</div>
     <div class="header">
       <button class="icon-btn" id="back-to-list" title="戻る">←</button>
       <div class="avatar small" id="chat-avatar"></div>
@@ -1672,11 +1681,11 @@ function initials(s){
 
 function senderName(m){
   const c = state.contacts[m.from];
-  return (c && c.nick) || m.nick || addrShort(m.from || '');
+  return nickOr((c && c.nick) || m.nick, m.from || '');
 }
 function isGroup(addr){ return typeof addr === 'string' && addr.startsWith('g:'); }
 function avatarText(c, addr){
-  return (c && c.avatar) ? c.avatar : initials((c && c.nick) || addr || '');
+  return (c && c.avatar) ? c.avatar : (c && c.nick && c.nick !== 'anon') ? initials(c.nick) : '👤';
 }
 function ttlLabel(s){
   s = s|0;
@@ -1700,6 +1709,7 @@ function hashColor(addr){
 // One timer for the one toast: an earlier toast's timer hid a newer one early;
 // long messages stay up longer.
 let toastT = null, toastTag = '';
+const waitToastAt = {};
 function toast(msg, tag){
   const el = $('toast');
   el.textContent = msg;
@@ -1783,6 +1793,17 @@ function markRead(addr){
 
 // When we joined a group: our "あなたが参加しました"/"…があなたを追加しました" line (0 if none).
 const JOIN_RE = /^(あなたが参加しました|.+ があなたを追加しました)$/;
+// A group we're out of: removed by a manager (the newest of our join/removal lines says so) or left ourselves.
+function removedFrom(c){
+  if(!c || !c.left) return false;
+  for(let i = state.messages.length - 1; i >= 0; i--){
+    const m = state.messages[i];
+    if(m.peer !== c.addr || !m.sys) continue;
+    if(m.sys === 'グループから外されました') return true;
+    if(JOIN_RE.test(m.sys) || / があなたをグループに戻しました$/.test(m.sys)) return false;
+  }
+  return false;
+}
 function joinTs(addr){
   if(!isGroup(addr)) return 0;
   for(const m of state.messages) if(m.peer === addr && m.sys && m.out && JOIN_RE.test(m.sys)) return m.ts || 0;
@@ -1862,7 +1883,7 @@ function renderList(){
     html += '<div class="contact-row" data-addr="' + escapeHtml(a) + '">'
       + '<div class="avatar small" style="background:' + avc + '; border:none; color:#111;">' + escapeHtml(av) + '</div>'
       + '<div class="info">'
-      + '<div class="name"><span class="nm">' + escapeHtml(c.nick || addrShort(a)) + '</span>' + (c.group ? ' <span class="ttl-badge">' + (c.members||[]).length + '人</span>' : '') + (c.req ? '<span class="req-tag">' + (c.group ? '招待' : 'リクエスト') + '</span>' : '') + (c.ttl ? ' <span class="ttl-badge">⏱' + escapeHtml(ttlLabel(c.ttl)) + '</span>' : '') + '</div>'
+      + '<div class="name"><span class="nm">' + escapeHtml(nickOr(c.nick, a)) + '</span>' + (c.group ? ' <span class="ttl-badge">' + (c.members||[]).length + '人</span>' : '') + (c.req ? '<span class="req-tag">' + (c.group ? '招待' : 'リクエスト') + '</span>' : '') + (c.ttl ? ' <span class="ttl-badge">⏱' + escapeHtml(ttlLabel(c.ttl)) + '</span>' : '') + '</div>'
       + '<div class="last">' + escapeHtml(lastText) + '</div>'
       + '</div>'
       + '<div style="display:flex; flex-direction:column; align-items:flex-end; gap:4px;">'
@@ -1910,6 +1931,9 @@ function groupMessages(msgs){
   return out;
 }
 
+// "anon" is what a node calls itself before a name is set: show the short address instead,
+// so two unnamed people don't look the same.
+function nickOr(n, a){ return (n && n !== 'anon') ? n : (a ? addrShort(a) : '名前なし'); }
 function postIdOf(id){ id = String(id || ''); const i = id.lastIndexOf('g'); return i > 0 ? id.slice(0, i) : id; }
 // Sub-second time in a message id: native ids are UnixNano hex (16 digits), browser ids
 // Date.now() hex (11 digits) plus 4 random ones. Unknown shapes tie (store order).
@@ -1941,7 +1965,7 @@ function renderMessages(){
     histSep = msgs.findIndex(m => m.hist && !m.sys && (!jt || (m.ts || 0) <= jt));
     if(histSep > 0 && !jt && !msgs.slice(0, histSep).every(m => m.sys)) histSep = -1; // old data: only when history opens the chat
   }
-  const reqUsed = new Set();
+  const reqs = inGroup ? reqMap(gc, msgs) : new Map();
   let html = '';
   for(let i=0; i<grouped.length; i++){
     const g = grouped[i];
@@ -1959,7 +1983,7 @@ function renderMessages(){
       html += '<div class="day-sep">' + escapeHtml(dayLabel(m.ts)) + '</div>';
     }
     if(i === histSep) html += '<div class="sys-line hist-sep">ここから参加前のメッセージ</div>';
-    const sc = inGroup ? {nick: memberNick(curAddr, m.from, true) || m.nick, avatar: (state.contacts[m.from] || {}).avatar} : Object.assign({}, state.contacts[curAddr], {nick: (state.contacts[curAddr]||{}).nick || m.nick});
+    const sc = inGroup ? {nick: memberNick(curAddr, m.from, true) || (m.nick !== 'anon' ? m.nick : ''), avatar: (state.contacts[m.from] || {}).avatar} : Object.assign({}, state.contacts[curAddr], {nick: (state.contacts[curAddr]||{}).nick || m.nick});
     const av = m.out ? (state.avatar || initials(state.nick || state.addr)) : avatarText(sc, m.from || curAddr);
     const avc = hashColor(m.from || curAddr);
     if(m.sys){
@@ -1967,8 +1991,9 @@ function renderMessages(){
       if(inGroup) t = sysNames(gc, t);
       let btns = '';
       if(inGroup && /^.+ が参加を申請しています$/.test(m.sys)){
-        const p = reqFor(gc, m, reqUsed);
+        const p = reqs.get(m);
         if(p) btns = '<div class="sys-btns"><button class="btn-accent sys-ok" data-addr="' + escapeHtml(p.addr) + '">承認</button><button class="sys-no btn-danger" data-addr="' + escapeHtml(p.addr) + '">拒否</button></div>';
+        else if(!gc.left && (gc.owner === state.addr || (gc.admins || []).includes(state.addr))) t += '（対応済み）'; // the buttons just vanished before
       }
       html += '<div class="sys-line">' + escapeHtml(t) + btns + '</div>';
       continue;
@@ -1977,7 +2002,7 @@ function renderMessages(){
     if(!m.out && !g.same && inGroup){
       html += '<div style="display:flex; gap:6px; align-items:flex-end; margin-bottom:2px;">'
         + '<div class="avatar small" style="width:28px; height:28px; font-size:10px; background:' + avc + '; border:none; color:#111;">' + escapeHtml(av) + '</div>'
-        + '<div style="font-size:11px; color:var(--dim);">' + escapeHtml((sc.nick || 'メンバー') + (m.via ? '（' + memberNick(curAddr, m.via) + 'が中継）' : '')) + '</div>'
+        + '<div style="font-size:11px; color:var(--dim);">' + escapeHtml((sc.nick || nickOr('', m.from)) + (m.via ? '（' + memberNick(curAddr, m.via) + 'が中継）' : '')) + '</div>'
         + '</div>';
     }
     if(m.img && /^data:image\/(jpeg|png|webp|gif);base64,[A-Za-z0-9+\/=]+$/.test(m.img)){
@@ -1992,7 +2017,7 @@ function renderMessages(){
     if(m.edited) html += '<span class="msg-status">編集済み</span>';
     if(m.out){
       if(st === 'sending'){
-        html += '<span class="msg-status" title="送信中">…</span>';
+        html += '<span class="msg-status" title="相手に届けています（オフラインならしばらくしてオンライン待ちに）">送信中…</span>';
       }else if(st === 'sent' && inGroup && !gc.left){
         const tot = (m.tot | 0) || Math.max(0, (gc.members || []).filter(a => a !== state.addr).length), n = Math.min(m.dlv | 0, tot);
         const part = m.tot && n < tot; // older messages don't know how many it went to
@@ -2033,11 +2058,15 @@ function renderMessages(){
     el.addEventListener('touchmove', cancelLp, {passive:true});
     el.addEventListener('touchcancel', cancelLp);
   });
+  // isNearBottom is where the view was before this render (scroll handler): checking it after
+  // inserting a tall message said "not at bottom" and left the view (and own sends) behind a 新着 pill.
   if(forceBottom){ forceBottom = false; isNearBottom = true; }
-  else checkNearBottom();
+  const nIn = msgs.filter(m => !m.out && !m.sys).length;
+  const grew = renderMessages.chat === curAddr && nIn > (renderMessages.nIn || 0);
+  renderMessages.chat = curAddr; renderMessages.nIn = nIn;
   if(isNearBottom){
     box.scrollTop = box.scrollHeight;
-  }else{
+  }else if(grew){
     $('new-msg-pill').classList.add('active');
   }
   markRead(curAddr);
@@ -2093,14 +2122,17 @@ async function retrySend(id){
 
 // A member's name: their contact name, else the name on their group messages.
 function memberNick(gaddr, a, bare){
+  const ok = x => x && x !== 'anon';
   let n = (state.contacts[a] || {}).nick;
-  if(!n){ for(let i = state.messages.length - 1; i >= 0; i--){ const m = state.messages[i]; if(m.peer === gaddr && m.from === a && m.nick){ n = m.nick; break; } } }
-  if(!n){ const p = ((state.contacts[gaddr] || {}).pend || []).find(x => x.addr === a && x.nick); if(p) n = p.nick; }
+  if(!ok(n)){ n = ''; for(let i = state.messages.length - 1; i >= 0; i--){ const m = state.messages[i]; if(m.peer === gaddr && m.from === a && ok(m.nick)){ n = m.nick; break; } } }
+  if(!n){ const p = ((state.contacts[gaddr] || {}).pend || []).find(x => x.addr === a && ok(x.nick)); if(p) n = p.nick; }
   return n || (bare ? '' : 'メンバー');
 }
 // System lines carry a short address ("209:201d:…") when the node did not
 // know the name yet: show the name we know now instead.
 function sysNames(c, t){
+  t = String(t).replace(/(^| )anon(?= )/g, '$1名前未設定のメンバー'); // lines written before nodes stopped using the default name
+  t = t.replace(/(^| )あなた ([がを])/g, '$1あなた$2'); // "あなたが参加しました" style, not "あなた が"
   return t.replace(/([23][0-9a-f]{2}:[0-9a-f:]{0,6})…/gi, (all, pre) => {
     const cand = (c.members || []).concat((c.pend || []).map(p => p.addr)).find(a => a.startsWith(pre));
     let n = cand ? memberNick(c.addr, cand, true) : '';
@@ -2108,20 +2140,26 @@ function sysNames(c, t){
     return n || (/(追加|参加)/.test(t) ? '新しいメンバー' : 'メンバー');
   });
 }
-// The pending request a "〇〇 が参加を申請しています" line is about (managers only).
-function reqFor(c, m, used){
-  if(!c || c.left || !(c.owner === state.addr || (c.admins || []).includes(state.addr))) return null;
-  const who = m.sys.replace(/ が参加を申請しています$/, '');
-  let best = null, bd = 1e12;
+// Which pending request each "… が参加を申請しています" line gets 承認/拒否 for:
+// the line closest in time to the request (the newest on a tie), so a repeat
+// request doesn't put the buttons on an old line further up.
+function reqMap(c, msgs){
+  const out = new Map();
+  if(!c || c.left || !(c.owner === state.addr || (c.admins || []).includes(state.addr))) return out;
+  const lines = msgs.filter(m => m.sys && /^.+ が参加を申請しています$/.test(m.sys));
   for(const p of c.pend || []){
-    if(used.has(p.addr)) continue;
     const nm = p.nick || 'anon';
-    if(nm !== who && !(who.endsWith('…') && p.addr.startsWith(who.slice(0, -1)))) continue;
-    const d = Math.abs((p.ts || m.ts) - m.ts);
-    if(d < bd){ bd = d; best = p; }
+    let best = null, bd = 1e12;
+    for(const m of lines){
+      if(out.has(m)) continue;
+      const who = m.sys.replace(/ が参加を申請しています$/, '');
+      if(nm !== who && !(who.endsWith('…') && p.addr.startsWith(who.slice(0, -1)))) continue;
+      const d = Math.abs((p.ts || m.ts) - m.ts);
+      if(d <= bd){ bd = d; best = m; } // lines are oldest first: <= keeps the newest on a tie
+    }
+    if(best) out.set(best, p);
   }
-  if(best) used.add(best.addr);
-  return best;
+  return out;
 }
 // Group header: the member count and the names we know, never raw addresses.
 function groupSubtitle(c){
@@ -2132,7 +2170,8 @@ function groupSubtitle(c){
     if(n) names.push(n);
   }
   let s = ms.length + '人';
-  if(names.length) s += '・' + names.slice(0, 3).join('、') + (ms.length - 1 > 3 ? ' ほか' : '');
+  const others = ms.filter(a => a !== state.addr).length;
+  if(names.length) s += '・' + names.slice(0, 3).join('、') + (others > Math.min(3, names.length) ? ' ほか' : '');
   return s;
 }
 function updateChatHeader(){
@@ -2151,8 +2190,8 @@ function updateChatHeader(){
   $('chat-avatar').style.background = hashColor(curAddr);
   $('chat-avatar').style.border = 'none';
   $('chat-avatar').style.color = '#111';
-  $('chat-name').textContent = c.nick || addrShort(curAddr);
-  $('chat-addr').textContent = grp ? (c.left ? '退出済みのグループ' : groupSubtitle(c)) : (c.dom && c.domok ? '✓ ' + c.dom + ' ・ ' + curAddr : curAddr);
+  $('chat-name').textContent = c.group ? (c.nick || 'グループ') : nickOr(c.nick, curAddr);
+  $('chat-addr').textContent = grp ? (c.left ? (removedFrom(c) ? 'グループから外されました' : '退出済みのグループ') : groupSubtitle(c)) : (c.dom && c.domok ? '✓ ' + c.dom + ' ・ ' + curAddr : curAddr);
 }
 
 let forceBottom = false;
@@ -2202,7 +2241,10 @@ function isYggAddr(a){
   return /^2[0-9a-fA-F]{2}:.+/.test(a) || /^3[0-9a-fA-F]{2}:.+/.test(a);
 }
 
-$('start-chat-btn').addEventListener('click', () => startChat());
+$('start-chat-btn').addEventListener('click', async () => {
+  const b = $('start-chat-btn'); if(b.disabled) return;
+  b.disabled = true; try{ await startChat(); }finally{ b.disabled = false; } // a slow domain lookup tapped twice opened it twice
+});
 // Start a chat from the sheet. A pasted/scanned contact link goes straight on
 // (add the contact and open the chat); a group link starts the join.
 async function startChat(){
@@ -2435,7 +2477,7 @@ function openContactInfo(){
   $('ci-avatar').style.background = hashColor(curAddr);
   $('ci-avatar').style.border = 'none';
   $('ci-avatar').style.color = '#111';
-  $('ci-nick').textContent = c.nick || addrShort(curAddr);
+  $('ci-nick').textContent = nickOr(c.nick, curAddr);
   $('ci-addr').textContent = curAddr;
   qrInto($('ci-qr-wrap'), makeInviteLink(curAddr, c.nick));
   $('contact-info-screen').classList.add('active');
@@ -2449,13 +2491,20 @@ $('ci-copy-addr').addEventListener('click', () => copyText(curAddr));
 
 // In-page dialogs: the browser's built-in dialogs are unreliable in iOS home-screen apps and WebViews.
 let modalClose = null;
-function uiDialog(title, {input=null, okText='OK', danger=false, placeholder='', hint='', validate=null}={}){
+// Open dialogs, top last: closing one on top of another (e.g. a confirm over
+// the photo preview) leaves Escape/back working for the one underneath.
+const modalStack = [];
+function modalOn(fn){ modalStack.push(fn); modalClose = fn; }
+function modalOff(fn){ const i = modalStack.indexOf(fn); if(i >= 0) modalStack.splice(i, 1); modalClose = modalStack[modalStack.length - 1] || null; }
+function uiDialog(title, {input=null, okText='OK', danger=false, placeholder='', hint='', validate=null, multiline=false, img='', secret=false}={}){
   return new Promise(res => {
     const bg = document.createElement('div'); bg.className = 'modal-bg';
     const m = document.createElement('div'); m.className = 'modal';
     const t = document.createElement('div'); t.className = 'mt'; t.textContent = title; m.appendChild(t);
+    if(img){ const im = document.createElement('img'); im.src = img; im.alt = ''; im.style.cssText = 'max-width:100%;max-height:40vh;object-fit:contain;border-radius:8px;align-self:center;'; m.appendChild(im); }
     let inp = null;
-    if(input !== null){ inp = document.createElement('input'); inp.value = input; inp.autocomplete = 'off'; inp.placeholder = placeholder; m.appendChild(inp); }
+    // multiline: a textarea, so line breaks survive (an <input> silently drops them); Enter makes a new line there
+    if(input !== null){ inp = document.createElement(multiline ? 'textarea' : 'input'); if(multiline){ inp.rows = Math.min(8, Math.max(3, String(input).split('\n').length + 1)); inp.style.cssText = 'resize:vertical;max-height:50vh;font:inherit;'; } inp.value = input; inp.autocomplete = 'off'; if(secret && !multiline) inp.type = 'password'; inp.placeholder = placeholder; m.appendChild(inp); }
     // hint under the input; validate(v) -> '' when OK, else what is wrong (shown instead of the hint, OK disabled)
     let hn = null;
     if(inp && (hint || validate)){ hn = document.createElement('div'); hn.className = 'mhint'; hn.id = 'mhint-' + Math.random().toString(36).slice(2); hn.setAttribute('aria-live', 'polite'); hn.style.cssText = 'font-size:13px;color:var(--dim);margin:6px 2px 0;line-height:1.4'; hn.textContent = hint; inp.setAttribute('aria-describedby', hn.id); m.appendChild(hn); }
@@ -2465,12 +2514,13 @@ function uiDialog(title, {input=null, okText='OK', danger=false, placeholder='',
     b.append(cancel, ok); m.appendChild(b); bg.appendChild(m); document.body.appendChild(bg);
     const bad = () => (inp && validate) ? (validate(inp.value) || '') : '';
     const check = () => { if(!hn) return; const e = bad(); hn.textContent = e || hint; hn.style.color = e && inp.value ? 'var(--error)' : 'var(--dim)'; ok.disabled = !!e; };
-    const done = v => { if(v !== null && v !== false && inp && bad()){ check(); inp.focus(); return; } bg.remove(); modalClose = null; res(v); };
-    modalClose = () => done(inp ? null : false);
+    const close = () => done(inp ? null : false);
+    const done = v => { if(v !== null && v !== false && inp && bad()){ check(); inp.focus(); return; } bg.remove(); modalOff(close); res(v); };
+    modalOn(close);
     cancel.onclick = () => done(inp ? null : false);
     ok.onclick = () => done(inp ? inp.value : true);
     bg.onclick = e => { if(e.target === bg) done(inp ? null : false); };
-    if(inp){ inp.onkeydown = e => { if(e.key === 'Enter' && !imeEnter(e)) done(inp.value); }; inp.oninput = check; check(); setTimeout(() => inp.focus(), 50); }
+    if(inp){ inp.onkeydown = e => { if(e.key === 'Enter' && !imeEnter(e) && (!multiline || e.ctrlKey || e.metaKey)){ e.preventDefault(); done(inp.value); } }; inp.oninput = check; check(); setTimeout(() => inp.focus(), 50); }
   });
 }
 const uiConfirm = (t, danger) => uiDialog(t, {okText: danger ? '削除' : 'OK', danger});
@@ -2948,6 +2998,7 @@ async function sendMsg(){
   $('send-btn').disabled = true;
   try{
     putSent(await api('/api/send', {To: to, Text: text}));
+    if(curAddr === to) forceBottom = true;
     renderMessages();
     renderList();
   }catch(e){
@@ -3063,7 +3114,7 @@ function notifyIncoming(m){
   }
   if(document.hidden || document.visibilityState === 'hidden'){
     try{
-      const n = new Notification(m.nick || addrShort(m.from||m.peer), {body: m.img ? ('📷 写真' + (m.text ? ' ' + m.text : '')) : m.text, tag: m.id || ('msg:'+m.peer)});
+      const n = new Notification(nickOr(m.nick, m.from||m.peer), {body: m.img ? ('📷 写真' + (m.text ? ' ' + m.text : '')) : m.text, tag: m.id || ('msg:'+m.peer)});
     }catch(e){}
   }
 }
@@ -3214,6 +3265,8 @@ function connectEvents(){
           else if(c.group && !c.req && !c.left && (state.joins || []).some(j => j.addr === c.addr)){ toast('「' + (c.nick || 'グループ') + '」に参加しました'); }
           if(c.group && !c.req && !c.left){ state.joins = (state.joins || []).filter(j => j.addr !== c.addr); hideToast('wait:' + c.addr); }
           if(curAddr === c.addr){ updateChatHeader(); if(c.group) renderMessages(); }
+          // an open group info follows the change (join requests, members, settings, admins) instead of going stale
+          if(curAddr === c.addr && c.group && $('group-info-screen').classList.contains('active') && !document.querySelector('.modal-bg')) openGroupInfo();
         }
       }else if(d.type === 'contact_del'){
         const cd = d.data;
@@ -3222,6 +3275,7 @@ function connectEvents(){
           state.messages = state.messages.filter(m => m.peer !== cd.addr);
           if(curAddr === cd.addr){
             document.body.classList.remove('chat-open');
+            ['contact-info-screen', 'group-info-screen', 'group-link-screen', 'group-pick-screen'].forEach(id => $(id).classList.remove('active'));
             curAddr = null;
           }
           renderList();
@@ -3248,11 +3302,13 @@ function connectEvents(){
       }else if(d.type === 'notice'){
         if(d.data && d.data.k === 'pw' && pendingJoin && pendingCode){
           pendingJoin = null;
-          uiPrompt(d.data.text + '\nパスワードを入力', '').then(v => { if(v) joinByCode(pendingCode, v); });
+          uiDialog(d.data.text + '\nパスワードを入力', {input: '', secret: true}).then(v => { if(v) joinByCode(pendingCode, v); });
         }else if(d.data && d.data.k === 'wait'){
           pendingJoin = null;
           const ga = d.data.g ? 'g:' + d.data.g : '', gc = ga && state.contacts[ga];
-          if(!(gc && gc.group && !gc.req && !gc.left)) toast('承認待ちです。チャット一覧に表示しています', 'wait:' + ga); // already a member: no stale "waiting" toast
+          // the join is retried for ~25 s and every retry gets this answer: say it once, not for half a minute
+          const wk = 'wait:' + ga, now = Date.now();
+          if(!(gc && gc.group && !gc.req && !gc.left) && !(now - (waitToastAt[wk] || 0) < 120000)){ waitToastAt[wk] = now; toast('承認待ちです。チャット一覧に表示しています', wk); } // already a member: no stale "waiting" toast
         }
         else if(d.data && d.data.k === 'store'){ uiAlert(String(d.data.text || '')); }
         else if(d.data && d.data.text){ pendingJoin = null; toast(d.data.text); }
@@ -3639,8 +3695,8 @@ async function fingerShow(addr, user){
   const b = document.createElement('div'); b.className = 'mb';
   const ok = document.createElement('button'); ok.className = 'ok'; ok.textContent = '閉じる';
   b.appendChild(ok); m.append(t, pre, b); bg.appendChild(m); document.body.appendChild(bg);
-  const done = () => { bg.remove(); modalClose = null; };
-  modalClose = done; ok.onclick = done; bg.onclick = e => { if(e.target === bg) done(); };
+  const done = () => { bg.remove(); modalOff(done); };
+  modalOn(done); ok.onclick = done; bg.onclick = e => { if(e.target === bg) done(); };
   try{
     const r = await api('/api/finger/query', {Addr: addr, User: user});
     if(r.via === 'yggchat') pre.textContent = 'Login: ' + (r.nick || 'anon') + '\t(YggChat)\nAddress: ' + r.addr + '\n' + (r.plan ? 'Plan:\n' + r.plan : 'No Plan.');
@@ -3658,8 +3714,8 @@ async function showText(title, url){
   const b = document.createElement('div'); b.className = 'mb';
   const ok = document.createElement('button'); ok.className = 'ok'; ok.textContent = '閉じる';
   b.appendChild(ok); m.append(t, pre, b); bg.appendChild(m); document.body.appendChild(bg);
-  const done = () => { bg.remove(); modalClose = null; };
-  modalClose = done; ok.onclick = done; bg.onclick = e => { if(e.target === bg) done(); };
+  const done = () => { bg.remove(); modalOff(done); };
+  modalOn(done); ok.onclick = done; bg.onclick = e => { if(e.target === bg) done(); };
   try{ const r = await fetch(url); if(!r.ok) throw new Error('HTTP ' + r.status); pre.textContent = await r.text(); }catch(e){ pre.textContent = '読み込めませんでした: ' + e.message; }
 }
 $('about-credits').addEventListener('click', () => showText('クレジットと第三者ライセンス', 'THIRD_PARTY_NOTICES.txt'));
@@ -3683,7 +3739,8 @@ function actionSheet(title, items){
     const bg = document.createElement('div'); bg.className = 'modal-bg';
     const m = document.createElement('div'); m.className = 'modal';
     if(title){ const t = document.createElement('div'); t.className = 'mt'; t.textContent = title; t.style.cssText = 'font-weight:400;font-size:13px;color:var(--dim);max-height:4.5em;overflow:hidden;'; m.appendChild(t); }
-    const done = v => { bg.remove(); modalClose = null; res(v); };
+    const close = () => done(null);
+    const done = v => { bg.remove(); modalOff(close); res(v); };
     items.forEach(it => {
       const b = document.createElement('button'); b.textContent = it.label;
       b.style.cssText = 'width:100%;text-align:left;' + (it.danger ? 'color:var(--error);' : '');
@@ -3691,7 +3748,7 @@ function actionSheet(title, items){
     });
     const c = document.createElement('button'); c.textContent = 'キャンセル'; c.style.width = '100%'; c.onclick = () => done(null); m.appendChild(c);
     bg.appendChild(m); document.body.appendChild(bg);
-    modalClose = () => done(null);
+    modalOn(close);
     bg.onclick = e => { if(e.target === bg) done(null); };
   });
 }
@@ -3716,7 +3773,7 @@ async function openMsgMenu(id){
   if(!k) return;
   if(k === 'copy'){ copyText(m.text); return; }
   if(k === 'edit'){
-    const v = await uiPrompt('メッセージを編集', m.text); if(v === null) return;
+    const v = await uiDialog('メッセージを編集', {input: m.text, multiline: true, okText: '保存'}); if(v === null) return;
     if(!v.trim() || v === m.text) return;
     try{
       const r = await api('/api/message/edit', {Peer: m.peer, ID: m.id, Text: v});
@@ -3818,7 +3875,7 @@ function openGroupInfo(){
   const c = state.contacts[curAddr]; if(!c) return;
   $('gi-name').textContent = c.nick || 'グループ';
   $('gi-avatar').style.background = hashColor(curAddr);
-  $('gi-count').textContent = c.left ? '退出済み' : ((c.members||[]).length + '人' + (c.owner ? '（上限' + (c.max || 24) + '人）' : ''));
+  $('gi-count').textContent = c.left ? (removedFrom(c) ? '外されました' : '退出済み') : ((c.members||[]).length + '人' + (c.owner ? '（上限' + (c.max || 24) + '人）' : ''));
   const host = c.owner === state.addr && !c.left;
   const admins = c.admins || [];
   const isAdm = a => admins.includes(a);
@@ -3848,7 +3905,7 @@ function openGroupInfo(){
   $('gi-set-note').textContent = canSet ? '' : 'ホストが決めた設定です';
   const pend = manage ? (c.pend || []) : [];
   $('gi-pend-sec').style.display = pend.length ? '' : 'none';
-  $('gi-pend').innerHTML = pend.map(p => '<div class="row" style="padding:6px 0;"><div class="row-main"><div class="row-title">' + escapeHtml(p.nick || 'anon') + '</div><div class="row-sub" style="font-family:ui-monospace,monospace;">' + escapeHtml(p.addr) + '</div></div><button class="gi-ok" data-addr="' + escapeHtml(p.addr) + '">承認</button><button class="gi-no" data-addr="' + escapeHtml(p.addr) + '" style="color:var(--error);">拒否</button></div>').join('');
+  $('gi-pend').innerHTML = pend.map(p => '<div class="row" style="padding:6px 0;"><div class="row-main"><div class="row-title">' + escapeHtml(nickOr(p.nick, p.addr)) + '</div><div class="row-sub" style="font-family:ui-monospace,monospace;">' + escapeHtml(p.addr) + '</div></div><button class="gi-ok" data-addr="' + escapeHtml(p.addr) + '">承認</button><button class="gi-no" data-addr="' + escapeHtml(p.addr) + '" style="color:var(--error);">拒否</button></div>').join('');
   $('group-info-screen').classList.add('active');
 }
 const canSetG = c => !c.left && !!c.owner && c.owner === state.addr;
@@ -3860,7 +3917,8 @@ async function groupSet(patch){
   catch(e){ toast(e.message); openGroupInfo(); return false; }
 }
 document.querySelectorAll('.gi-sw').forEach(sw => sw.addEventListener('click', () => {
-  const c = state.contacts[curAddr]; if(!c || c.owner !== state.addr) return;
+  const c = state.contacts[curAddr]; if(!c) return;
+  if(c.owner !== state.addr){ toast('グループ設定を変えられるのはホストだけです'); return; }
   const set = Object.assign({}, c.set || {}), k = sw.getAttribute('data-k');
   if(k === 'files') set.nf = !set.nf; else set[k] = !set[k];
   groupSet({Set: set});
@@ -3888,7 +3946,9 @@ $('gi-pw').addEventListener('click', async () => {
 $('gi-pend').addEventListener('click', async (e) => {
   const b = e.target.closest && e.target.closest('.gi-ok, .gi-no'); if(!b) return;
   const ok = b.classList.contains('gi-ok');
-  try{ const g = await api('/api/group/approve', {ID: curAddr.slice(2), Addr: b.getAttribute('data-addr'), OK: ok}); state.contacts[g.addr] = g; openGroupInfo(); renderList(); toast(ok ? '承認しました' : '拒否しました'); }catch(e){ toast(e.message); }
+  if(b.disabled) return;
+  b.parentNode.querySelectorAll('button').forEach(x => x.disabled = true); // double tap
+  try{ const g = await api('/api/group/approve', {ID: curAddr.slice(2), Addr: b.getAttribute('data-addr'), OK: ok}); state.contacts[g.addr] = g; openGroupInfo(); renderList(); toast(ok ? '承認しました' : '拒否しました'); }catch(e){ toast(e.message); openGroupInfo(); }
 });
 $('gi-back').addEventListener('click', () => $('group-info-screen').classList.remove('active'));
 $('gi-members').addEventListener('click', async (e) => {
@@ -3898,13 +3958,13 @@ $('gi-members').addEventListener('click', async (e) => {
     const a = adm.getAttribute('data-addr'), cur = c.admins || [];
     const on = !cur.includes(a);
     if(on && cur.length >= 10){ toast('副管理者は10人までです'); return; }
-    if(on && !(await uiDialog(((state.contacts[a]||{}).nick || addrShort(a)) + ' を副管理者にしますか？\n参加の承認・招待リンク・メンバーの追加と削除ができるようになります（設定の変更はホストだけ）。', {okText:'副管理者にする'}))) return;
+    if(on && !(await uiDialog((memberNick(curAddr, a, true) || nickOr('', a)) + ' を副管理者にしますか？\n参加の承認・招待リンク・メンバーの追加と削除ができるようになります（設定の変更はホストだけ）。', {okText:'副管理者にする'}))) return;
     if(await groupSet({Admins: on ? cur.concat([a]) : cur.filter(x => x !== a)})) toast(on ? '副管理者にしました' : '副管理者から外しました');
     return;
   }
   const b = e.target.closest && e.target.closest('.gi-kick'); if(!b) return;
   const a = b.getAttribute('data-addr');
-  const ok = await uiDialog(((state.contacts[a]||{}).nick || addrShort(a)) + ' をグループから外しますか？', {okText:'外す', danger:true});
+  const ok = await uiDialog((memberNick(curAddr, a, true) || nickOr('', a)) + ' をグループから外しますか？', {okText:'外す', danger:true});
   if(!ok) return;
   try{ const g = await api('/api/group/update', {ID: curAddr.slice(2), Remove: [a]}); state.contacts[g.addr] = g; updateChatHeader(); openGroupInfo(); renderList(); }catch(e){ toast(e.message); }
 });
@@ -3947,6 +4007,10 @@ $('gl-reset').addEventListener('click', async () => {
   openGroupLink(true);
 });
 $('gp-ok').addEventListener('click', async () => {
+  const btn = $('gp-ok'); if(btn.disabled) return;
+  btn.disabled = true; try{ await gpOk(); }finally{ btn.disabled = false; } // double tap made two groups
+});
+async function gpOk(){
   const picked = [...$('gp-list').querySelectorAll('input:checked')].map(i => i.value)
     .concat($('gp-addr').value.split(/[,\s、]+/).map(s => s.trim()).filter(Boolean));
   if(picked.some(a => !isYggAddr(a))){ toast('Yggdrasilアドレスではないものがあります'); return; }
@@ -3965,7 +4029,7 @@ $('gp-ok').addEventListener('click', async () => {
     }
     $('group-pick-screen').classList.remove('active');
   }catch(e){ toast(e.message); }
-});
+}
 $('gi-rename').addEventListener('click', async () => {
   const c = state.contacts[curAddr]; if(!c) return;
   const v = await uiPrompt('グループ名（メンバー全員に反映）', c.nick || ''); if(v === null || !v.trim()) return;
@@ -3986,8 +4050,11 @@ $('gi-delete').addEventListener('click', async () => {
 
 // Requests
 $('req-accept').addEventListener('click', async () => {
-  if(!curAddr) return;
-  try{ const c = await api('/api/contact', {Addr: curAddr, Accept: true}); state.contacts[curAddr] = c; updateChatHeader(); renderList(); toast('承認しました'); }catch(e){ toast(e.message); }
+  if(!curAddr || $('req-accept').disabled) return;
+  const a = curAddr, grp = isGroup(a);
+  $('req-accept').disabled = true; // double tap
+  try{ const c = await api('/api/contact', {Addr: a, Accept: true}); state.contacts[a] = c; if(curAddr === a) updateChatHeader(); renderList(); toast(grp ? '参加しました' : '承認しました'); }catch(e){ toast(e.message); }
+  finally{ $('req-accept').disabled = false; }
 });
 async function blockCur(){
   if(!curAddr) return;
@@ -4038,11 +4105,13 @@ $('img-input').addEventListener('change', async () => {
   const kb = Math.round(url.length * 0.75 / 1024);
   const cap = $('msg-text').value.trim();
   if(new TextEncoder().encode(cap).length > 800){ toast('写真に添える文章が長すぎます（約260文字まで）'); return; }
-  const okd = await uiDialog('この写真を送りますか？（' + kb + 'KB' + (cap ? '・入力中の文章を添えて' : '') + '）', {okText:'送信'});
-  if(!okd) return;
+  const to = curAddr;
+  const okd = await uiDialog('この写真を送りますか？（' + kb + 'KB' + (cap ? '・入力中の文章を添えて' : '') + '）', {okText:'送信', img:url});
+  if(!okd || !to) return;
   try{
-    const m = await api('/api/send', {To: curAddr, Text: cap, Img: url});
+    const m = await api('/api/send', {To: to, Text: cap, Img: url});
     putSent(m);
+    if(curAddr === to) forceBottom = true;
     if($('msg-text').value.trim() === cap){ $('msg-text').value = ''; $('msg-text').style.height = 'auto'; $('send-btn').disabled = true; }
     renderMessages(); renderList();
   }catch(e){ toast(e.message); }
@@ -4079,42 +4148,51 @@ $('iv-save').addEventListener('click', async () => {
   const a = document.createElement('a'); a.href = src; a.download = 'yggchat-' + Date.now() + '.' + ext; document.body.appendChild(a); a.click(); a.remove();
 });
 
-window.ygBack = () => {
-  if(qrscanClose){ qrscanClose(); return true; }
-  if($('img-viewer').classList.contains('active')){ closeViewer(); return true; }
-  if(modalClose){ modalClose(); return true; }
-  if($('group-link-screen').classList.contains('active')){ $('group-link-screen').classList.remove('active'); return true; }
-  if($('share-sheet').classList.contains('active')){ closeShareSheet(); return true; }
-  if($('group-pick-screen').classList.contains('active')){ $('group-pick-screen').classList.remove('active'); return true; }
-  if($('group-info-screen').classList.contains('active')){ $('group-info-screen').classList.remove('active'); return true; }
-  if($('contact-info-screen').classList.contains('active')){
-    closeContactInfo();
-    return true;
-  }
-  if($('settings-screen').classList.contains('active')){
-    closeSettings();
-    return true;
-  }
-  if($('peers-screen').classList.contains('active')){
-    closePeers();
-    return true;
-  }
-  if($('public-peers-screen').classList.contains('active')){
-    closePublicPeers();
-    return true;
-  }
-  if($('newchat-sheet').classList.contains('active')){
-    closeNewChat();
-    return true;
-  }
-  if(document.body.classList.contains('chat-open')){
-    document.body.classList.remove('chat-open');
-    curAddr = null;
-    renderList();
-    return true;
-  }
-  return false;
-};
+// Back: Android hardware back (MainActivity → ygBack), Escape, and the browser/PWA back
+// button (one guard history entry while anything is open) all close the topmost layer.
+const isOn = id => $(id).classList.contains('active');
+const wideChat = () => document.body.classList.contains('two-pane') && matchMedia('(min-width:820px)').matches;
+function topLayer(){
+  if(isOn('lock-screen')) return null;
+  if(qrscanClose) return () => qrscanClose();
+  if(isOn('img-viewer')) return closeViewer;
+  if(modalClose) return () => modalClose();
+  if(isOn('site-view-screen')) return () => $('sv-back').click();
+  if(isOn('group-link-screen')) return () => $('group-link-screen').classList.remove('active');
+  if(isOn('share-sheet')) return closeShareSheet;
+  if(isOn('group-pick-screen')) return () => $('group-pick-screen').classList.remove('active');
+  if(isOn('group-info-screen')) return () => $('group-info-screen').classList.remove('active');
+  if(isOn('contact-info-screen')) return closeContactInfo;
+  if(isOn('public-peers-screen')) return closePublicPeers;
+  if(isOn('peers-screen')) return closePeers;
+  if(isOn('settings-screen')) return closeSettings;
+  if(isOn('newchat-sheet')) return closeNewChat;
+  if(document.body.classList.contains('chat-open') && !wideChat()) return () => { document.body.classList.remove('chat-open'); curAddr = null; renderList(); };
+  return null;
+}
+window.ygBack = () => { const f = topLayer(); if(!f) return false; f(); return true; };
+document.addEventListener('keydown', e => {
+  if(e.key !== 'Escape' || e.isComposing || e.keyCode === 229) return;
+  if(window.ygBack()){ e.preventDefault(); e.stopPropagation(); }
+}, true);
+(function(){
+  if(window.YggAndroid) return; // the app's own back key already calls ygBack
+  let guard = false, skip = 0;
+  const sync = () => {
+    const open = !!topLayer();
+    if(open && !guard){ guard = true; try{ history.pushState({ygb:1}, ''); }catch(e){} }
+    else if(!open && guard && history.state && history.state.ygb){ guard = false; skip++; history.back(); }
+  };
+  let q = false;
+  const kick = () => { if(!q){ q = true; setTimeout(() => { q = false; sync(); }, 0); } };
+  window.addEventListener('popstate', () => {
+    if(skip){ skip--; return; }
+    guard = false;
+    window.ygBack();
+    kick();
+  });
+  new MutationObserver(kick).observe(document.body, {subtree:true, attributes:true, attributeFilter:['class'], childList:true});
+})();
 
 window.addEventListener('DOMContentLoaded', init);
 </script>

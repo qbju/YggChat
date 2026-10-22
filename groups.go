@@ -683,7 +683,11 @@ func (a *App) onGroupCtl(from string, w wire) {
 		return
 	case "gjn":
 		host, waiting := a.joinHostLocked(w.G)
+		if waiting && host == from && staleJoinAnswer(a, w.G, w) {
+			waiting = false // answers an older request without the password: keep waiting for ours
+		}
 		if waiting && host == from {
+			joinAttempt(a, w.G, true) // answered: stop re-sending this request
 			if w.K == "wait" {
 				a.setJoinLocked(w.G, host, joinApproveWait) // approval pending: keep listening for the host's gi
 			} else {
@@ -1077,7 +1081,7 @@ func (a *App) nameOf(addr string) string {
 	}
 	a.store.mu.Lock()
 	defer a.store.mu.Unlock()
-	if c, ok := a.store.Contacts[addr]; ok && c.Nick != "" {
+	if c, ok := a.store.Contacts[addr]; ok && realNick(c.Nick) {
 		return c.Nick
 	}
 	if len(addr) > 9 {
@@ -1085,6 +1089,10 @@ func (a *App) nameOf(addr string) string {
 	}
 	return addr
 }
+
+// realNick: "anon" is the default name of a node that never set one; system
+// lines use the short address for it instead, which the UI turns into a name.
+func realNick(n string) bool { return n != "" && n != "anon" }
 
 // gNameOf names a member in a group's system lines: their contact name, else
 // the name on their group messages or join request, else a short address
@@ -1095,17 +1103,17 @@ func (a *App) gNameOf(g Group, addr string) string {
 	}
 	a.store.mu.Lock()
 	defer a.store.mu.Unlock()
-	if c, ok := a.store.Contacts[addr]; ok && c.Nick != "" {
+	if c, ok := a.store.Contacts[addr]; ok && realNick(c.Nick) {
 		return c.Nick
 	}
 	key := gKey(g.ID)
 	for i := len(a.store.Messages) - 1; i >= 0; i-- {
-		if m := a.store.Messages[i]; m.Peer == key && m.From == addr && m.Nick != "" && !m.Hid {
+		if m := a.store.Messages[i]; m.Peer == key && m.From == addr && realNick(m.Nick) && !m.Hid {
 			return m.Nick
 		}
 	}
 	for _, p := range g.Pend {
-		if p.Addr == addr && p.Nick != "" {
+		if p.Addr == addr && realNick(p.Nick) {
 			return p.Nick
 		}
 	}

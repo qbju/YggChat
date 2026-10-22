@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -40,6 +41,59 @@ const (
 	joinWaitTTL     = 10 * 60      // a join request is answered within seconds
 	joinApproveWait = 24 * 60 * 60 // the host said "wait for approval"
 )
+
+// joinTries numbers our join attempts per group, so an older attempt's
+// retries stop (in memory; a restart drops the retries anyway). pw says the
+// current attempt carries a password.
+var joinTries = struct {
+	sync.Mutex
+	m map[string]joinTry
+}{m: map[string]joinTry{}}
+
+type joinTry struct {
+	n  int
+	pw bool
+}
+
+// joinPwNeeded is the host's answer to a request without a password.
+const joinPwNeeded = "このグループに入るにはパスワードが必要です"
+
+// joinAttempt returns the current attempt number for gid; next bumps it
+// (an answer arrived: the retries stop, the password flag stays).
+func joinAttempt(a *App, gid string, next bool) int {
+	joinTries.Lock()
+	defer joinTries.Unlock()
+	k := a.addr + "|" + gid
+	t := joinTries.m[k]
+	if next {
+		t.n++
+		joinTries.m[k] = t
+	}
+	return t.n
+}
+
+// joinStart starts a new join attempt for gid; pw says it carries a password.
+func joinStart(a *App, gid string, pw bool) int {
+	joinTries.Lock()
+	defer joinTries.Unlock()
+	k := a.addr + "|" + gid
+	t := joinTries.m[k]
+	t.n++
+	t.pw = pw
+	joinTries.m[k] = t
+	return t.n
+}
+
+// staleJoinAnswer: "password needed" can only answer an older request sent
+// without one, never our current request that carries the password.
+func staleJoinAnswer(a *App, gid string, w wire) bool {
+	if w.K != "pw" || w.Text != joinPwNeeded {
+		return false
+	}
+	joinTries.Lock()
+	defer joinTries.Unlock()
+	return joinTries.m[a.addr+"|"+gid].pw
+}
 
 // joinHostLocked returns the host our join of gid waits for. Caller holds a.store.mu.
 func (a *App) joinHostLocked(gid string) (string, bool) {
@@ -193,7 +247,7 @@ func (a *App) onJoin(from string, w wire, g Group, known bool) {
 			}
 		}
 		if !good {
-			text := "このグループに入るにはパスワードが必要です"
+			text := joinPwNeeded
 			if w.Pw != "" {
 				a.pwLimited(from, true)
 				text = "パスワードが違います"
@@ -325,6 +379,7 @@ func (a *App) inviteHandlers(mux *http.ServeMux) {
 		a.store.save()
 		nick := a.store.Nick
 		a.store.mu.Unlock()
+		try := joinStart(a, gid, req.Pw != "")
 		jw := wire{T: "gj", G: gid, Tok: tok, Nick: nick, Pw: req.Pw, PN: joinPow(a.addr, gid, tok)}
 		go func() {
 			a.hello(host) // the first packets to a new peer often go nowhere while its route is looked up
@@ -333,7 +388,10 @@ func (a *App) inviteHandlers(mux *http.ServeMux) {
 				a.store.mu.Lock()
 				_, waiting := a.joinHostLocked(gid)
 				a.store.mu.Unlock()
-				if !waiting {
+				// stop once the host answered or a newer attempt (e.g. with the password) started:
+				// the old request's retries got "password needed" back, which dropped the new join
+				// and the host's approval then arrived as a plain invitation.
+				if !waiting || joinAttempt(a, gid, false) != try {
 					return
 				}
 				a.sendWire(host, jw)
