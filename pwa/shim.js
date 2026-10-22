@@ -492,12 +492,13 @@
   }
   const gHash = async g => hexOf(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(g.name + '\n' + g.members.slice().sort().join(',')))).slice(0, 8);
   const hasM = (g, a) => g.members.includes(a);
-  const nameOf = a => a === addr ? 'あなた' : ((st.contacts[a] && st.contacts[a].nick) || a.slice(0, 9) + '…');
+  const realNick = n => !!n && n !== 'anon'; // 'anon' = never named: system lines use the short address (the UI names it)
+  const nameOf = a => a === addr ? 'あなた' : ((st.contacts[a] && realNick(st.contacts[a].nick)) ? st.contacts[a].nick : a.slice(0, 9) + '…');
   // A member in a group's system lines: contact name, else their group-message or join nick, else a short address (the UI names it later).
   function gNameOf(g, a) {
-    if (a === addr || (st.contacts[a] && st.contacts[a].nick)) return nameOf(a);
-    for (let i = st.messages.length - 1; i >= 0; i--) { const m = st.messages[i]; if (m.peer === 'g:' + g.id && m.from === a && m.nick && !m.hid) return m.nick; }
-    const p = (g.pend || []).find(x => x.addr === a && x.nick); return p ? p.nick : nameOf(a);
+    if (a === addr || (st.contacts[a] && realNick(st.contacts[a].nick))) return nameOf(a);
+    for (let i = st.messages.length - 1; i >= 0; i--) { const m = st.messages[i]; if (m.peer === 'g:' + g.id && m.from === a && realNick(m.nick) && !m.hid) return m.nick; }
+    const p = (g.pend || []).find(x => x.addr === a && realNick(x.nick)); return p ? p.nick : nameOf(a);
   }
   function gSys(g, text) { addMessage({ id: 's' + Date.now().toString(16) + Math.random().toString(16).slice(2, 5), peer: 'g:' + g.id, from: addr, ts: now(), sys: text, out: true }); }
   const giWire = g => { const w = { t: 'gi', g: g.id, gn: g.name, gm: g.members, go: g.owner || undefined, gv: g.v || undefined, gsv: g.sv || undefined, gad: (g.admins && g.admins.length) ? g.admins : undefined, ts: g.vat || undefined }; if (g.owner) w.gs = cleanSet(g.set); return w; };

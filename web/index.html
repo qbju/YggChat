@@ -2117,6 +2117,7 @@ function memberNick(gaddr, a, bare){
 // System lines carry a short address ("209:201d:…") when the node did not
 // know the name yet: show the name we know now instead.
 function sysNames(c, t){
+  t = String(t).replace(/(^| )anon(?= )/g, '$1名前未設定のメンバー'); // lines written before nodes stopped using the default name
   return t.replace(/([23][0-9a-f]{2}:[0-9a-f:]{0,6})…/gi, (all, pre) => {
     const cand = (c.members || []).concat((c.pend || []).map(p => p.addr)).find(a => a.startsWith(pre));
     let n = cand ? memberNick(c.addr, cand, true) : '';
