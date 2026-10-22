@@ -7,9 +7,23 @@ B = f"https://gitlab.com/api/v4/projects/{P}/merge_requests/{MR}"
 URL = f"https://gitlab.com/fdroid/fdroiddata/-/merge_requests/{MR}"
 SF = os.environ.get("STATE_DIR","state")+"/fdroid_mr.json"
 st = load(SF, {})
-mr = getjson(B)
-notes = getjson(B + "/notes?sort=desc&per_page=20")
-pipes = getjson(B + "/pipelines")
+try:
+    mr = getjson(B)
+    notes = getjson(B + "/notes?sort=desc&per_page=20")
+    pipes = getjson(B + "/pipelines")
+except Exception as e:
+    err = getattr(e, "code", None)
+    body = ""
+    try: body = e.read()[:300].decode("utf-8", "ignore")
+    except Exception: pass
+    st["last_error"] = f"{type(e).__name__} {err} {body}"
+    st["error_count"] = st.get("error_count", 0) + 1
+    save(SF, st)
+    print("ERROR", st["last_error"])
+    if st["error_count"] == 8:
+        notify("[F-Droid] MR見張りが2日間失敗してる", st["last_error"])
+    sys.exit(0)
+st["error_count"] = 0; st.pop("last_error", None)
 msgs = []
 last = st.get("last_note_id", 0)
 for n in sorted(notes, key=lambda x: x["id"]):
