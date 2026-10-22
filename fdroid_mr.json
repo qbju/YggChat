@@ -1,1 +1,12 @@
-{"last_note_id":4068049987,"state":"opened","labels":["New App","waiting-for-upstream"],"pipeline_id":2976647500,"pipeline_status":"success"}
+{
+ "last_note_id": 4068049987,
+ "state": "opened",
+ "labels": [
+  "New App",
+  "waiting-for-upstream"
+ ],
+ "pipeline_id": 2976647500,
+ "pipeline_status": "success",
+ "last_error": "HTTPError 401 {\"message\":\"401 Unauthorized\"}",
+ "error_count": 1
+}
