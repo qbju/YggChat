@@ -59,7 +59,7 @@ function check(n, label) {
   let n = null, cnt = 0, lastPkts = [];
   for (let it = 0; it < ITER; it++) {
     if (!n || cnt >= 150) { n = makeNode({ addr: F.ME, store: F.store() }); await n.ready(); cnt = 0; lastPkts = []; }
-    const typed = rnd() < 0.75, s = packet(typed), src = pick([F.A, F.B, F.C, F.S, F.A, F.B]);
+    const typed = rnd() < 0.75, s = packet(typed), src = rnd() < 0.15 ? '2' + Math.floor(rnd() * 255).toString(16).padStart(2, '0') + ':' + Math.floor(rnd() * 65535).toString(16) + '::' + it.toString(16) : pick([F.A, F.B, F.C, F.S, F.A, F.B]);
     lastPkts.push(src + ' ' + s.slice(0, 300)); if (lastPkts.length > 4) lastPkts.shift();
     if (process.env.V) console.log(it, src, s.slice(0, 200)); const t0 = Date.now(); n.pkt(src, s); cnt++; if (Date.now() - t0 > 300) console.log('SLOW', Date.now() - t0, 'ms', s.slice(0, 300));
     if (it % 5 === 0) await n.settle(3);

@@ -54,8 +54,9 @@ const postSig = (kp, gid, pid, ts, text) => Buffer.from(Y.signHex(kp, 'ygg-gpost
     const n = await node();
     n.pkt(A, { t: 'msg', id: 'wt1', text: 'x', ts: '12' }); n.pkt(A, { t: 'msg', id: 'wt2', text: ['x'] }); n.pkt(A, { t: 'msg', id: 'wt3', text: 'x', ttl: 1.5 });
     n.pkt(A, { t: 'msg', id: 'wt4', text: 'ok', ts: 2 ** 60 }); // Go int64 takes it
+    n.pkt(A, { t: 'msg', id: 'wt5', text: 'x', ttl: 2 ** 32 + 300 }); // an int field past int32 (|0 made it 300)
     await wait(20); await n.settle(10);
-    ok(!n.st.messages.some(m => /^wt[123]$/.test(m.id)), 'wrong types dropped');
+    ok(!n.st.messages.some(m => /^wt[1235]$/.test(m.id)), 'wrong types / int32 overflow dropped');
     ok(n.st.messages.some(m => m.id === 'wt4'), 'big int64 ts accepted (clamped)');
   }
   { // 5. out-of-range ttl is ignored (was clamped: 99999999 -> 4 weeks, -5 -> off)
@@ -106,6 +107,13 @@ const postSig = (kp, gid, pid, ts, text) => Buffer.from(Y.signHex(kp, 'ygg-gpost
     ok(!Object.keys(n2.st.groups).some(g => g !== G1) && n2.st.groups[G1].members.length === 3, 'non-msg box ignored');
     await n2.T.nostrFetch(); await n2.settle(10);
     ok(n2.st.messages.filter(m => m.id === 'nb6').length === 1, 'second fetch: no duplicate');
+  }
+  { // 9. a msg without an id was stored with id undefined (String(undefined) passed the id check)
+    const n = await node();
+    n.pkt(A, { t: 'msg', text: 'no id', ts: now() }); n.pkt(A, { t: 'msg', id: '', text: 'empty id', ts: now() });
+    await wait(20); await n.settle(10);
+    ok(!n.st.messages.some(m => m.text === 'no id' || m.text === 'empty id'), 'msg without id dropped');
+    ok(!n.sent.some(x => x.w.t === 'ack' && !x.w.id), 'no ack without id');
   }
   clearInterval(keep);
   console.log(passes + ' passed, ' + fails + ' failed');

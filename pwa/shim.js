@@ -1223,9 +1223,10 @@
   function wireOf(json) {
     let o; try { o = JSON.parse(json); } catch { return null; }
     if (o === null || typeof o !== 'object' || Array.isArray(o)) return null;
-    const w = {};
-    for (const k of WSTR) { const v = o[k]; if (v == null) continue; if (typeof v !== 'string') return null; w[k] = wellFormed(v); }
-    for (const k of WINT) { const v = o[k]; if (v == null) continue; if (!isInt(v)) return null; w[k] = v; }
+    const w = {}; // absent fields are Go's zero values: a missing id is "" (String(undefined) passed the id checks as "undefined")
+    for (const k of WSTR) { const v = o[k]; if (v == null) { w[k] = ''; continue; } if (typeof v !== 'string') return null; w[k] = wellFormed(v); }
+    // Go int fields as on a 32-bit build (ts is int64): the handlers use |0, which wrapped bigger ones (2^32+5 -> 5).
+    for (const k of WINT) { const v = o[k]; if (v == null) { w[k] = 0; continue; } if (!isInt(v) || (k !== 'ts' && (v | 0) !== v)) return null; w[k] = v; }
     for (const k of ['gm', 'gad']) {
       const v = o[k]; if (v == null) continue;
       if (!Array.isArray(v) || v.some(x => x != null && typeof x !== 'string')) return null;
@@ -1235,7 +1236,7 @@
       const v = o.gs; if (typeof v !== 'object' || Array.isArray(v)) return null;
       const s = {};
       for (const k of ['nf', 'ap', 'hi', 'pw']) { if (v[k] == null) continue; if (typeof v[k] !== 'boolean') return null; if (v[k]) s[k] = true; }
-      for (const k of ['ttl', 'mx', 'pb']) { if (v[k] == null) continue; if (!isInt(v[k])) return null; if (v[k]) s[k] = v[k]; }
+      for (const k of ['ttl', 'mx', 'pb']) { if (v[k] == null) continue; if (!isInt(v[k]) || (v[k] | 0) !== v[k]) return null; if (v[k]) s[k] = v[k]; }
       w.gs = s;
     }
     if (o.gt != null) {

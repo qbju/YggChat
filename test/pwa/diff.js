@@ -89,7 +89,8 @@ function genPkt(t) {
     }
   }
   for (const k of Object.keys(w)) if (w[k] === undefined) delete w[k];
-  if (rnd() < 0.12) { const k = pick(Object.keys(w).concat(['ts', 'gm', 'gs'])); w[k] = pick(['5', 5, 1.5, true, null, {}, [], ['x'], { nf: 'yes' }, 2 ** 60]); }
+  if (rnd() < 0.08) delete w[pick(Object.keys(w).filter(k => k !== 't').concat(['id']))];
+  if (rnd() < 0.12) { const k = pick(Object.keys(w).concat(['ts', 'gm', 'gs'])); w[k] = pick(['5', 5, 1.5, true, null, {}, [], ['x'], { nf: 'yes' }, k === 'ts' ? 2 ** 60 : 2 ** 31 - 1]); }
   let s = JSON.stringify(w);
   if (rnd() < 0.05) s = s.replace('{', pick(['{"__proto__":{"t":"msg"},', '{"_checked":true,', '{"constructor":{"prototype":{"x":1}},', '{"T":"zz",']));
   return [[from, s]];
@@ -110,7 +111,7 @@ function norm(st) {
   const o = { contacts: {}, messages: [], groups: {}, gone: Object.keys(st.gone || {}).sort(), early: Object.keys(st.early || {}).sort() };
   for (const [k, c] of Object.entries(st.contacts || {})) o.contacts[k] = { nick: c.nick || '', req: B(c.req), shared: B(c.shared), ttl: c.ttl | 0, bio: c.bio || '', avatar: c.avatar || '', hasprof: B(c.hasprof), pk: c.pk || '' };
   for (const m of st.messages || []) { if (m.hid) continue; o.messages.push([m.peer, m.sys ? 'sys' : m.id, m.from || '', m.text || '', B(m.out), B(m.edited), m.via || '', B(m.hist), m.sys || '', (m.ttl | 0) > 0, B(m.sg), m.out ? (m.status || '') : '', m.nick || ''].join(' ¦ ')); }
-  for (const [k, g] of Object.entries(st.groups || {})) o.groups[k] = { name: g.name, members: (g.members || []).slice().sort(), owner: g.owner || '', admins: (g.admins || []).slice().sort(), v: g.v | 0, sv: g.sv | 0, left: B(g.left), req: B(g.req), stub: B(g.stub), quit: B(g.quit), set: JSON.stringify(Object.fromEntries(Object.entries(g.set || {}).filter(([, v]) => v).sort())), ban: (g.ban || []).slice().sort(), keys: Object.keys(g.keys || {}).sort(), gone: (g.gone || []).slice().sort() };
+  for (const [k, g] of Object.entries(st.groups || {})) o.groups[k] = { name: g.name, members: (g.members || []).slice().sort(), owner: g.owner || '', admins: (g.admins || []).slice().sort(), v: g.v || 0, sv: g.sv || 0, left: B(g.left), req: B(g.req), stub: B(g.stub), quit: B(g.quit), set: JSON.stringify(Object.fromEntries(Object.entries(g.set || {}).filter(([, v]) => v).sort())), ban: (g.ban || []).slice().sort(), keys: Object.keys(g.keys || {}).sort(), gone: (g.gone || []).slice().sort() };
   return o;
 }
 const name = a => { for (const [n, x] of Object.entries(K)) if (x.addr === a) return n; return a; };
