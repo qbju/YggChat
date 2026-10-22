@@ -43,7 +43,7 @@
   const idbPut = (k, v) => idbDo(db => new Promise((res, rej) => { const t = db.transaction('kv', 'readwrite'); t.objectStore('kv').put(v, k); t.oncomplete = res; t.onerror = () => rej(t.error); t.onabort = () => rej(t.error || new DOMException('transaction aborted', 'AbortError')); }));
   let raw = {};
   const outer = { key: '', peers: null, enc: null };
-  const blank = () => ({ nick: 'anon', bio: '', avatar: '', contacts: {}, messages: [], blocked: {}, nostrOn: true, nostrRelays: [], ctl: [], groups: {}, powStrict: false, joins: {} });
+  const blank = () => ({ nick: 'anon', bio: '', avatar: '', contacts: {}, messages: [], blocked: {}, nostrOn: true, nostrRelays: [], ctl: [], groups: {}, powStrict: false, joins: {}, gone: {}, early: {} });
   let st = blank();
   let locked = false;
   let aesKey = null; // CryptoKey while unlocked with a passcode
@@ -93,7 +93,7 @@
     if (!outer.peers) outer.peers = RECOMMENDED.slice();
     locked = !!outer.enc;
     if (!locked) restoreOutbox(raw);
-    if (!locked) { Object.assign(st, { nick: raw.nick || 'anon', bio: raw.bio || '', avatar: raw.avatar || '', contacts: raw.contacts || {}, messages: raw.messages || [], blocked: raw.blocked || {}, domain: raw.domain || undefined, nostrOn: raw.key ? !!raw.nostrOn : true, nostrLegacy: !!raw.nostrLegacy, nostrRelays: raw.nostrRelays || [], ctl: raw.ctl || [], groups: raw.groups || {}, powStrict: !!raw.powStrict, joins: raw.joins || {} }); migrate(); }
+    if (!locked) { Object.assign(st, { nick: raw.nick || 'anon', bio: raw.bio || '', avatar: raw.avatar || '', contacts: raw.contacts || {}, messages: raw.messages || [], blocked: raw.blocked || {}, domain: raw.domain || undefined, nostrOn: raw.key ? !!raw.nostrOn : true, nostrLegacy: !!raw.nostrLegacy, nostrRelays: raw.nostrRelays || [], ctl: raw.ctl || [], groups: raw.groups || {}, powStrict: !!raw.powStrict, joins: raw.joins || {}, gone: raw.gone || {}, early: raw.early || {} }); migrate(); }
   }
 
   // Outbox (v0.19.2): a message we just sent is also written to localStorage at
@@ -201,7 +201,7 @@
 
   function addMessage(m) {
     if (isG(m.peer) && !m.out && !m.sys && m.from && st.messages.some(x => x.peer === m.peer && x.from === m.from && !x.out && samePost(x.id, m.id))) return; // one post, one message (v0.19.2)
-    st.messages.push(m);
+    if (!m.out && !m.sys && !isG(m.peer)) insertByTime(m); else st.messages.push(m);
     // Cap the visible history; pending group copies are never dropped (v0.19.1).
     if (st.messages.length > 5000) { let over = st.messages.length - 5000; st.messages = st.messages.filter(x => { if (over > 0 && !x.hid && !(x.out && x.status !== 'sent')) { over--; return false; } return true; }); }
     let c = st.contacts[m.peer];
@@ -210,6 +210,62 @@
     else if (!m.out && m.nick && !c.renamed && c.nick !== m.nick) { c.nick = m.nick; emit('contact', c); }
     save();
     emit('message', m);
+  }
+
+  // Incoming 1:1 messages are stored in time order: queued and Nostr-parked ones
+  // arrive late and out of order (v0.19.3, as the native node).
+  function insertByTime(m) {
+    let i = st.messages.length;
+    for (let k = 0; i > 0 && k < 2000 && (st.messages[i - 1].ts || 0) > m.ts; k++) i--;
+    st.messages.splice(i, 0, m);
+  }
+
+  // ---- 1:1 tombstones and early edits (v0.19.3, same rules as msgedit.go) ----
+  // st.gone["peer/id"] = until: unsent by a contact, or deleted / expired here; a late
+  // Nostr box or a retry is acked and dropped. st.early["peer/id"] = {text, at}: an edit
+  // that overtook its message, applied when it lands.
+  const TOMBKEEP = 10 * 86400, GONEMAX = 20000, EARLYMAX = 500, EARLYPEER = 50;
+  function markGone(peer, id) {
+    const t = now(); st.gone = st.gone || {};
+    if (Object.keys(st.gone).length >= GONEMAX) {
+      for (const k in st.gone) if (st.gone[k] <= t) delete st.gone[k];
+      const ks = Object.keys(st.gone);
+      if (ks.length >= GONEMAX * 0.9) { ks.sort((a, b) => st.gone[a] - st.gone[b]); for (const k of ks.slice(0, ks.length - Math.floor(GONEMAX * 0.9) + 1)) delete st.gone[k]; }
+    }
+    st.gone[peer + '/' + id] = t + TOMBKEEP;
+    if (st.early) delete st.early[peer + '/' + id];
+  }
+  // An incoming 1:1 message removed here while a copy of it could still arrive.
+  function goneIfRecent(m) { if (!m || m.out || m.sys || m.hid || isG(m.peer) || (m.ts || 0) < now() - TOMBKEEP) return; markGone(m.peer, m.id); }
+  const isGoneMsg = (peer, id) => { const t = st.gone && st.gone[peer + '/' + id]; return !!t && t > now(); };
+  function addEarly(peer, id, text) {
+    const t = now(), k = peer + '/' + id; st.early = st.early || {};
+    let n = 0;
+    for (const x in st.early) { if (t - (st.early[x].at || 0) > TOMBKEEP) delete st.early[x]; else if (x.startsWith(peer + '/')) n++; }
+    if (!(k in st.early) && (n >= EARLYPEER || Object.keys(st.early).length >= EARLYMAX)) return;
+    st.early[k] = { text, at: t };
+  }
+  function takeEarly(peer, id) { const k = peer + '/' + id, e = st.early && st.early[k]; if (!e) return null; delete st.early[k]; return String(e.text || ''); }
+  const stillOut = (peer, id) => st.messages.some(x => x.peer === peer && x.id === id);
+  // An ack nobody waits for (the peer read our Nostr box and acked directly, or an
+  // earlier try got through after we gave up): the message is delivered; a pending
+  // edit/unsend is done (v0.19.3).
+  function lateAck(from, id) {
+    let found = false;
+    for (let i = st.messages.length - 1; i >= 0; i--) { const m = st.messages[i]; if (m.id === id && m.peer === from && m.out) { found = m.status === 'queued' || m.status === 'stored'; break; } }
+    const n = (st.ctl || []).length; st.ctl = (st.ctl || []).filter(c => !(c.peer === from && c.w.id === id));
+    if (st.ctl.length !== n) save();
+    if (found) setStatus(from, id, 'sent');
+  }
+  // Message requests (stranger / not yet accepted) are limited: 20/min per address,
+  // 120/min in all. Over the limit no ack, so the sender retries later (v0.19.3).
+  const reqT = { all: [], peer: new Map() };
+  function strangerOK(from) {
+    const t = Date.now(), cut = t - 60000, trim = a => { let i = 0; while (i < a.length && a[i] <= cut) i++; return i ? a.slice(i) : a; };
+    reqT.all = trim(reqT.all); const p = trim(reqT.peer.get(from) || []);
+    if (p.length >= 20 || reqT.all.length >= 120) { reqT.peer.set(from, p); return false; }
+    if (reqT.peer.size > 4096) for (const [k, v] of reqT.peer) if (!trim(v).length) reqT.peer.delete(k);
+    p.push(t); reqT.peer.set(from, p); reqT.all.push(t); return true;
   }
 
   function setStatus(peer, id, status) {
@@ -271,13 +327,21 @@
     const okID = x => /^[0-9A-Za-z_-]{1,40}$/.test(String(x || ''));
     if (!okID(w.id) || !okID(w.ref)) return false;
     const i = st.messages.findIndex(m => m.peer === src && m.id === w.ref && !m.out && m.from === src);
+    const t = String(w.text || ''), okText = !!t.trim() && u8len(t) <= MAXRECV;
+    let upd = null, del = false;
     if (i >= 0) {
-      if (w.t === 'edit') {
-        const t = String(w.text || '');
-        if (t.trim() && u8len(t) <= MAXRECV) { st.messages[i].text = t; st.messages[i].edited = true; save(); emit('msg_upd', st.messages[i]); }
-      } else { st.messages.splice(i, 1); save(); emit('msg_del', { peer: src, id: w.ref }); }
+      if (w.t === 'edit') { if (okText) { st.messages[i].text = t; st.messages[i].edited = true; upd = st.messages[i]; } }
+      else { st.messages.splice(i, 1); del = true; }
     }
-    return true;
+    // The message itself may still be on its way (retry, offline queue, Nostr box):
+    // remember the unsend / edit so it applies when it lands. Contacts only, so a
+    // stranger can't fill the store (v0.19.3).
+    const known = !!st.contacts[src];
+    if (known && w.t === 'del') markGone(src, w.ref);
+    else if (known && w.t === 'edit' && i < 0 && okText && !isGoneMsg(src, w.ref)) addEarly(src, w.ref, t);
+    if (i >= 0) save(); else if (known) saveSoon();
+    if (upd) emit('msg_upd', upd); else if (del) emit('msg_del', { peer: src, id: w.ref });
+    return true; // ack even if unknown, so the sender stops retrying
   }
   const hello = p => send(p, { t: 'hi', pk: myPK() });
   function helloAll() { if (!locked) for (const p of Object.keys(st.contacts)) hello(p); }
@@ -286,8 +350,9 @@
   function acceptMsg(src, w, img) {
     if ((w.text != null && typeof w.text !== 'string') || (!w.text && !img) || u8len(w.text) > MAXRECV || !/^[0-9A-Za-z_-]{1,40}$/.test(String(w.id))) return false;
     if (locked || st.blocked[src]) return false;
-    if (st.messages.some(m => m.peer === src && m.id === w.id)) return true;
+    if (isGoneMsg(src, String(w.id)) || st.messages.some(m => m.peer === src && m.id === w.id)) return true; // unsent by them, or deleted/expired here (v0.19.3)
     if (!powCheck(src, w)) return false;
+    { const c1 = st.contacts[src]; if ((!c1 || c1.req) && !strangerOK(src)) return false; } // request flood: no ack, they retry later
     let ttl = w.ttl | 0; if (ttl < 0 || ttl > MAXTTL) ttl = 0;
     // Only a message newer than the last change moves the timer (late Nostr copies come in any order), v0.19.2.
     const c0 = st.contacts[src], at = Math.min(Math.trunc(+w.ts || 0), now() + 300);
@@ -295,6 +360,7 @@
     const m = { id: w.id, peer: src, from: src, nick: cleanNick(w.nick), text: w.text || '', ts: inTs(w.ts), out: false };
     if (img) m.img = img;
     if (ttl) { m.ttl = ttl; m.exp = now() + ttl; }
+    { const e = takeEarly(src, m.id); if (e != null && e.trim()) { m.text = e; m.edited = true; } } // its edit overtook it
     addMessage(m);
     return true;
   }
@@ -929,7 +995,12 @@
     if (w.t === 'mh' || w.t === 'mc') { if (!(st.blocked && st.blocked[src])) onMoveIn(src, w); return; }
     if (w.t === 'mha' || w.t === 'mca' || w.t === 'mok' || w.t === 'mng') { onMoveAck(src, w); return; }
     if (w.t === 'fca') { const g = chunkAcks.get(w.id); if (g && ackFrom.get(w.id) === src) g.add(w.i | 0); return; }
-    if (w.t === 'ack') { const f = acks.get(w.id); if (f && ackFrom.get(w.id) === src) { acks.delete(w.id); ackFrom.delete(w.id); f(); } askPK(src); return; }
+    if (w.t === 'ack') {
+      const f = acks.get(w.id);
+      if (f && ackFrom.get(w.id) === src) { acks.delete(w.id); ackFrom.delete(w.id); f(); }
+      else if (!f && !locked && /^[0-9A-Za-z_-]{1,40}$/.test(String(w.id))) lateAck(src, String(w.id));
+      askPK(src); return;
+    }
     if (w.t === 'pow') { onPowNeed(src, w); return; }
     if (locked || st.blocked[src]) return; // stay silent: the sender keeps it queued
     if (w.pk) learnPK(src, String(w.pk));
@@ -966,6 +1037,39 @@
     const bytes = unb64(m[2]);
     return bytes.length && bytes.length <= IMGMAX ? { mime: m[1], bytes } : null;
   }
+  // Decompression bombs (v0.19.3, as imgdims.go): a 600 KB PNG/GIF/WebP can claim
+  // 50000x50000 px. Only the header is read; at most 8192 px a side and ~25 MP.
+  function imgDims(mime, b) {
+    const be16 = i => (b[i] << 8) | b[i + 1], le16 = i => b[i] | (b[i + 1] << 8), be32 = i => ((b[i] << 24) >>> 0) + (b[i + 1] << 16) + (b[i + 2] << 8) + b[i + 3];
+    if (mime === 'image/png') { if (b.length < 24 || b[0] !== 0x89 || b[1] !== 0x50 || String.fromCharCode(...b.subarray(12, 16)) !== 'IHDR') return null; return [be32(16), be32(20)]; }
+    if (mime === 'image/gif') { if (b.length < 10 || !/^GIF8[79]a$/.test(String.fromCharCode(...b.subarray(0, 6)))) return null; return [le16(6), le16(8)]; }
+    if (mime === 'image/webp') {
+      if (b.length < 30 || String.fromCharCode(...b.subarray(0, 4)) !== 'RIFF' || String.fromCharCode(...b.subarray(8, 12)) !== 'WEBP') return null;
+      const k = String.fromCharCode(...b.subarray(12, 16));
+      if (k === 'VP8X') return [(b[24] | (b[25] << 8) | (b[26] << 16)) + 1, (b[27] | (b[28] << 8) | (b[29] << 16)) + 1];
+      if (k === 'VP8 ') { if (b[23] !== 0x9d || b[24] !== 0x01 || b[25] !== 0x2a) return null; return [le16(26) & 0x3fff, le16(28) & 0x3fff]; }
+      if (k === 'VP8L') { if (b[20] !== 0x2f) return null; const v = (b[21] | (b[22] << 8) | (b[23] << 16) | (b[24] << 24)) >>> 0; return [(v & 0x3fff) + 1, ((v >>> 14) & 0x3fff) + 1]; }
+      return null;
+    }
+    if (mime === 'image/jpeg') {
+      if (b.length < 4 || b[0] !== 0xff || b[1] !== 0xd8) return null;
+      let i = 2;
+      while (i + 3 < b.length) {
+        if (b[i] !== 0xff) return null;
+        const mk = b[i + 1];
+        if (mk === 0xff) { i++; continue; } // fill byte
+        if (mk === 0xd8 || mk === 0x01 || (mk >= 0xd0 && mk <= 0xd7)) { i += 2; continue; } // no length
+        if (mk === 0xd9 || mk === 0xda) return null; // image data before any frame header
+        const len = be16(i + 2); if (len < 2) return null;
+        if (mk >= 0xc0 && mk <= 0xcf && mk !== 0xc4 && mk !== 0xc8 && mk !== 0xcc) { if (i + 9 > b.length) return null; return [be16(i + 7), be16(i + 5)]; }
+        i += 2 + len;
+      }
+      return null;
+    }
+    return null;
+  }
+  const imgDimsOK = (mime, b) => { const d = imgDims(mime, b); return !!d && d[0] > 0 && d[1] > 0 && d[0] <= 8192 && d[1] <= 8192 && d[0] * d[1] <= 24 * 1048576; };
+  const IMGDIMS = '画像の縦横が大きすぎるか、読み取れません（1辺8192px・約2500万画素まで）';
   const chunkAcks = new Map();
   const inFiles = new Map();
 
@@ -1067,6 +1171,7 @@
     try {
       let idle = 0, last = -1;
       while (idle < tries) {
+        if (last >= 0 && !m.hid && !stillOut(m.peer, m.id)) { acks.delete(m.id); ackFrom.delete(m.id); return true; } // deleted meanwhile
         if ((powNeed[m.peer + '/' + m.id] | 0) > asked) { asked = powNeed[m.peer + '/' + m.id] | 0; mm.pn = ''; withPow(mm, hdr, hdr.sha); }
         send(m.peer, hdr);
         if (got.size === last) idle++; else { idle = 0; last = got.size; }
@@ -1086,14 +1191,19 @@
     const n = w.n | 0, size = w.size | 0;
     const isText = w.mime === TEXTMIME;
     if (!/^[0-9A-Za-z_-]{1,40}$/.test(String(w.id)) || !(MIMES.has(w.mime) || isText) || n < 1 || n > MAXN || size < 1 || size > (isText ? MAXRECV : IMGMAX) || Math.ceil(size / CHUNK) !== n || !/^[0-9a-f]{64}$/.test(String(w.sha)) || u8len(w.text) > CAPMAX || (isText && w.text) || u8len(w.nick) > 120) return;
-    if (st.messages.some(m => (m.peer === src || (w.g && m.peer === 'g:' + w.g && m.from === src)) && m.id === w.id) || (w.g && !w.text && !isText && st.groups[w.g] && st.groups[w.g].set && st.groups[w.g].set.nf)) { send(src, { t: 'ack', id: w.id }); return; }
+    if ((!w.g && isGoneMsg(src, String(w.id))) || st.messages.some(m => (m.peer === src || (w.g && m.peer === 'g:' + w.g && m.from === src)) && m.id === w.id) || (w.g && !w.text && !isText && st.groups[w.g] && st.groups[w.g].set && st.groups[w.g].set.nf)) { send(src, { t: 'ack', id: w.id }); return; }
     if (w.g && st.groups[w.g] && st.groups[w.g].left && !locked && !st.blocked[src]) { send(src, { t: 'ack', id: w.id }); if (st.groups[w.g].quit) leaveNotice(src, w.g); return; } // we're out (v0.19.2)
     if (locked || st.blocked[src] || !powCheck(src, w)) return;
     const t = Date.now();
     for (const [k, f] of inFiles) if (t - f.at > 180000) inFiles.delete(k);
     const key = src + '/' + w.id;
-    if (inFiles.has(key) || inFiles.size >= 16) return;
-    inFiles.set(key, { hdr: w, chunks: new Array(n), got: 0, at: t });
+    if (inFiles.has(key) || inFiles.size >= 32) return;
+    // One peer holds at most 4 slots and all strangers together 12, so nobody can keep
+    // every slot busy and block photos and long texts from everyone else (v0.19.3).
+    const c = st.contacts[src], stranger = !c || !!c.req;
+    let np = 0, ns = 0; for (const [k, f] of inFiles) { if (k.startsWith(src + '/')) np++; if (f.stranger) ns++; }
+    if (np >= 4 || (stranger && ns >= 12)) return;
+    inFiles.set(key, { hdr: w, chunks: new Array(n), got: 0, at: t, stranger });
   }
   async function onFileChunk(src, w) {
     const key = src + '/' + w.id, f = inFiles.get(key), i = w.i | 0;
@@ -1112,6 +1222,7 @@
     const h = Object.assign({}, f.hdr, { _checked: true }); // the header's proof of work was checked
     let img = '';
     if (h.mime === TEXTMIME) { try { h.text = new TextDecoder('utf-8', { fatal: true }).decode(all); } catch { return; } }
+    else if (!imgDimsOK(h.mime, all)) { send(src, { t: 'ack', id: w.id }); return; } // a decompression bomb would crash the UI: dropped, acked so it stops (v0.19.3)
     else { let s = ''; for (let j = 0; j < all.length; j += 0x8000) s += String.fromCharCode(...all.subarray(j, j + 0x8000)); img = 'data:' + h.mime + ';base64,' + btoa(s); }
     if (h.g) { if (await onGroupMsg(src, h, img)) { await saveNow(); send(src, { t: 'ack', id: w.id }); } return; }
     if (acceptMsg(src, h, img)) { await saveNow(); send(src, { t: 'ack', id: w.id }); }
@@ -1146,6 +1257,7 @@
     const acked = waitAck(m.peer, m.id);
     try {
       for (let i = 0; i < tries; i++) {
+        if (i > 0 && !m.hid && !stillOut(m.peer, m.id)) { acks.delete(m.id); ackFrom.delete(m.id); return true; } // deleted meanwhile: don't keep sending it
         if ((powNeed[m.peer + '/' + m.id] | 0) > asked) { asked = powNeed[m.peer + '/' + m.id] | 0; pkt = JSON.stringify(await msgPkt(Object.assign({}, m, { pn: '' }))); } // the receiver wants more work
         yggSend(m.peer, pkt);
         const got = await Promise.race([acked.then(() => true), new Promise(r => setTimeout(() => r(false), 2500))]);
@@ -1227,6 +1339,7 @@
     const rs = nRelays(); if (!rs || m.img || m.nostr) return;
     if (m.grp && st.groups[m.grp] && st.groups[m.grp].members.length > NOSTRG) return; // don't flood relays for a big group
     const c = st.contacts[m.peer]; if (!c || !c.pk) return;
+    { const x0 = st.messages.find(y => y.peer === m.peer && y.id === m.id); if (!x0 || x0.status !== 'queued') return; } // delivered, deleted or unsent meanwhile
     const ev = yggNostrWrap(c.pk, JSON.stringify(await msgPkt(m)));
     let ok = !!ev && await nostrPublish(rs, ev);
     if (st.nostrLegacy) { const lev = yggNostrWrap(c.pk, JSON.stringify(await msgPkt(m)), true); if (lev && await nostrPublish(rs, lev)) ok = true; }
@@ -1241,6 +1354,7 @@
     if (locked) return;
     const t = now(), gone = st.messages.filter(m => m.exp && m.exp <= t);
     if (!gone.length) return;
+    for (const m of gone) goneIfRecent(m); // a late copy must not bring it back (v0.19.3)
     st.messages = st.messages.filter(m => !(m.exp && m.exp <= t)); save();
     for (const m of gone) emit('msg_del', { peer: m.peer, id: m.id });
   }, 2000);
@@ -1440,6 +1554,7 @@
           const t = String(body.Text || ''); if ((!t && !body.Img) || u8len(t) > MAXSEND) return bad('message empty or too long');
           if (body.Img && goLen(t) - 2 > CAPMAX) return bad('写真の説明が長すぎます（日本語でおよそ260文字まで）');
           if (body.Img && !parseImg(body.Img)) return bad('unsupported or too large image (max 600KB)');
+          if (body.Img) { const pi = parseImg(body.Img); if (!imgDimsOK(pi.mime, pi.bytes)) return bad(IMGDIMS); }
           const gg = st.groups[gid]; if (body.Img && gg && gg.set && gg.set.nf) return bad('このグループでは写真を送れません（ホストの設定）');
           const v = sendGroup(gid, t, body.Img || ''); if (!v) return bad('このグループには送れません');
           outboxPut(v, st.messages.filter(m => m.hid && m.grp === gid && m.of === v.id));
@@ -1454,6 +1569,7 @@
         if (!isYgg(dst)) return bad('not a Yggdrasil address: ' + body.To);
         if ((!body.Text && !body.Img) || u8len(body.Text) > MAXSEND) return bad('message empty or too long');
         if (body.Img && !parseImg(body.Img)) return bad('unsupported or too large image (max 600KB)');
+        if (body.Img) { const pi = parseImg(body.Img); if (!imgDimsOK(pi.mime, pi.bytes)) return bad(IMGDIMS); }
         if (body.Img && goLen(String(body.Text || '')) - 2 > CAPMAX) return bad('写真の説明が長すぎます（日本語でおよそ260文字まで）');
         const c = st.contacts[dst];
         const share = !c || !c.shared;
@@ -1462,7 +1578,9 @@
         const m = { id: Date.now().toString(16) + Math.random().toString(16).slice(2, 6), peer: dst, from: addr, nick: st.nick, text: body.Text || '', ts: now(), out: true, status: 'sending' };
         if (body.Img) m.img = body.Img;
         if (ttl) { m.ttl = ttl; m.exp = m.ts + ttl; }
-        addMessage(m); outboxPut(m, []); if (share) sendProf(dst); deliver(m); if (await saveNow()) outboxDrop(m.id); return ok(m); // stored before the UI shows it (v0.19.2)
+        addMessage(m); outboxPut(m, []); if (share) sendProf(dst);
+        deliver(m).then(ok => { if (ok && queuedFor(dst).length) flush(dst); }); // older queued ones follow at once (v0.19.3)
+        if (await saveNow()) outboxDrop(m.id); return ok(m); // stored before the UI shows it (v0.19.2)
       }
       case 'group/sync': { syncGroup(String(body.ID || '')); return ok({}); }
       case 'group/create': {
@@ -1584,11 +1702,12 @@
           st.messages = st.messages.filter(m => m.peer !== body.Addr && m.grp !== gid); save(); emit('contact_del', { addr: body.Addr }); return ok({});
         }
         const a = norm(body.Addr || ''); if (!a) return bad('bad address');
-        delete st.contacts[a]; st.messages = st.messages.filter(m => m.peer !== a || m.hid); save(); // pending group copies to them still count (v0.19.2) emit('contact_del', { addr: a }); return ok({});
+        delete st.contacts[a]; st.messages = st.messages.filter(m => { if (m.peer !== a || m.hid) return true; goneIfRecent(m); return false; }); save(); // pending group copies to them still count (v0.19.2)
+        emit('contact_del', { addr: a }); return ok({});
       }
       case 'block': {
         const a = norm(body.Addr || ''); if (!a) return bad('bad address');
-        if (body.Block) { st.blocked[a] = true; delete st.contacts[a]; st.messages = st.messages.filter(m => m.peer !== a || m.hid); emit('contact_del', { addr: a }); }
+        if (body.Block) { st.blocked[a] = true; delete st.contacts[a]; st.messages = st.messages.filter(m => { if (m.peer !== a || m.hid) return true; goneIfRecent(m); return false; }); emit('contact_del', { addr: a }); }
         else delete st.blocked[a];
         save(); return ok({});
       }
@@ -1633,7 +1752,7 @@
       case 'identity/reset': {
         if (!body.Confirm) return bad('confirm required');
         // Everything tied to the old address goes (chats, groups, pending edits, the verified domain).
-        outer.key = ''; st.contacts = {}; st.messages = []; st.groups = {}; st.ctl = []; st.blocked = {}; st.joins = {}; delete st.domain; save(); saveOuter(); await saving;
+        outer.key = ''; st.contacts = {}; st.messages = []; st.groups = {}; st.ctl = []; st.blocked = {}; st.joins = {}; st.gone = {}; st.early = {}; delete st.domain; save(); saveOuter(); await saving;
         setTimeout(() => location.reload(), 300);
         return ok({});
       }
@@ -1674,7 +1793,8 @@
         if (!m || m.img) return bad('編集できるのは自分の文章メッセージだけです', 400);
         if (!t.trim() || u8len(t) > 8000) return bad('bad request', 400);
         if (goLen({ t: 'edit', id: ctlID(), ref: m.id, text: t }) > DGRAM) return bad('長すぎて編集できません（日本語でおよそ350文字まで）。送り直してね', 400);
-        m.text = t; const remote = isSent(m); if (remote) m.edited = true; save();
+        // A "queued" message may have reached them already (lost ack), v0.19.3; group posts are edited here only.
+        m.text = t; const remote = !isG(m.peer) && m.status !== 'failed'; if (remote) m.edited = true; save();
         if (remote) queueCtl(m.peer, { t: 'edit', id: ctlID(), ref: m.id, text: t });
         emit('msg_upd', m);
         return ok(m);
@@ -1685,9 +1805,11 @@
         const m = st.messages[i];
         if (body.Everyone && !m.out) return bad('相手のメッセージは自分の端末からだけ削除できます', 400);
         st.messages.splice(i, 1);
+        if (!m.out && !m.sys && !isG(m.peer)) markGone(m.peer, m.id); // a late copy must not bring it back
         st.ctl = (st.ctl || []).filter(c => !(c.peer === m.peer && c.w.ref === m.id));
         save();
-        if (body.Everyone && isSent(m) && !isG(m.peer)) queueCtl(m.peer, { t: 'del', id: ctlID(), ref: m.id });
+        // "queued" may still have reached them (lost ack, retry, Nostr box): everything but a failed send gets the unsend (v0.19.3).
+        if (body.Everyone && !m.sys && m.status !== 'failed' && !isG(m.peer)) queueCtl(m.peer, { t: 'del', id: ctlID(), ref: m.id });
         emit('msg_del', { peer: m.peer, id: m.id });
         return ok({});
       }
