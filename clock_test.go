@@ -4,6 +4,7 @@ package main
 import (
 	"fmt"
 	"testing"
+	"time"
 )
 
 func withMono(t *testing.T, now *int64) {
@@ -47,5 +48,27 @@ func TestHistAskedMonotonic(t *testing.T) {
 	now += histAskTTL*1000 + 1
 	if histAsked("g1", "200::1") {
 		t.Fatal("should have expired")
+	}
+}
+
+// pwFails had one entry per address that ever tried a group password and
+// was never pruned.
+func TestPwFailsBounded(t *testing.T) {
+	a := tApp(t, tMe)
+	for i := 0; i < 20000; i++ {
+		a.pwLimited(fmt.Sprintf("201::%x", i), false)
+	}
+	if n := len(a.pwFails); n > 16384 {
+		t.Fatalf("pwFails grew to %d", n)
+	}
+	// expired entries go first
+	a.pwMu.Lock()
+	for _, f := range a.pwFails {
+		f.at = f.at.Add(-11 * time.Minute)
+	}
+	a.pwMu.Unlock()
+	a.pwLimited("202::1", true)
+	if n := len(a.pwFails); n > 4096 {
+		t.Fatalf("expired entries kept: %d", n)
 	}
 }
