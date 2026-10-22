@@ -475,7 +475,9 @@
     const add = x => { if (x && x !== addr && g.members.includes(x) && !ask.includes(x) && ask.length < 8) ask.push(x); };
     add(g.owner); for (const x of g.admins || []) add(x);
     for (const x of g.members.slice().sort(() => Math.random() - 0.5)) add(x);
-    for (const x of ask) { noteHistAsk(gid, x); send(x, { t: 'ghq', g: gid, ts: since }); } // their answer (ghs) is taken for a while
+    // Their answer (ghs) is taken for a while. Asked twice a few seconds apart: members that aren't contacts get no
+    // hello first, so the first packet to one often goes nowhere while its route is looked up (answers are rate-limited).
+    for (const x of ask) { noteHistAsk(gid, x); send(x, { t: 'ghq', g: gid, ts: since }); setTimeout(() => { if (st.groups[gid] && !st.groups[gid].left) { noteHistAsk(gid, x); send(x, { t: 'ghq', g: gid, ts: since }); } }, 4000); }
   }
   function syncAllGroups() {
     let d = 0; for (const id of Object.keys(st.groups)) { setTimeout(() => syncGroup(id), d); d += 200; }
