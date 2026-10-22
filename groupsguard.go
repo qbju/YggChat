@@ -386,14 +386,14 @@ func (a *App) replaceRelayed(key, from string, w wire) {
 		m := &a.store.Messages[i]
 		if m.Peer == key && m.From == from && !m.Out && samePost(m.ID, w.ID) {
 			m.Text, m.Via, m.Hist, m.Sg = w.Text, "", false, ""
-			if w.Sg != "" && verifyPost(from, w.PK, w.Sg, w.G, postID(w.ID), w.TS, w.Text) {
-				m.Sg = w.Sg
-			}
 			if n := cleanNick(w.Nick); n != "" {
 				m.Nick = n
 			}
 			if w.TS > 0 && w.TS <= time.Now().Unix()+300 {
 				m.TS = w.TS
+			}
+			if m.TS == w.TS && w.Sg != "" && verifyPost(from, w.PK, w.Sg, w.G, postID(w.ID), w.TS, w.Text) {
+				m.Sg = w.Sg // only for the time it was signed with
 			}
 			cp := *m
 			upd = &cp
