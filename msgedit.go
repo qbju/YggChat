@@ -320,8 +320,10 @@ func (a *App) msgEditHandlers(mux *http.ServeMux) {
 		}
 		peer := req.Peer
 		if isGroupKey(peer) {
-			// Group messages can only be removed from this device for now.
-			req.Everyone = false
+			if !validGID(peer[2:]) {
+				http.Error(w, "bad request", 400)
+				return
+			}
 		} else if ip := net.ParseIP(req.Peer); ip != nil {
 			peer = ip.String()
 		} else {
@@ -342,6 +344,20 @@ func (a *App) msgEditHandlers(mux *http.ServeMux) {
 			return
 		}
 		m := a.store.Messages[idx]
+		if isGroupKey(peer) && req.Everyone {
+			// Group unsend / moderation (groupunsend.go).
+			a.store.mu.Unlock()
+			if m.Sys != "" || m.Hid {
+				http.Error(w, "bad request", 400)
+				return
+			}
+			if err := a.groupUnsend(peer[2:], m.From, m.ID); err != nil {
+				http.Error(w, err.Error(), 400)
+				return
+			}
+			w.Write([]byte("{}"))
+			return
+		}
 		if req.Everyone && !m.Out {
 			a.store.mu.Unlock()
 			http.Error(w, "相手のメッセージは自分の端末からだけ削除できます", 400)
@@ -350,6 +366,10 @@ func (a *App) msgEditHandlers(mux *http.ServeMux) {
 		a.store.Messages = append(a.store.Messages[:idx], a.store.Messages[idx+1:]...)
 		if !m.Out && !isGroupKey(peer) && m.Sys == "" {
 			a.store.markGoneLocked(peer, m.ID) // a late copy must not bring it back
+		}
+		if !m.Out && isGroupKey(peer) && m.Sys == "" && m.From != "" {
+			// A catch-up relay must not bring it back either (local only, never passed on), v0.19.4.
+			a.store.markGDelLocked(peer[2:], m.From, m.ID, gTomb{})
 		}
 		// Drop pending edits for it; an unsent (queued) message just never goes out.
 		kept := a.store.Ctl[:0]

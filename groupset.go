@@ -328,6 +328,10 @@ func (a *App) onHistory(from string, w wire, g Group, known bool) {
 		}
 	}
 	key := gKey(g.ID)
+	if a.store.isGDelLocked(g.ID, by, w.ID) {
+		a.store.mu.Unlock()
+		return // unsent or deleted: a relay must not bring it back (v0.19.4)
+	}
 	for i := len(a.store.Messages) - 1; i >= 0; i-- {
 		if m := a.store.Messages[i]; m.Peer == key && m.From == by && samePost(m.ID, w.ID) {
 			a.store.mu.Unlock()
@@ -465,6 +469,7 @@ func (a *App) onHistReq(from string, w wire, g Group, known bool) {
 		since = t
 	}
 	hist := a.historyLocked(g.ID)
+	dels := a.gdelWiresLocked(g.ID)
 	a.store.mu.Unlock()
 	now := time.Now().Unix()
 	histReqMu.Lock()
@@ -492,6 +497,9 @@ func (a *App) onHistReq(from string, w wire, g Group, known bool) {
 	}
 	if len(out) > 0 {
 		go a.sendHistory(from, g.ID, out)
+	}
+	if len(dels) > 0 {
+		go a.sendGDels(from, dels) // so a relay from someone who missed the unsend can't bring it back (v0.19.4)
 	}
 }
 

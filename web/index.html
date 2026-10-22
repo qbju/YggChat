@@ -3705,6 +3705,11 @@ async function openMsgMenu(id){
   if(m.out && !m.img && !g) items.push({key:'edit', label:'編集'});
   items.push({key:'delme', label:'自分の画面から削除', danger:true});
   if(m.out && !g) items.push({key:'delall', label: sent ? '相手の画面からも削除（送信取り消し）' : remote ? '相手の画面からも削除（届いていた場合も取り消し）' : '削除（まだ届いていないので送られません）', danger:true});
+  // Group unsend (v0.19.4): the author; the host for any post, an admin for ordinary members' posts (as removing members)
+  const gc = g ? state.contacts[m.peer] : null;
+  const isMgr = a => !!gc && !!gc.owner && (a === gc.owner || (gc.admins || []).includes(a));
+  const gMod = g && gc && !gc.left && !m.out && m.from && isMgr(state.addr) && (state.addr === gc.owner || !isMgr(m.from));
+  if(g && gc && !gc.left && (m.out || gMod)) items.push({key:'delall', label: m.out ? '全員の画面から削除（送信取り消し）' : '全員の画面から削除（管理者として）', danger:true});
   const k = await actionSheet((m.text || (m.img ? '📷 写真' : '')).slice(0, 120), items);
   if(!k) return;
   if(k === 'copy'){ copyText(m.text); return; }
@@ -3719,7 +3724,9 @@ async function openMsgMenu(id){
     return;
   }
   const everyone = k === 'delall';
-  const msg = everyone && sent
+  const msg = everyone && g
+    ? (m.out ? '全員の画面から削除しますか？' : 'このメッセージを全員の画面から削除しますか？（管理者として）') + '\n\nメンバーのYggChatに取り消しを送ります。オフラインのメンバーには、つながったときに届きます。v0.19.3以前のYggChatを使っている人の画面には残ります。'
+    : everyone && sent
     ? '相手の画面からも削除しますか？\n\n相手のYggChatに取り消しを送ります。すでに読まれていたり、改造クライアントや置き配(Nostr)に残っていたりする可能性はあります。'
     : everyone && remote
     ? '相手の画面からも削除しますか？\n\nこのメッセージはもう送られません。届いていた場合に備えて、相手のYggChatに取り消しも送ります。'

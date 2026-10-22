@@ -124,7 +124,8 @@ The Java VpnService (YggVpn) polls /api/vpn every 3 s, establishes addr/7 + rout
 
 ## v0.11
 - POST /api/message/edit {Peer, ID, Text} -> Message (own text messages). Event {type:"msg_upd", data: Message}. Message.edited.
-- POST /api/message/delete {Peer, ID, Everyone} -> {}. Event msg_del. Everyone only for own messages.
+- POST /api/message/delete {Peer, ID, Everyone} -> {}. Event msg_del. Everyone only for own messages; in a group (Peer "g:<gid>", v0.19.4) also the host for any post and an admin for posts of ordinary members (400 otherwise or after leaving). Deleting someone's group post locally keeps a local tombstone so catch-up relays don't bring it back.
+- Group unsend wire (v0.19.4, groupunsend.go): {t:"del", id, g, ref:<post id>, by:<author>, dby:<deleter if not the author>, pk:<deleter key>, sg, ts} -> {t:"ack", id}, sg = Ed25519("ygg-gdel1\n"+gid+"\n"+postID+"\n"+author+"\n"+dby). Queued in Ctl per member; tombstones (Store.GDel, 10 days) block late copies/relays/Nostr boxes and signed ones are passed on with catch-up answers (ghq). Unsigned only accepted straight from the deleter. v0.19.3 and older ack it as an unknown 1:1 unsend and keep the post.
 - Wire: {t:"edit", id:<ctl id>, ref:<msg id>, text} / {t:"del", id, ref} -> {t:"ack", id}. Receiver applies only if the message came from the same address. Pending ctl kept in store (Ctl) and flushed with the offline queue.
 - GET/POST /api/vpn/in {Mode: closed|list|all, Ports:[int]} -> {mode, ports, vpn, dropped}. Android VPN mode inbound filter (data/vpn-in.json); chat UDP 7777, finger (when on) and replies to outbound flows always pass.
 - GET /twemoji/<code>.svg — bundled Twemoji (jdecked v17.0.3, CC-BY 4.0).

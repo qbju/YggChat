@@ -549,6 +549,10 @@ func (a *App) onGroupMsg(from string, w wire, img string) bool {
 		ask = true
 	}
 	key := gKey(w.G)
+	if a.store.isGDelLocked(w.G, from, w.ID) {
+		a.store.mu.Unlock()
+		return true // unsent (or deleted here): a late copy must not bring it back (v0.19.4)
+	}
 	dup, relayed := false, false
 	for i := len(a.store.Messages) - 1; i >= 0 && !dup; i-- {
 		m := a.store.Messages[i]

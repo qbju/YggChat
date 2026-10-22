@@ -43,7 +43,7 @@
   const idbPut = (k, v) => idbDo(db => new Promise((res, rej) => { const t = db.transaction('kv', 'readwrite'); t.objectStore('kv').put(v, k); t.oncomplete = res; t.onerror = () => rej(t.error); t.onabort = () => rej(t.error || new DOMException('transaction aborted', 'AbortError')); }));
   let raw = {};
   const outer = { key: '', peers: null, enc: null };
-  const blank = () => ({ nick: 'anon', bio: '', avatar: '', contacts: {}, messages: [], blocked: {}, nostrOn: true, nostrRelays: [], ctl: [], groups: {}, powStrict: false, joins: {}, gone: {}, early: {} });
+  const blank = () => ({ nick: 'anon', bio: '', avatar: '', contacts: {}, messages: [], blocked: {}, nostrOn: true, nostrRelays: [], ctl: [], groups: {}, powStrict: false, joins: {}, gone: {}, early: {}, gdel: {} });
   let st = blank();
   let locked = false;
   let aesKey = null; // CryptoKey while unlocked with a passcode
@@ -93,7 +93,7 @@
     if (!outer.peers) outer.peers = RECOMMENDED.slice();
     locked = !!outer.enc;
     if (!locked) restoreOutbox(raw);
-    if (!locked) { Object.assign(st, { nick: raw.nick || 'anon', bio: raw.bio || '', avatar: raw.avatar || '', contacts: raw.contacts || {}, messages: raw.messages || [], blocked: raw.blocked || {}, domain: raw.domain || undefined, nostrOn: raw.key ? !!raw.nostrOn : true, nostrLegacy: !!raw.nostrLegacy, nostrRelays: raw.nostrRelays || [], ctl: raw.ctl || [], groups: raw.groups || {}, powStrict: !!raw.powStrict, joins: raw.joins || {}, gone: raw.gone || {}, early: raw.early || {} }); migrate(); }
+    if (!locked) { Object.assign(st, { nick: raw.nick || 'anon', bio: raw.bio || '', avatar: raw.avatar || '', contacts: raw.contacts || {}, messages: raw.messages || [], blocked: raw.blocked || {}, domain: raw.domain || undefined, nostrOn: raw.key ? !!raw.nostrOn : true, nostrLegacy: !!raw.nostrLegacy, nostrRelays: raw.nostrRelays || [], ctl: raw.ctl || [], groups: raw.groups || {}, powStrict: !!raw.powStrict, joins: raw.joins || {}, gone: raw.gone || {}, early: raw.early || {}, gdel: raw.gdel || {} }); migrate(); }
   }
 
   // Outbox (v0.19.2): a message we just sent is also written to localStorage at
@@ -438,7 +438,7 @@
       if (at && (at < 0 || !(+w.ts > 0) || +w.ts > at)) return; // posted after they left or were removed (v0.19.2)
       if (!at && !canMng(g, src)) return; // never a member as far as we know: only the host/an admin may relay that (v0.19.3)
     }
-    const key = 'g:' + g.id, dup = () => st.messages.some(m => m.peer === key && m.from === by && samePost(m.id, w.id));
+    const key = 'g:' + g.id, dup = () => isGDel(g.id, by, w.id) || st.messages.some(m => m.peer === key && m.from === by && samePost(m.id, w.id)); // unsent/deleted posts stay gone (v0.19.4)
     if (dup()) return;
     const knownSigner = !!(g.keys && g.keys[by]);
     // The sender's signature: a bad one is a forgery; a good one is its own words, whoever relays it (v0.19.3).
@@ -467,6 +467,7 @@
     const hi = !!(g.set && g.set.hi); let since = +w.ts || 0; { const aa = g.gaa && g.gaa[src]; if (!hi && aa > since) since = aa; }
     const h = historyOf(g.id).filter(m => m.from !== src && (hi || (m.ts || 0) >= since) && !(m.from !== addr && !hasM(g, m.from) && goneAt(g, m.from) > 0 && (m.ts || 0) > goneAt(g, m.from))); // never relay what a removed member posted after its removal
     if (h.length) sendHistory(src, g.id, h);
+    const ds = gdelWires(g.id); if (ds.length) sendGDels(src, ds); // so a relay from someone who missed an unsend can't bring it back (v0.19.4)
   }
   function syncGroup(gid) {
     const g = st.groups[gid]; if (!g || g.left || g.req || locked) return;
@@ -638,6 +639,84 @@
     if (Object.keys(k).length) g.keys = k; else delete g.keys;
     saveSoon();
   }
+  // ---- group unsend / moderation (v0.19.4, groupunsend.go) ----
+  // {t:'del', id, g, ref: post id, by: author, dby: deleter (not the author), pk: deleter's key, sg, ts}
+  // sg = Ed25519(deleter's key, "ygg-gdel1\n"+gid+"\n"+postID+"\n"+author+"\n"+dby), dby '' for the author.
+  // st.gdel["gid/author/postID"] = {x: until, at, d, pk, sg}; without sg it is local only (never passed on).
+  const GDELMAX = 5000, GDELSYNC = 64;
+  const gdelKey = (gid, by, pid) => gid + '/' + by + '/' + postIDf(String(pid));
+  const gdelMsg = (gid, pid, by, dby) => 'ygg-gdel1\n' + gid + '\n' + postIDf(String(pid)) + '\n' + by + '\n' + (dby || '');
+  const isGDel = (gid, by, pid) => { const t = st.gdel && st.gdel[gdelKey(gid, by, pid)]; return !!t && t.x > now(); };
+  const mayDel = (g, deleter, author) => deleter === author || (canMng(g, deleter) && (deleter === g.owner || !canMng(g, author)));
+  function markGDel(gid, by, pid, t) {
+    const n = now(), k = gdelKey(gid, by, pid); st.gdel = st.gdel || {};
+    const o = st.gdel[k]; if (o && o.x > n && (o.sg || !t.sg)) return; // a signed one replaces a local one
+    if (Object.keys(st.gdel).length >= GDELMAX) {
+      for (const x in st.gdel) if (st.gdel[x].x <= n) delete st.gdel[x];
+      const ks = Object.keys(st.gdel); if (ks.length >= GDELMAX * 0.9) { ks.sort((a, b) => st.gdel[a].x - st.gdel[b].x); for (const x of ks.slice(0, ks.length - Math.floor(GDELMAX * 0.9) + 1)) delete st.gdel[x]; }
+    }
+    const e = { x: n + TOMBKEEP, at: t.at || n }; if (t.d) e.d = t.d; if (t.sg) { e.sg = t.sg; e.pk = t.pk; }
+    st.gdel[k] = e;
+  }
+  async function verifySig(who, pk, sg, msg) { // true / false (forged) / null (can't check here)
+    pk = String(pk || '').toLowerCase(); sg = String(sg || '');
+    if (!/^[0-9a-f]{64}$/.test(pk) || !/^[A-Za-z0-9+/]{86}$/.test(sg)) return false;
+    if (typeof yggVerify === 'function') { try { return !!yggVerify(who, pk, msg, sg); } catch { return null; } }
+    try { if (!yggAddrOK(who, pk)) return false; const k = await crypto.subtle.importKey('raw', hexBytes(pk), { name: 'Ed25519' }, false, ['verify']); return await crypto.subtle.verify({ name: 'Ed25519' }, k, unb64(sg + '=='), new TextEncoder().encode(msg)); } catch { return null; }
+  }
+  function signDel(gid, pid, by) { try { const h = yggSign(gdelMsg(gid, pid, by, by === addr ? '' : addr)); return h ? [b64(hexBytes(h)).replace(/=+$/, ''), myPK()] : ['', '']; } catch { return ['', '']; } }
+  // Removes author's post (and, for our own, the copies not delivered yet). Returns whether it was shown.
+  function dropGroupPost(gid, by, pid) {
+    const key = 'g:' + gid, p = postIDf(String(pid)); let found = false;
+    st.messages = st.messages.filter(m => {
+      if (m.peer === key && m.from === by && !m.sys && samePost(m.id, p)) { found = true; return false; }
+      if (by === addr && m.hid && m.grp === gid && m.of === p) return false; // never goes out now
+      return true;
+    });
+    return found;
+  }
+  function groupUnsend(gid, m) {
+    const g = st.groups[gid];
+    if (!g || g.left) throw new Error('退出したグループでは自分の端末からだけ削除できます');
+    if (!mayDel(g, addr, m.from)) throw new Error('他の人のメッセージを全員から削除できるのは、ホスト（と、一般メンバーの投稿なら管理者）だけです');
+    const pid = postIDf(m.id), by = m.from, dby = by === addr ? '' : addr, [sg, pk] = signDel(gid, pid, by), t = now();
+    markGDel(gid, by, pid, { at: t, d: dby, sg, pk });
+    dropGroupPost(gid, by, pid);
+    const base = ctlID(), to = g.members.filter(x => x !== addr);
+    st.ctl = (st.ctl || []).filter(c => !(c.w.g && c.w.ts > 0 && c.w.ts < t - TOMBKEEP) && !(c.w.g === gid && c.w.ref === pid && to.includes(c.peer)));
+    to.forEach((p, i) => { const w = { t: 'del', id: base + '-' + i, g: gid, ref: pid, by, ts: t }; if (dby) w.dby = dby; if (sg) { w.sg = sg; w.pk = pk; } st.ctl.push({ peer: p, w }); });
+    save(); emit('msg_del', { peer: 'g:' + gid, id: pid });
+    let busy = 0; const q = to.slice(); const next = () => { while (busy < 48 && q.length) { busy++; flushCtl(q.shift()).finally(() => { busy--; next(); }); } }; next();
+  }
+  // An incoming group unsend (direct or relayed); true = ack (anything well-formed, so the sender stops).
+  async function onGroupDel(src, w) {
+    const okID = x => /^[0-9A-Za-z_-]{1,40}$/.test(String(x || ''));
+    if (!okGID(w.g) || !okID(w.id) || !okID(w.ref)) return false;
+    const by = norm(String(w.by || '')); if (!by || !isYgg(by)) return false;
+    let deleter = by; if (w.dby) { deleter = norm(String(w.dby)); if (!deleter || !isYgg(deleter)) return false; }
+    if (w.sg) { if (await verifySig(deleter, w.pk, w.sg, gdelMsg(w.g, w.ref, by, w.dby ? deleter : '')) !== true) return true; } // forged (or can't check): ignored
+    else if (src !== deleter) return true; // unsigned: only straight from the deleter
+    const g = st.groups[w.g];
+    if (locked || !g || g.tomb || (src !== deleter && !hasM(g, src)) || !mayDel(g, deleter, by)) return true;
+    const t = { d: w.dby ? deleter : '' }; if (w.sg) { t.sg = String(w.sg); t.pk = String(w.pk).toLowerCase(); }
+    if (+w.ts > 0 && +w.ts <= now() + 600) t.at = Math.trunc(+w.ts);
+    markGDel(w.g, by, w.ref, t);
+    const found = dropGroupPost(w.g, by, w.ref);
+    if (found) { save(); emit('msg_del', { peer: 'g:' + w.g, id: postIDf(String(w.ref)) }); } else saveSoon();
+    return true;
+  }
+  // Signed tombstones of gid for a catch-up answer, newest first.
+  function gdelWires(gid) {
+    const n = now(), out = [];
+    for (const k in st.gdel || {}) {
+      const t = st.gdel[k]; if (!t.sg || t.x <= n || !k.startsWith(gid + '/')) continue;
+      const rest = k.slice(gid.length + 1), i = rest.lastIndexOf('/'); if (i <= 0) continue;
+      const w = { t: 'del', g: gid, by: rest.slice(0, i), ref: rest.slice(i + 1), pk: t.pk, sg: t.sg, ts: t.at }; if (t.d) w.dby = t.d;
+      out.push(w);
+    }
+    return out.sort((a, b) => b.ts - a.ts).slice(0, GDELSYNC);
+  }
+  function sendGDels(to, ws) { let d = 2000; for (let r = 0; r < 2; r++) { ws.forEach((w, i) => { setTimeout(() => send(to, Object.assign({}, w, { id: ctlID() + '-' + i })), d); d += 40; }); d += 4000; } }
   // The signature and key to put on a relay of m (null when unknown).
   function sigFor(g, m) { if (!m.sg || m.img) return null; if (m.from === addr) return [m.sg, myPK()]; const k = g && g.keys && g.keys[m.from]; return k ? [m.sg, k] : null; }
   // A relayed version of a post (history from someone else, maybe altered) is replaced by the sender's own copy.
@@ -999,6 +1078,7 @@
     else if (known && w.gh && w.gh !== gHashS(g.name, g.members)) ask = true;
     if (ask) { askInfo(src, w.g); if (g.owner && g.owner !== src && g.owner !== addr) askInfo(g.owner, w.g); }
     const key = 'g:' + w.g;
+    if (isGDel(w.g, src, w.id)) return true; // unsent (or deleted here): a late copy must not bring it back (v0.19.4)
     const ex = st.messages.find(m => m.peer === key && m.from === src && samePost(m.id, w.id));
     if (late && !ex && !lateTake(w.g, src)) return true; // too many late posts from a former member
     const nf = !!(g.set && g.set.nf);
@@ -1245,6 +1325,10 @@
     if (w.t === 'ttl') { setTTL(src, w.ttl | 0, false); return; }
     if (w.t === 'fh') { onFileHeader(src, w); return; }
     if (w.t === 'fc') { onFileChunk(src, w); return; }
+    if ((w.t === 'edit' || w.t === 'del') && w.g) { // group unsend (v0.19.4); group posts aren't edited remotely
+      if (w.t === 'del') onGroupDel(src, w).then(ok => { if (ok) send(src, { t: 'ack', id: w.id }); }); else if (/^[0-9A-Za-z_-]{1,40}$/.test(String(w.id || ''))) send(src, { t: 'ack', id: w.id });
+      return;
+    }
     if ((w.t === 'edit' || w.t === 'del') && onCtl(src, w)) { send(src, { t: 'ack', id: w.id }); return; }
     if (['gq', 'gi', 'gl', 'gj', 'gjn', 'ghs', 'ghq', 'gd', 'gp', 'gk', 'gkq'].includes(w.t)) { onGroupCtl(src, w); return; }
     if (w.t === 'msg') handleMsg(src, w).then(async okm => { if (okm) { await saveNow(); send(src, { t: 'ack', id: w.id }); askPK(src); if (queuedFor(src).length) flush(src); } }); // ack once stored (v0.19.2)
@@ -1417,7 +1501,7 @@
     const n = w.n | 0, size = w.size | 0;
     const isText = w.mime === TEXTMIME;
     if (!/^[0-9A-Za-z_-]{1,40}$/.test(String(w.id)) || !(MIMES.has(w.mime) || isText) || n < 1 || n > MAXN || size < 1 || size > (isText ? MAXRECV : IMGMAX) || Math.ceil(size / CHUNK) !== n || !/^[0-9a-f]{64}$/.test(String(w.sha)) || u8len(w.text) > CAPMAX || (isText && w.text) || u8len(w.nick) > 120) return;
-    if ((!w.g && isGoneMsg(src, String(w.id))) || st.messages.some(m => (m.peer === src || (w.g && m.peer === 'g:' + w.g && m.from === src)) && m.id === w.id) || (w.g && !w.text && !isText && st.groups[w.g] && st.groups[w.g].set && st.groups[w.g].set.nf)) { send(src, { t: 'ack', id: w.id }); return; }
+    if ((!w.g && isGoneMsg(src, String(w.id))) || st.messages.some(m => (m.peer === src || (w.g && m.peer === 'g:' + w.g && m.from === src)) && m.id === w.id) || (w.g && okGID(w.g) && isGDel(w.g, src, w.id)) || (w.g && !w.text && !isText && st.groups[w.g] && st.groups[w.g].set && st.groups[w.g].set.nf)) { send(src, { t: 'ack', id: w.id }); return; }
     if (w.g && st.groups[w.g] && st.groups[w.g].left && !locked && !st.blocked[src]) { send(src, { t: 'ack', id: w.id }); leftNotice(src, st.groups[w.g]); return; } // we're out (v0.19.2)
     if (locked || st.blocked[src] || !powCheck(src, w)) return;
     const t = Date.now();
@@ -1989,7 +2073,7 @@
       case 'identity/reset': {
         if (!body.Confirm) return bad('confirm required');
         // Everything tied to the old address goes (chats, groups, pending edits, the verified domain).
-        outer.key = ''; st.contacts = {}; st.messages = []; st.groups = {}; st.ctl = []; st.blocked = {}; st.joins = {}; st.gone = {}; st.early = {}; delete st.domain; save(); saveOuter(); await saving;
+        outer.key = ''; st.contacts = {}; st.messages = []; st.groups = {}; st.ctl = []; st.blocked = {}; st.joins = {}; st.gone = {}; st.early = {}; st.gdel = {}; delete st.domain; save(); saveOuter(); await saving;
         setTimeout(() => location.reload(), 300);
         return ok({});
       }
@@ -2040,9 +2124,15 @@
         const i = st.messages.findIndex(x => x.peer === body.Peer && x.id === body.ID);
         if (i < 0) return bad('not found', 404);
         const m = st.messages[i];
+        if (isG(m.peer) && body.Everyone) { // group unsend / moderation (v0.19.4)
+          if (m.sys || m.hid) return bad('bad request', 400);
+          try { groupUnsend(m.peer.slice(2), m); } catch (e) { return bad(e.message, 400); }
+          return ok({});
+        }
         if (body.Everyone && !m.out) return bad('相手のメッセージは自分の端末からだけ削除できます', 400);
         st.messages.splice(i, 1);
         if (!m.out && !m.sys && !isG(m.peer)) markGone(m.peer, m.id); // a late copy must not bring it back
+        if (!m.out && !m.sys && isG(m.peer) && m.from) markGDel(m.peer.slice(2), m.from, m.id, {}); // nor a catch-up relay (local only), v0.19.4
         st.ctl = (st.ctl || []).filter(c => !(c.peer === m.peer && c.w.ref === m.id));
         save();
         // "queued" may still have reached them (lost ack, retry, Nostr box): everything but a failed send gets the unsend (v0.19.3).

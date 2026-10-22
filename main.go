@@ -132,6 +132,9 @@ type Store struct {
 	Gone map[string]int64 `json:"gone,omitempty"`
 	// Edits that arrived before the message they change ("peer/id").
 	Early map[string]earlyEdit `json:"early,omitempty"`
+	// Group posts that must not (re)appear: unsent / deleted for everyone,
+	// or deleted here ("gid/author/postID", groupunsend.go).
+	GDel map[string]gTomb `json:"gdel,omitempty"`
 }
 
 func (s *Store) save() { _ = s.saveErr() }
@@ -455,7 +458,8 @@ type wire struct {
 	GR  string           `json:"gr,omitempty"`  // packed members removed (gd)
 	PN  string           `json:"pn,omitempty"`  // proof-of-work nonce (msg, fh, gj)
 	GT  map[string]int64 `json:"gt,omitempty"`  // gi: when recently removed members dropped out (v0.19.3)
-	Sg  string           `json:"sg,omitempty"`  // group post signature (msg, fh, ghs; v0.19.3)
+	Sg  string           `json:"sg,omitempty"`  // group post signature (msg, fh, ghs; v0.19.3); group unsend signature (del, v0.19.4)
+	Dby string           `json:"dby,omitempty"` // group unsend by a manager: who deleted it (del, v0.19.4)
 
 	checked bool // local only: proof of work already verified (file header)
 }
@@ -572,6 +576,13 @@ func (a *App) handlePacket(rip net.IP, pkt []byte) {
 	case "prof", "ttl":
 		a.handleCtl(from, w)
 	case "edit", "del":
+		if w.G != "" {
+			// Group unsend (groupunsend.go); group posts can't be edited remotely.
+			if w.T == "del" && a.onGroupDel(from, w) || w.T == "edit" && validID(w.ID) {
+				a.sendWire(from, wire{T: "ack", ID: w.ID})
+			}
+			return
+		}
 		if a.onCtl(from, w) {
 			a.sendWire(from, wire{T: "ack", ID: w.ID})
 		}

@@ -223,7 +223,7 @@ func (s *Store) resetData() {
 	s.Nick, s.Bio, s.Avatar, s.Domain = "", "", "", ""
 	s.Contacts, s.Messages, s.Blocked, s.Groups, s.Ctl = nil, nil, nil, nil, nil
 	s.NostrOn, s.NostrRelays, s.NostrLegacy, s.PowStrict = false, nil, false, false
-	s.Joins, s.Gone, s.Early = nil, nil, nil
+	s.Joins, s.Gone, s.Early, s.GDel = nil, nil, nil, nil
 }
 
 // loadData replaces all saved fields with the JSON b (every field, so new
@@ -465,7 +465,7 @@ func (a *App) resetIdentity() error {
 	a.store.Ctl = nil
 	a.store.Domain = ""
 	a.store.Blocked = map[string]bool{}
-	a.store.Joins, a.store.Gone, a.store.Early = nil, nil, nil
+	a.store.Joins, a.store.Gone, a.store.Early, a.store.GDel = nil, nil, nil, nil
 	a.store.save()
 	a.store.mu.Unlock()
 	go func() {
