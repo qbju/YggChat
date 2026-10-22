@@ -3,7 +3,7 @@ REPO = os.environ.get("GITHUB_REPOSITORY", "")
 TOKEN = os.environ.get("GITHUB_TOKEN", "")
 OWNER = "qbju"
 def get(url, timeout=20):
-    req = urllib.request.Request(url, headers={"User-Agent": "hark-watchers"})
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (hark-watchers)", "Accept": "application/json"})
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return r.read()
 def getjson(url):
