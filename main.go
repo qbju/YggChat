@@ -335,14 +335,21 @@ func (a *App) broadcast(kind string, v any) {
 	}
 }
 
-func (a *App) addMessage(m Message) {
+func (a *App) addMessage(m Message) { _ = a.addMessageErr(m) }
+
+// addMessageErr stores m. For an incoming message whose save failed (disk
+// full, read-only data folder) it takes the message back out and returns
+// the error: the caller then withholds the ack, so the sender keeps it and
+// tries again, instead of it living only in memory until some later save
+// (v0.19.3). Our own messages stay in memory as before.
+func (a *App) addMessageErr(m Message) error {
 	a.store.mu.Lock()
 	if isGroupKey(m.Peer) && !m.Out && m.Sys == "" && m.From != "" {
 		// One post, one message: member copies and relays carry different ids (v0.19.2).
 		for i := len(a.store.Messages) - 1; i >= 0; i-- {
 			if x := a.store.Messages[i]; x.Peer == m.Peer && x.From == m.From && !x.Out && samePost(x.ID, m.ID) {
 				a.store.mu.Unlock()
-				return
+				return nil
 			}
 		}
 	}
@@ -351,23 +358,45 @@ func (a *App) addMessage(m Message) {
 	} else {
 		a.store.Messages = append(a.store.Messages, m)
 	}
+	var cb *Contact
+	prev, had := a.store.Contacts[m.Peer]
 	if isGroupKey(m.Peer) {
 		// group conversations have no contact entry
-	} else if _, ok := a.store.Contacts[m.Peer]; !ok {
+	} else if !had {
 		c := Contact{Addr: m.Peer, Req: !m.Out, Shared: m.Out, TTL: m.TTL}
 		if !m.Out {
 			c.Nick = m.Nick
 		}
 		a.store.Contacts[m.Peer] = c
-		defer a.broadcast("contact", c)
-	} else if c := a.store.Contacts[m.Peer]; !m.Out && m.Nick != "" && !c.Renamed && c.Nick != m.Nick {
+		cb = &c
+	} else if c := prev; !m.Out && m.Nick != "" && !c.Renamed && c.Nick != m.Nick {
 		c.Nick = m.Nick
 		a.store.Contacts[m.Peer] = c
-		defer a.broadcast("contact", c)
+		cb = &c
 	}
-	a.store.save()
+	if err := a.store.saveErr(); err != nil && !m.Out && m.Sys == "" {
+		for i := len(a.store.Messages) - 1; i >= 0; i-- {
+			if x := a.store.Messages[i]; x.Peer == m.Peer && x.ID == m.ID && x.From == m.From && !x.Out {
+				a.store.Messages = append(a.store.Messages[:i], a.store.Messages[i+1:]...)
+				break
+			}
+		}
+		if cb != nil {
+			if had {
+				a.store.Contacts[m.Peer] = prev
+			} else {
+				delete(a.store.Contacts, m.Peer)
+			}
+		}
+		a.store.mu.Unlock()
+		return err
+	}
 	a.store.mu.Unlock()
+	if cb != nil {
+		a.broadcast("contact", *cb)
+	}
 	a.broadcast("message", m)
+	return nil
 }
 
 // insertByTimeLocked stores an incoming 1:1 message in time order: queued
@@ -643,7 +672,17 @@ func (a *App) acceptMsg(from string, w wire, img string) bool {
 		m.Text, m.Edited = t, true // its edit overtook it
 	}
 	a.store.mu.Unlock()
-	a.addMessage(m)
+	if a.addMessageErr(m) != nil {
+		a.store.mu.Lock()
+		if m.Edited {
+			a.store.addEarlyLocked(from, w.ID, m.Text) // keep the edit for the retry
+		}
+		a.store.mu.Unlock()
+		a.seenMu.Lock()
+		delete(a.seen, key) // not stored: no ack, the sender retries
+		a.seenMu.Unlock()
+		return false
+	}
 	return true
 }
 

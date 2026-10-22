@@ -602,20 +602,25 @@ func (a *App) onGroupMsg(from string, w wire, img string) bool {
 	}
 	// Stored under the post id (copies are "<post>g<i>"), so relays dedupe on it.
 	m := Message{ID: postID(w.ID), Peer: key, From: from, Nick: cleanNick(w.Nick), Text: w.Text, TS: w.TS, Img: img, TTL: ttl}
+	if now := time.Now().Unix(); m.TS <= 0 || m.TS > now+600 {
+		m.TS = now // a wrong (or hostile) clock must not pin it far in the past/future (v0.19.3)
+	}
 	if img == "" {
 		// A signed text post: keep the signature to pass on with relays; the
 		// sender is known to sign while its posts are signed (v0.19.3).
 		pk := ""
 		if w.Sg != "" && verifyPost(from, w.PK, w.Sg, w.G, postID(w.ID), w.TS, w.Text) {
-			m.Sg, pk = w.Sg, w.PK
+			pk = w.PK
+			if m.TS == w.TS {
+				m.Sg = w.Sg // (a clamped time no longer matches what was signed)
+			}
 		}
 		a.noteSigner(w.G, from, pk)
 	}
 	if ttl > 0 {
 		m.Exp = time.Now().Unix() + int64(ttl)
 	}
-	a.addMessage(m)
-	return true
+	return a.addMessageErr(m) == nil // not saved: no ack, the sender retries (v0.19.3)
 }
 
 // groupLeft reports whether we are out of group gid, and whether we left ourselves.
