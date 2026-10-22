@@ -22,7 +22,7 @@ const (
 	imgMaxPixels = 24 << 20 // ~25 MP (100 MB as RGBA)
 )
 
-var errImgDims = errors.New("image dimensions too large or unreadable")
+var errImgDims = errors.New("画像の縦横が大きすぎるか、読み取れません（1辺8192px・約2500万画素まで）") // shown in the UI (same text as the PWA)
 
 // imgDimsOK reads only the header of raw and checks its size.
 func imgDimsOK(mime string, raw []byte) error {
