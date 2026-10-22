@@ -641,15 +641,16 @@
   // The signature and key to put on a relay of m (null when unknown).
   function sigFor(g, m) { if (!m.sg || m.img) return null; if (m.from === addr) return [m.sg, myPK()]; const k = g && g.keys && g.keys[m.from]; return k ? [m.sg, k] : null; }
   // A relayed version of a post (history from someone else, maybe altered) is replaced by the sender's own copy.
-  async function replaceRelayed(key, from, w) {
-    const ok = w.sg ? await verifyPost(from, w.pk, w.sg, w.g, postIDf(w.id), w.ts, w.text) : false;
+  async function replaceRelayed(key, from, w, img) {
+    const ok = w.sg && !img ? await verifyPost(from, w.pk, w.sg, w.g, postIDf(w.id), w.ts, w.text) : false;
     let m = null; for (let i = st.messages.length - 1; i >= 0; i--) { const x = st.messages[i]; if (x.peer === key && x.from === from && !x.out && samePost(x.id, w.id)) { m = x; break; } }
     if (!m) return;
-    m.text = String(w.text); delete m.via; delete m.hist; delete m.sg; if (ok === true) m.sg = String(w.sg);
+    m.text = String(w.text || ''); delete m.via; delete m.hist; delete m.sg; if (ok === true) m.sg = String(w.sg);
+    if (img) m.img = img; // the sender's own copy of a photo the relay only named
     const n = cleanNick(w.nick); if (n) m.nick = n;
     if (+w.ts > 0 && +w.ts <= now() + 300) m.ts = Math.trunc(+w.ts);
     save();
-    emit('msg_upd', { id: m.id, peer: m.peer, from: m.from, nick: m.nick, text: m.text, ts: m.ts, via: '', hist: false }); // spelled out: the UI merges it
+    emit('msg_upd', Object.assign({ id: m.id, peer: m.peer, from: m.from, nick: m.nick, text: m.text, ts: m.ts, via: '', hist: false }, img ? { img } : {})); // spelled out: the UI merges it
     if (ok === true) noteSigner(w.g, from, String(w.pk).toLowerCase());
   }
   // The host tells a recently removed member that still posts or asks (its list without them), at most every 15 s.
@@ -1003,7 +1004,8 @@
     if (late && !ex && !lateTake(w.g, src)) return true; // too many late posts from a former member
     const nf = !!(g.set && g.set.nf);
     // We hold it as someone's relay: the sender's own copy is the real one (v0.19.3).
-    if (ex && !ex.out && !img && (ex.via || ex.hist) && (ex.text !== w.text || ex.via)) { if (!powCheck(src, w)) return false; await replaceRelayed(key, src, w); return true; }
+    // A relayed photo is only a "📷" line, so the photo itself replaces it too.
+    if (ex && !ex.out && (ex.via || ex.hist) && (ex.text !== w.text || ex.via || (img && !ex.img)) && !(img && nf && !w.text)) { if (!powCheck(src, w)) return false; await replaceRelayed(key, src, w, nf ? '' : img); return true; }
     if (ex) return true;
     if (!powCheck(src, w)) return false;
     if (img && nf) { if (!w.text) return true; img = ''; } // photos off: ack and drop

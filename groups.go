@@ -554,7 +554,8 @@ func (a *App) onGroupMsg(from string, w wire, img string) bool {
 		m := a.store.Messages[i]
 		dup = m.Peer == key && m.From == from && samePost(m.ID, w.ID)
 		// We hold it as someone's relay: the sender's own copy is the real one (v0.19.3).
-		relayed = dup && !m.Out && (m.Via != "" || m.Hist) && (m.Text != w.Text || m.Via != "")
+		// A relayed photo is only a "📷" text line, so the photo itself replaces it too.
+		relayed = dup && !m.Out && (m.Via != "" || m.Hist) && (m.Text != w.Text || m.Via != "" || (img != "" && m.Img == ""))
 	}
 	if late && !dup && !lateTake(w.G, from) {
 		a.store.mu.Unlock()
@@ -583,11 +584,11 @@ func (a *App) onGroupMsg(from string, w wire, img string) bool {
 			a.askInfo(g.Owner, w.G)
 		}
 	}
-	if relayed && img == "" && !drop {
+	if relayed && !drop {
 		if !a.powCheck(from, w) {
 			return false
 		}
-		a.replaceRelayed(key, from, w)
+		a.replaceRelayed(key, from, w, img)
 		if w.Sg != "" && verifyPost(from, w.PK, w.Sg, w.G, postID(w.ID), w.TS, w.Text) {
 			a.noteSigner(w.G, from, w.PK)
 		}
@@ -657,6 +658,26 @@ func (a *App) hasGroupMsg(gid, from, id string) bool {
 		if m := a.store.Messages[i]; m.Peer == gKey(gid) && m.From == from && samePost(m.ID, id) {
 			return true
 		}
+	}
+	return false
+}
+
+// hasGroupFile reports whether the post a file header (photo or long text)
+// belongs to is here already. A relay of it doesn't count: history carries a
+// photo only as a "📷" line and a long text shortened (and so unsigned), so
+// the sender's own copy still has to come in and replace it.
+func (a *App) hasGroupFile(gid, from, id, mime string) bool {
+	a.store.mu.Lock()
+	defer a.store.mu.Unlock()
+	for i := len(a.store.Messages) - 1; i >= 0; i-- {
+		m := a.store.Messages[i]
+		if m.Peer != gKey(gid) || m.From != from || !samePost(m.ID, id) {
+			continue
+		}
+		if !m.Out && (m.Hist || m.Via != "") && ((mime == textMime) || m.Img == "") {
+			return false
+		}
+		return true
 	}
 	return false
 }
