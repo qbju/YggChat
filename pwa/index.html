@@ -1681,11 +1681,11 @@ function initials(s){
 
 function senderName(m){
   const c = state.contacts[m.from];
-  return (c && c.nick) || m.nick || addrShort(m.from || '');
+  return nickOr((c && c.nick) || m.nick, m.from || '');
 }
 function isGroup(addr){ return typeof addr === 'string' && addr.startsWith('g:'); }
 function avatarText(c, addr){
-  return (c && c.avatar) ? c.avatar : initials((c && c.nick) || addr || '');
+  return (c && c.avatar) ? c.avatar : (c && c.nick && c.nick !== 'anon') ? initials(c.nick) : '👤';
 }
 function ttlLabel(s){
   s = s|0;
@@ -1871,7 +1871,7 @@ function renderList(){
     html += '<div class="contact-row" data-addr="' + escapeHtml(a) + '">'
       + '<div class="avatar small" style="background:' + avc + '; border:none; color:#111;">' + escapeHtml(av) + '</div>'
       + '<div class="info">'
-      + '<div class="name"><span class="nm">' + escapeHtml(c.nick || addrShort(a)) + '</span>' + (c.group ? ' <span class="ttl-badge">' + (c.members||[]).length + '人</span>' : '') + (c.req ? '<span class="req-tag">' + (c.group ? '招待' : 'リクエスト') + '</span>' : '') + (c.ttl ? ' <span class="ttl-badge">⏱' + escapeHtml(ttlLabel(c.ttl)) + '</span>' : '') + '</div>'
+      + '<div class="name"><span class="nm">' + escapeHtml(nickOr(c.nick, a)) + '</span>' + (c.group ? ' <span class="ttl-badge">' + (c.members||[]).length + '人</span>' : '') + (c.req ? '<span class="req-tag">' + (c.group ? '招待' : 'リクエスト') + '</span>' : '') + (c.ttl ? ' <span class="ttl-badge">⏱' + escapeHtml(ttlLabel(c.ttl)) + '</span>' : '') + '</div>'
       + '<div class="last">' + escapeHtml(lastText) + '</div>'
       + '</div>'
       + '<div style="display:flex; flex-direction:column; align-items:flex-end; gap:4px;">'
@@ -1919,6 +1919,9 @@ function groupMessages(msgs){
   return out;
 }
 
+// "anon" is what a node calls itself before a name is set: show the short address instead,
+// so two unnamed people don't look the same.
+function nickOr(n, a){ return (n && n !== 'anon') ? n : (a ? addrShort(a) : '名前なし'); }
 function postIdOf(id){ id = String(id || ''); const i = id.lastIndexOf('g'); return i > 0 ? id.slice(0, i) : id; }
 // Sub-second time in a message id: native ids are UnixNano hex (16 digits), browser ids
 // Date.now() hex (11 digits) plus 4 random ones. Unknown shapes tie (store order).
@@ -2042,11 +2045,15 @@ function renderMessages(){
     el.addEventListener('touchmove', cancelLp, {passive:true});
     el.addEventListener('touchcancel', cancelLp);
   });
+  // isNearBottom is where the view was before this render (scroll handler): checking it after
+  // inserting a tall message said "not at bottom" and left the view (and own sends) behind a 新着 pill.
   if(forceBottom){ forceBottom = false; isNearBottom = true; }
-  else checkNearBottom();
+  const nIn = msgs.filter(m => !m.out && !m.sys).length;
+  const grew = renderMessages.chat === curAddr && nIn > (renderMessages.nIn || 0);
+  renderMessages.chat = curAddr; renderMessages.nIn = nIn;
   if(isNearBottom){
     box.scrollTop = box.scrollHeight;
-  }else{
+  }else if(grew){
     $('new-msg-pill').classList.add('active');
   }
   markRead(curAddr);
@@ -2160,7 +2167,7 @@ function updateChatHeader(){
   $('chat-avatar').style.background = hashColor(curAddr);
   $('chat-avatar').style.border = 'none';
   $('chat-avatar').style.color = '#111';
-  $('chat-name').textContent = c.nick || addrShort(curAddr);
+  $('chat-name').textContent = c.group ? (c.nick || 'グループ') : nickOr(c.nick, curAddr);
   $('chat-addr').textContent = grp ? (c.left ? '退出済みのグループ' : groupSubtitle(c)) : (c.dom && c.domok ? '✓ ' + c.dom + ' ・ ' + curAddr : curAddr);
 }
 
@@ -2444,7 +2451,7 @@ function openContactInfo(){
   $('ci-avatar').style.background = hashColor(curAddr);
   $('ci-avatar').style.border = 'none';
   $('ci-avatar').style.color = '#111';
-  $('ci-nick').textContent = c.nick || addrShort(curAddr);
+  $('ci-nick').textContent = nickOr(c.nick, curAddr);
   $('ci-addr').textContent = curAddr;
   qrInto($('ci-qr-wrap'), makeInviteLink(curAddr, c.nick));
   $('contact-info-screen').classList.add('active');
@@ -2458,13 +2465,15 @@ $('ci-copy-addr').addEventListener('click', () => copyText(curAddr));
 
 // In-page dialogs: the browser's built-in dialogs are unreliable in iOS home-screen apps and WebViews.
 let modalClose = null;
-function uiDialog(title, {input=null, okText='OK', danger=false, placeholder='', hint='', validate=null}={}){
+function uiDialog(title, {input=null, okText='OK', danger=false, placeholder='', hint='', validate=null, multiline=false, img=''}={}){
   return new Promise(res => {
     const bg = document.createElement('div'); bg.className = 'modal-bg';
     const m = document.createElement('div'); m.className = 'modal';
     const t = document.createElement('div'); t.className = 'mt'; t.textContent = title; m.appendChild(t);
+    if(img){ const im = document.createElement('img'); im.src = img; im.alt = ''; im.style.cssText = 'max-width:100%;max-height:40vh;object-fit:contain;border-radius:8px;align-self:center;'; m.appendChild(im); }
     let inp = null;
-    if(input !== null){ inp = document.createElement('input'); inp.value = input; inp.autocomplete = 'off'; inp.placeholder = placeholder; m.appendChild(inp); }
+    // multiline: a textarea, so line breaks survive (an <input> silently drops them); Enter makes a new line there
+    if(input !== null){ inp = document.createElement(multiline ? 'textarea' : 'input'); if(multiline){ inp.rows = Math.min(8, Math.max(3, String(input).split('\n').length + 1)); inp.style.cssText = 'resize:vertical;max-height:50vh;font:inherit;'; } inp.value = input; inp.autocomplete = 'off'; inp.placeholder = placeholder; m.appendChild(inp); }
     // hint under the input; validate(v) -> '' when OK, else what is wrong (shown instead of the hint, OK disabled)
     let hn = null;
     if(inp && (hint || validate)){ hn = document.createElement('div'); hn.className = 'mhint'; hn.id = 'mhint-' + Math.random().toString(36).slice(2); hn.setAttribute('aria-live', 'polite'); hn.style.cssText = 'font-size:13px;color:var(--dim);margin:6px 2px 0;line-height:1.4'; hn.textContent = hint; inp.setAttribute('aria-describedby', hn.id); m.appendChild(hn); }
@@ -2479,7 +2488,7 @@ function uiDialog(title, {input=null, okText='OK', danger=false, placeholder='',
     cancel.onclick = () => done(inp ? null : false);
     ok.onclick = () => done(inp ? inp.value : true);
     bg.onclick = e => { if(e.target === bg) done(inp ? null : false); };
-    if(inp){ inp.onkeydown = e => { if(e.key === 'Enter' && !imeEnter(e)) done(inp.value); }; inp.oninput = check; check(); setTimeout(() => inp.focus(), 50); }
+    if(inp){ inp.onkeydown = e => { if(e.key === 'Enter' && !imeEnter(e) && (!multiline || e.ctrlKey || e.metaKey)){ e.preventDefault(); done(inp.value); } }; inp.oninput = check; check(); setTimeout(() => inp.focus(), 50); }
   });
 }
 const uiConfirm = (t, danger) => uiDialog(t, {okText: danger ? '削除' : 'OK', danger});
@@ -2957,6 +2966,7 @@ async function sendMsg(){
   $('send-btn').disabled = true;
   try{
     putSent(await api('/api/send', {To: to, Text: text}));
+    if(curAddr === to) forceBottom = true;
     renderMessages();
     renderList();
   }catch(e){
@@ -3072,7 +3082,7 @@ function notifyIncoming(m){
   }
   if(document.hidden || document.visibilityState === 'hidden'){
     try{
-      const n = new Notification(m.nick || addrShort(m.from||m.peer), {body: m.img ? ('📷 写真' + (m.text ? ' ' + m.text : '')) : m.text, tag: m.id || ('msg:'+m.peer)});
+      const n = new Notification(nickOr(m.nick, m.from||m.peer), {body: m.img ? ('📷 写真' + (m.text ? ' ' + m.text : '')) : m.text, tag: m.id || ('msg:'+m.peer)});
     }catch(e){}
   }
 }
@@ -3720,7 +3730,7 @@ async function openMsgMenu(id){
   if(!k) return;
   if(k === 'copy'){ copyText(m.text); return; }
   if(k === 'edit'){
-    const v = await uiPrompt('メッセージを編集', m.text); if(v === null) return;
+    const v = await uiDialog('メッセージを編集', {input: m.text, multiline: true, okText: '保存'}); if(v === null) return;
     if(!v.trim() || v === m.text) return;
     try{
       const r = await api('/api/message/edit', {Peer: m.peer, ID: m.id, Text: v});
@@ -3850,7 +3860,7 @@ function openGroupInfo(){
   $('gi-set-note').textContent = canSet ? '' : 'ホストが決めた設定です';
   const pend = manage ? (c.pend || []) : [];
   $('gi-pend-sec').style.display = pend.length ? '' : 'none';
-  $('gi-pend').innerHTML = pend.map(p => '<div class="row" style="padding:6px 0;"><div class="row-main"><div class="row-title">' + escapeHtml(p.nick || 'anon') + '</div><div class="row-sub" style="font-family:ui-monospace,monospace;">' + escapeHtml(p.addr) + '</div></div><button class="gi-ok" data-addr="' + escapeHtml(p.addr) + '">承認</button><button class="gi-no" data-addr="' + escapeHtml(p.addr) + '" style="color:var(--error);">拒否</button></div>').join('');
+  $('gi-pend').innerHTML = pend.map(p => '<div class="row" style="padding:6px 0;"><div class="row-main"><div class="row-title">' + escapeHtml(nickOr(p.nick, p.addr)) + '</div><div class="row-sub" style="font-family:ui-monospace,monospace;">' + escapeHtml(p.addr) + '</div></div><button class="gi-ok" data-addr="' + escapeHtml(p.addr) + '">承認</button><button class="gi-no" data-addr="' + escapeHtml(p.addr) + '" style="color:var(--error);">拒否</button></div>').join('');
   $('group-info-screen').classList.add('active');
 }
 const canSetG = c => !c.left && !!c.owner && c.owner === state.addr;
@@ -4040,11 +4050,13 @@ $('img-input').addEventListener('change', async () => {
   const kb = Math.round(url.length * 0.75 / 1024);
   const cap = $('msg-text').value.trim();
   if(new TextEncoder().encode(cap).length > 800){ toast('写真に添える文章が長すぎます（約260文字まで）'); return; }
-  const okd = await uiDialog('この写真を送りますか？（' + kb + 'KB' + (cap ? '・入力中の文章を添えて' : '') + '）', {okText:'送信'});
-  if(!okd) return;
+  const to = curAddr;
+  const okd = await uiDialog('この写真を送りますか？（' + kb + 'KB' + (cap ? '・入力中の文章を添えて' : '') + '）', {okText:'送信', img:url});
+  if(!okd || !to) return;
   try{
-    const m = await api('/api/send', {To: curAddr, Text: cap, Img: url});
+    const m = await api('/api/send', {To: to, Text: cap, Img: url});
     putSent(m);
+    if(curAddr === to) forceBottom = true;
     if($('msg-text').value.trim() === cap){ $('msg-text').value = ''; $('msg-text').style.height = 'auto'; $('send-btn').disabled = true; }
     renderMessages(); renderList();
   }catch(e){ toast(e.message); }
@@ -4081,42 +4093,51 @@ $('iv-save').addEventListener('click', async () => {
   const a = document.createElement('a'); a.href = src; a.download = 'yggchat-' + Date.now() + '.' + ext; document.body.appendChild(a); a.click(); a.remove();
 });
 
-window.ygBack = () => {
-  if(qrscanClose){ qrscanClose(); return true; }
-  if($('img-viewer').classList.contains('active')){ closeViewer(); return true; }
-  if(modalClose){ modalClose(); return true; }
-  if($('group-link-screen').classList.contains('active')){ $('group-link-screen').classList.remove('active'); return true; }
-  if($('share-sheet').classList.contains('active')){ closeShareSheet(); return true; }
-  if($('group-pick-screen').classList.contains('active')){ $('group-pick-screen').classList.remove('active'); return true; }
-  if($('group-info-screen').classList.contains('active')){ $('group-info-screen').classList.remove('active'); return true; }
-  if($('contact-info-screen').classList.contains('active')){
-    closeContactInfo();
-    return true;
-  }
-  if($('settings-screen').classList.contains('active')){
-    closeSettings();
-    return true;
-  }
-  if($('peers-screen').classList.contains('active')){
-    closePeers();
-    return true;
-  }
-  if($('public-peers-screen').classList.contains('active')){
-    closePublicPeers();
-    return true;
-  }
-  if($('newchat-sheet').classList.contains('active')){
-    closeNewChat();
-    return true;
-  }
-  if(document.body.classList.contains('chat-open')){
-    document.body.classList.remove('chat-open');
-    curAddr = null;
-    renderList();
-    return true;
-  }
-  return false;
-};
+// Back: Android hardware back (MainActivity → ygBack), Escape, and the browser/PWA back
+// button (one guard history entry while anything is open) all close the topmost layer.
+const isOn = id => $(id).classList.contains('active');
+const wideChat = () => document.body.classList.contains('two-pane') && matchMedia('(min-width:820px)').matches;
+function topLayer(){
+  if(isOn('lock-screen')) return null;
+  if(qrscanClose) return () => qrscanClose();
+  if(isOn('img-viewer')) return closeViewer;
+  if(modalClose) return () => modalClose();
+  if(isOn('site-view-screen')) return () => $('sv-back').click();
+  if(isOn('group-link-screen')) return () => $('group-link-screen').classList.remove('active');
+  if(isOn('share-sheet')) return closeShareSheet;
+  if(isOn('group-pick-screen')) return () => $('group-pick-screen').classList.remove('active');
+  if(isOn('group-info-screen')) return () => $('group-info-screen').classList.remove('active');
+  if(isOn('contact-info-screen')) return closeContactInfo;
+  if(isOn('public-peers-screen')) return closePublicPeers;
+  if(isOn('peers-screen')) return closePeers;
+  if(isOn('settings-screen')) return closeSettings;
+  if(isOn('newchat-sheet')) return closeNewChat;
+  if(document.body.classList.contains('chat-open') && !wideChat()) return () => { document.body.classList.remove('chat-open'); curAddr = null; renderList(); };
+  return null;
+}
+window.ygBack = () => { const f = topLayer(); if(!f) return false; f(); return true; };
+document.addEventListener('keydown', e => {
+  if(e.key !== 'Escape' || e.isComposing || e.keyCode === 229) return;
+  if(window.ygBack()){ e.preventDefault(); e.stopPropagation(); }
+}, true);
+(function(){
+  if(window.YggAndroid) return; // the app's own back key already calls ygBack
+  let guard = false, skip = 0;
+  const sync = () => {
+    const open = !!topLayer();
+    if(open && !guard){ guard = true; try{ history.pushState({ygb:1}, ''); }catch(e){} }
+    else if(!open && guard && history.state && history.state.ygb){ guard = false; skip++; history.back(); }
+  };
+  let q = false;
+  const kick = () => { if(!q){ q = true; setTimeout(() => { q = false; sync(); }, 0); } };
+  window.addEventListener('popstate', () => {
+    if(skip){ skip--; return; }
+    guard = false;
+    window.ygBack();
+    kick();
+  });
+  new MutationObserver(kick).observe(document.body, {subtree:true, attributes:true, attributeFilter:['class'], childList:true});
+})();
 
 window.addEventListener('DOMContentLoaded', init);
 </script>
