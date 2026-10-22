@@ -380,21 +380,25 @@ func (a *App) leftNotice(peer string, g Group) {
 }
 
 // replaceRelayed swaps a relayed version of a post (history from someone
-// else, maybe altered) for the sender's own copy.
-func (a *App) replaceRelayed(key, from string, w wire) {
+// else, maybe altered) for the sender's own copy. img is the photo when the
+// own copy is one (the relay only carried a "📷" line).
+func (a *App) replaceRelayed(key, from string, w wire, img string) {
 	a.store.mu.Lock()
 	var upd *Message
 	for i := len(a.store.Messages) - 1; i >= 0; i-- {
 		m := &a.store.Messages[i]
 		if m.Peer == key && m.From == from && !m.Out && samePost(m.ID, w.ID) {
 			m.Text, m.Via, m.Hist, m.Sg = w.Text, "", false, ""
+			if img != "" {
+				m.Img = img
+			}
 			if n := cleanNick(w.Nick); n != "" {
 				m.Nick = n
 			}
 			if w.TS > 0 && w.TS <= time.Now().Unix()+300 {
 				m.TS = w.TS
 			}
-			if m.TS == w.TS && w.Sg != "" && verifyPost(from, w.PK, w.Sg, w.G, postID(w.ID), w.TS, w.Text) {
+			if m.TS == w.TS && w.Sg != "" && img == "" && verifyPost(from, w.PK, w.Sg, w.G, postID(w.ID), w.TS, w.Text) {
 				m.Sg = w.Sg // only for the time it was signed with
 			}
 			cp := *m
@@ -409,6 +413,9 @@ func (a *App) replaceRelayed(key, from string, w wire) {
 	if upd != nil {
 		// via/hist are spelled out: the UI merges the update into what it has.
 		v := map[string]any{"id": upd.ID, "peer": upd.Peer, "from": upd.From, "nick": upd.Nick, "text": upd.Text, "ts": upd.TS, "via": "", "hist": false}
+		if upd.Img != "" {
+			v["img"] = upd.Img
+		}
 		a.broadcast("msg_upd", v)
 	}
 }

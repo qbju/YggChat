@@ -208,7 +208,7 @@ func (a *App) onFileHeader(from string, w wire) {
 		(w.Size+imgChunk-1)/imgChunk != w.N || !shaRe.MatchString(w.Sha) || len(w.Text) > capMax || len(w.Nick) > 120 {
 		return
 	}
-	if a.hasMsg(from, w.ID) || (w.G != "" && validGID(w.G) && (a.hasGroupMsg(w.G, from, w.ID) || a.groupGone(w.G, from, w.ID) || (w.Text == "" && w.Mime != textMime && a.groupNoFiles(w.G)))) {
+	if a.hasMsg(from, w.ID) || (w.G != "" && validGID(w.G) && (a.hasGroupFile(w.G, from, w.ID, w.Mime) || a.groupGone(w.G, from, w.ID) || (w.Text == "" && w.Mime != textMime && a.groupNoFiles(w.G)))) {
 		a.sendWire(from, wire{T: "ack", ID: w.ID})
 		return
 	}
