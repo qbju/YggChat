@@ -1709,6 +1709,7 @@ function hashColor(addr){
 // One timer for the one toast: an earlier toast's timer hid a newer one early;
 // long messages stay up longer.
 let toastT = null, toastTag = '';
+const waitToastAt = {};
 function toast(msg, tag){
   const el = $('toast');
   el.textContent = msg;
@@ -1971,7 +1972,7 @@ function renderMessages(){
       html += '<div class="day-sep">' + escapeHtml(dayLabel(m.ts)) + '</div>';
     }
     if(i === histSep) html += '<div class="sys-line hist-sep">ここから参加前のメッセージ</div>';
-    const sc = inGroup ? {nick: memberNick(curAddr, m.from, true) || m.nick, avatar: (state.contacts[m.from] || {}).avatar} : Object.assign({}, state.contacts[curAddr], {nick: (state.contacts[curAddr]||{}).nick || m.nick});
+    const sc = inGroup ? {nick: memberNick(curAddr, m.from, true) || (m.nick !== 'anon' ? m.nick : ''), avatar: (state.contacts[m.from] || {}).avatar} : Object.assign({}, state.contacts[curAddr], {nick: (state.contacts[curAddr]||{}).nick || m.nick});
     const av = m.out ? (state.avatar || initials(state.nick || state.addr)) : avatarText(sc, m.from || curAddr);
     const avc = hashColor(m.from || curAddr);
     if(m.sys){
@@ -1989,7 +1990,7 @@ function renderMessages(){
     if(!m.out && !g.same && inGroup){
       html += '<div style="display:flex; gap:6px; align-items:flex-end; margin-bottom:2px;">'
         + '<div class="avatar small" style="width:28px; height:28px; font-size:10px; background:' + avc + '; border:none; color:#111;">' + escapeHtml(av) + '</div>'
-        + '<div style="font-size:11px; color:var(--dim);">' + escapeHtml((sc.nick || 'メンバー') + (m.via ? '（' + memberNick(curAddr, m.via) + 'が中継）' : '')) + '</div>'
+        + '<div style="font-size:11px; color:var(--dim);">' + escapeHtml((sc.nick || nickOr('', m.from)) + (m.via ? '（' + memberNick(curAddr, m.via) + 'が中継）' : '')) + '</div>'
         + '</div>';
     }
     if(m.img && /^data:image\/(jpeg|png|webp|gif);base64,[A-Za-z0-9+\/=]+$/.test(m.img)){
@@ -2004,7 +2005,7 @@ function renderMessages(){
     if(m.edited) html += '<span class="msg-status">編集済み</span>';
     if(m.out){
       if(st === 'sending'){
-        html += '<span class="msg-status" title="送信中">…</span>';
+        html += '<span class="msg-status" title="相手に届けています（オフラインならしばらくしてオンライン待ちに）">送信中…</span>';
       }else if(st === 'sent' && inGroup && !gc.left){
         const tot = (m.tot | 0) || Math.max(0, (gc.members || []).filter(a => a !== state.addr).length), n = Math.min(m.dlv | 0, tot);
         const part = m.tot && n < tot; // older messages don't know how many it went to
@@ -2109,9 +2110,10 @@ async function retrySend(id){
 
 // A member's name: their contact name, else the name on their group messages.
 function memberNick(gaddr, a, bare){
+  const ok = x => x && x !== 'anon';
   let n = (state.contacts[a] || {}).nick;
-  if(!n){ for(let i = state.messages.length - 1; i >= 0; i--){ const m = state.messages[i]; if(m.peer === gaddr && m.from === a && m.nick){ n = m.nick; break; } } }
-  if(!n){ const p = ((state.contacts[gaddr] || {}).pend || []).find(x => x.addr === a && x.nick); if(p) n = p.nick; }
+  if(!ok(n)){ n = ''; for(let i = state.messages.length - 1; i >= 0; i--){ const m = state.messages[i]; if(m.peer === gaddr && m.from === a && ok(m.nick)){ n = m.nick; break; } } }
+  if(!n){ const p = ((state.contacts[gaddr] || {}).pend || []).find(x => x.addr === a && ok(x.nick)); if(p) n = p.nick; }
   return n || (bare ? '' : 'メンバー');
 }
 // System lines carry a short address ("209:201d:…") when the node did not
@@ -2148,7 +2150,8 @@ function groupSubtitle(c){
     if(n) names.push(n);
   }
   let s = ms.length + '人';
-  if(names.length) s += '・' + names.slice(0, 3).join('、') + (ms.length - 1 > 3 ? ' ほか' : '');
+  const others = ms.filter(a => a !== state.addr).length;
+  if(names.length) s += '・' + names.slice(0, 3).join('、') + (others > Math.min(3, names.length) ? ' ほか' : '');
   return s;
 }
 function updateChatHeader(){
@@ -2218,7 +2221,10 @@ function isYggAddr(a){
   return /^2[0-9a-fA-F]{2}:.+/.test(a) || /^3[0-9a-fA-F]{2}:.+/.test(a);
 }
 
-$('start-chat-btn').addEventListener('click', () => startChat());
+$('start-chat-btn').addEventListener('click', async () => {
+  const b = $('start-chat-btn'); if(b.disabled) return;
+  b.disabled = true; try{ await startChat(); }finally{ b.disabled = false; } // a slow domain lookup tapped twice opened it twice
+});
 // Start a chat from the sheet. A pasted/scanned contact link goes straight on
 // (add the contact and open the chat); a group link starts the join.
 async function startChat(){
@@ -3233,6 +3239,8 @@ function connectEvents(){
           else if(c.group && !c.req && !c.left && (state.joins || []).some(j => j.addr === c.addr)){ toast('「' + (c.nick || 'グループ') + '」に参加しました'); }
           if(c.group && !c.req && !c.left){ state.joins = (state.joins || []).filter(j => j.addr !== c.addr); hideToast('wait:' + c.addr); }
           if(curAddr === c.addr){ updateChatHeader(); if(c.group) renderMessages(); }
+          // an open group info follows the change (join requests, members, settings, admins) instead of going stale
+          if(curAddr === c.addr && c.group && $('group-info-screen').classList.contains('active') && !document.querySelector('.modal-bg')) openGroupInfo();
         }
       }else if(d.type === 'contact_del'){
         const cd = d.data;
@@ -3241,6 +3249,7 @@ function connectEvents(){
           state.messages = state.messages.filter(m => m.peer !== cd.addr);
           if(curAddr === cd.addr){
             document.body.classList.remove('chat-open');
+            ['contact-info-screen', 'group-info-screen', 'group-link-screen', 'group-pick-screen'].forEach(id => $(id).classList.remove('active'));
             curAddr = null;
           }
           renderList();
@@ -3271,7 +3280,9 @@ function connectEvents(){
         }else if(d.data && d.data.k === 'wait'){
           pendingJoin = null;
           const ga = d.data.g ? 'g:' + d.data.g : '', gc = ga && state.contacts[ga];
-          if(!(gc && gc.group && !gc.req && !gc.left)) toast('承認待ちです。チャット一覧に表示しています', 'wait:' + ga); // already a member: no stale "waiting" toast
+          // the join is retried for ~25 s and every retry gets this answer: say it once, not for half a minute
+          const wk = 'wait:' + ga, now = Date.now();
+          if(!(gc && gc.group && !gc.req && !gc.left) && !(now - (waitToastAt[wk] || 0) < 120000)){ waitToastAt[wk] = now; toast('承認待ちです。チャット一覧に表示しています', wk); } // already a member: no stale "waiting" toast
         }
         else if(d.data && d.data.k === 'store'){ uiAlert(String(d.data.text || '')); }
         else if(d.data && d.data.text){ pendingJoin = null; toast(d.data.text); }
@@ -3872,7 +3883,8 @@ async function groupSet(patch){
   catch(e){ toast(e.message); openGroupInfo(); return false; }
 }
 document.querySelectorAll('.gi-sw').forEach(sw => sw.addEventListener('click', () => {
-  const c = state.contacts[curAddr]; if(!c || c.owner !== state.addr) return;
+  const c = state.contacts[curAddr]; if(!c) return;
+  if(c.owner !== state.addr){ toast('グループ設定を変えられるのはホストだけです'); return; }
   const set = Object.assign({}, c.set || {}), k = sw.getAttribute('data-k');
   if(k === 'files') set.nf = !set.nf; else set[k] = !set[k];
   groupSet({Set: set});
@@ -3900,7 +3912,9 @@ $('gi-pw').addEventListener('click', async () => {
 $('gi-pend').addEventListener('click', async (e) => {
   const b = e.target.closest && e.target.closest('.gi-ok, .gi-no'); if(!b) return;
   const ok = b.classList.contains('gi-ok');
-  try{ const g = await api('/api/group/approve', {ID: curAddr.slice(2), Addr: b.getAttribute('data-addr'), OK: ok}); state.contacts[g.addr] = g; openGroupInfo(); renderList(); toast(ok ? '承認しました' : '拒否しました'); }catch(e){ toast(e.message); }
+  if(b.disabled) return;
+  b.parentNode.querySelectorAll('button').forEach(x => x.disabled = true); // double tap
+  try{ const g = await api('/api/group/approve', {ID: curAddr.slice(2), Addr: b.getAttribute('data-addr'), OK: ok}); state.contacts[g.addr] = g; openGroupInfo(); renderList(); toast(ok ? '承認しました' : '拒否しました'); }catch(e){ toast(e.message); openGroupInfo(); }
 });
 $('gi-back').addEventListener('click', () => $('group-info-screen').classList.remove('active'));
 $('gi-members').addEventListener('click', async (e) => {
@@ -3910,13 +3924,13 @@ $('gi-members').addEventListener('click', async (e) => {
     const a = adm.getAttribute('data-addr'), cur = c.admins || [];
     const on = !cur.includes(a);
     if(on && cur.length >= 10){ toast('副管理者は10人までです'); return; }
-    if(on && !(await uiDialog(((state.contacts[a]||{}).nick || addrShort(a)) + ' を副管理者にしますか？\n参加の承認・招待リンク・メンバーの追加と削除ができるようになります（設定の変更はホストだけ）。', {okText:'副管理者にする'}))) return;
+    if(on && !(await uiDialog((memberNick(curAddr, a, true) || nickOr('', a)) + ' を副管理者にしますか？\n参加の承認・招待リンク・メンバーの追加と削除ができるようになります（設定の変更はホストだけ）。', {okText:'副管理者にする'}))) return;
     if(await groupSet({Admins: on ? cur.concat([a]) : cur.filter(x => x !== a)})) toast(on ? '副管理者にしました' : '副管理者から外しました');
     return;
   }
   const b = e.target.closest && e.target.closest('.gi-kick'); if(!b) return;
   const a = b.getAttribute('data-addr');
-  const ok = await uiDialog(((state.contacts[a]||{}).nick || addrShort(a)) + ' をグループから外しますか？', {okText:'外す', danger:true});
+  const ok = await uiDialog((memberNick(curAddr, a, true) || nickOr('', a)) + ' をグループから外しますか？', {okText:'外す', danger:true});
   if(!ok) return;
   try{ const g = await api('/api/group/update', {ID: curAddr.slice(2), Remove: [a]}); state.contacts[g.addr] = g; updateChatHeader(); openGroupInfo(); renderList(); }catch(e){ toast(e.message); }
 });
@@ -3959,6 +3973,10 @@ $('gl-reset').addEventListener('click', async () => {
   openGroupLink(true);
 });
 $('gp-ok').addEventListener('click', async () => {
+  const btn = $('gp-ok'); if(btn.disabled) return;
+  btn.disabled = true; try{ await gpOk(); }finally{ btn.disabled = false; } // double tap made two groups
+});
+async function gpOk(){
   const picked = [...$('gp-list').querySelectorAll('input:checked')].map(i => i.value)
     .concat($('gp-addr').value.split(/[,\s、]+/).map(s => s.trim()).filter(Boolean));
   if(picked.some(a => !isYggAddr(a))){ toast('Yggdrasilアドレスではないものがあります'); return; }
@@ -3977,7 +3995,7 @@ $('gp-ok').addEventListener('click', async () => {
     }
     $('group-pick-screen').classList.remove('active');
   }catch(e){ toast(e.message); }
-});
+}
 $('gi-rename').addEventListener('click', async () => {
   const c = state.contacts[curAddr]; if(!c) return;
   const v = await uiPrompt('グループ名（メンバー全員に反映）', c.nick || ''); if(v === null || !v.trim()) return;
@@ -3998,8 +4016,11 @@ $('gi-delete').addEventListener('click', async () => {
 
 // Requests
 $('req-accept').addEventListener('click', async () => {
-  if(!curAddr) return;
-  try{ const c = await api('/api/contact', {Addr: curAddr, Accept: true}); state.contacts[curAddr] = c; updateChatHeader(); renderList(); toast('承認しました'); }catch(e){ toast(e.message); }
+  if(!curAddr || $('req-accept').disabled) return;
+  const a = curAddr, grp = isGroup(a);
+  $('req-accept').disabled = true; // double tap
+  try{ const c = await api('/api/contact', {Addr: a, Accept: true}); state.contacts[a] = c; if(curAddr === a) updateChatHeader(); renderList(); toast(grp ? '参加しました' : '承認しました'); }catch(e){ toast(e.message); }
+  finally{ $('req-accept').disabled = false; }
 });
 async function blockCur(){
   if(!curAddr) return;
