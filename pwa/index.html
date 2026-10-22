@@ -2441,23 +2441,28 @@ $('ci-copy-addr').addEventListener('click', () => copyText(curAddr));
 
 // In-page dialogs: the browser's built-in dialogs are unreliable in iOS home-screen apps and WebViews.
 let modalClose = null;
-function uiDialog(title, {input=null, okText='OK', danger=false, placeholder=''}={}){
+function uiDialog(title, {input=null, okText='OK', danger=false, placeholder='', hint='', validate=null}={}){
   return new Promise(res => {
     const bg = document.createElement('div'); bg.className = 'modal-bg';
     const m = document.createElement('div'); m.className = 'modal';
     const t = document.createElement('div'); t.className = 'mt'; t.textContent = title; m.appendChild(t);
     let inp = null;
     if(input !== null){ inp = document.createElement('input'); inp.value = input; inp.autocomplete = 'off'; inp.placeholder = placeholder; m.appendChild(inp); }
+    // hint under the input; validate(v) -> '' when OK, else what is wrong (shown instead of the hint, OK disabled)
+    let hn = null;
+    if(inp && (hint || validate)){ hn = document.createElement('div'); hn.className = 'mhint'; hn.id = 'mhint-' + Math.random().toString(36).slice(2); hn.setAttribute('aria-live', 'polite'); hn.style.cssText = 'font-size:13px;color:var(--dim);margin:6px 2px 0;line-height:1.4'; hn.textContent = hint; inp.setAttribute('aria-describedby', hn.id); m.appendChild(hn); }
     const b = document.createElement('div'); b.className = 'mb';
     const cancel = document.createElement('button'); cancel.textContent = 'キャンセル';
     const ok = document.createElement('button'); ok.textContent = okText; ok.className = danger ? 'danger' : 'ok';
     b.append(cancel, ok); m.appendChild(b); bg.appendChild(m); document.body.appendChild(bg);
-    const done = v => { bg.remove(); modalClose = null; res(v); };
+    const bad = () => (inp && validate) ? (validate(inp.value) || '') : '';
+    const check = () => { if(!hn) return; const e = bad(); hn.textContent = e || hint; hn.style.color = e && inp.value ? 'var(--error)' : 'var(--dim)'; ok.disabled = !!e; };
+    const done = v => { if(v !== null && v !== false && inp && bad()){ check(); inp.focus(); return; } bg.remove(); modalClose = null; res(v); };
     modalClose = () => done(inp ? null : false);
     cancel.onclick = () => done(inp ? null : false);
     ok.onclick = () => done(inp ? inp.value : true);
     bg.onclick = e => { if(e.target === bg) done(inp ? null : false); };
-    if(inp){ inp.onkeydown = e => { if(e.key === 'Enter' && !imeEnter(e)) done(inp.value); }; setTimeout(() => inp.focus(), 50); }
+    if(inp){ inp.onkeydown = e => { if(e.key === 'Enter' && !imeEnter(e)) done(inp.value); }; inp.oninput = check; check(); setTimeout(() => inp.focus(), 50); }
   });
 }
 const uiConfirm = (t, danger) => uiDialog(t, {okText: danger ? '削除' : 'OK', danger});
@@ -2650,7 +2655,8 @@ async function mvAfterSend(){
   try{ await api('/api/identity/reset', {Confirm:true}); toast('初期化しました'); }catch(e){ toast(e.message); }
 }
 $('mv-export').addEventListener('click', async () => {
-  const pass = await uiPrompt('バックアップのパスフレーズ（読み込む時に必要）', '');
+  // 8 characters at least (the node refuses shorter: the file holds the key and can be attacked offline)
+  const pass = await uiDialog('バックアップのパスフレーズ（読み込む時に必要）', {input: '', hint: '8文字以上（長いほど安全です）', validate: v => { const n = [...v.trim()].length; return n >= 8 ? '' : '8文字以上にしてください（あと' + (8 - n) + '文字）'; }});
   if(!pass) return;
   const hist = await uiDialog('トーク履歴（画像を含む）も入れますか？', {okText:'履歴も入れる'});
   toast('作成中…');
@@ -3680,12 +3686,14 @@ async function openMsgMenu(id){
   const m = state.messages.find(x => x.id === id && x.peer === curAddr);
   if(!m || m.sys) return;
   const sent = m.out && (m.status === 'sent' || m.status === 'sending' || m.nostr);
+  // 🕓 queued may already have arrived (lost ack): its edit/unsend go out too; only a failed send never left
+  const remote = m.out && m.status !== 'failed';
   const items = [];
   if(m.text) items.push({key:'copy', label:'コピー'});
   const g = isGroup(m.peer);
   if(m.out && !m.img && !g) items.push({key:'edit', label:'編集'});
   items.push({key:'delme', label:'自分の画面から削除', danger:true});
-  if(m.out && !g) items.push({key:'delall', label: sent ? '相手の画面からも削除（送信取り消し）' : '削除（まだ届いていないので送られません）', danger:true});
+  if(m.out && !g) items.push({key:'delall', label: sent ? '相手の画面からも削除（送信取り消し）' : remote ? '相手の画面からも削除（届いていた場合も取り消し）' : '削除（まだ届いていないので送られません）', danger:true});
   const k = await actionSheet((m.text || (m.img ? '📷 写真' : '')).slice(0, 120), items);
   if(!k) return;
   if(k === 'copy'){ copyText(m.text); return; }
@@ -3695,13 +3703,15 @@ async function openMsgMenu(id){
     try{
       const r = await api('/api/message/edit', {Peer: m.peer, ID: m.id, Text: v});
       Object.assign(m, r); renderMessages(); renderList();
-      if(sent) toast('編集しました（相手がオフラインなら、つながったときに反映）');
+      if(remote) toast('編集しました（相手がオフラインなら、つながったときに反映）');
     }catch(e){ toast(e.message); }
     return;
   }
   const everyone = k === 'delall';
   const msg = everyone && sent
     ? '相手の画面からも削除しますか？\n\n相手のYggChatに取り消しを送ります。すでに読まれていたり、改造クライアントや置き配(Nostr)に残っていたりする可能性はあります。'
+    : everyone && remote
+    ? '相手の画面からも削除しますか？\n\nこのメッセージはもう送られません。届いていた場合に備えて、相手のYggChatに取り消しも送ります。'
     : 'このメッセージを削除しますか？' + (m.out ? '' : '\n（相手の画面には残ります）');
   if(!(await uiDialog(msg, {okText:'削除', danger:true}))) return;
   try{
