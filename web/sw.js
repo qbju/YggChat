@@ -21,17 +21,18 @@ self.addEventListener('fetch', e => {
   if (e.request.method !== 'GET' || url.origin !== location.origin || url.pathname.startsWith('/api/')) return;
   // Pages: network-first so updates show up immediately; other assets: cache-first.
   if (e.request.mode === 'navigate') {
-    e.respondWith(fetch(e.request).then(res => { const c = res.clone(); if (res.ok) caches.open(CACHE).then(x => x.put(INDEX, c)); return res; }).catch(() => caches.match(INDEX)));
+    e.respondWith(fetch(e.request).then(res => { if (res.ok) { const c = res.clone(); caches.open(CACHE).then(x => x.put(INDEX, c)); } return res; }).catch(() => caches.match(INDEX)));
     return;
   }
   e.respondWith(
     caches.match(e.request, { ignoreSearch: true }).then(hit =>
       hit ||
       fetch(e.request).then(res => {
-        const copy = res.clone();
-        if (res.ok) caches.open(CACHE).then(c => c.put(e.request, copy));
+        // clone only what gets cached: an unread clone (404s) kept the request
+        // open, and a worker with open requests never lets the next version take over
+        if (res.ok) { const copy = res.clone(); caches.open(CACHE).then(c => c.put(e.request, copy)); }
         return res;
-      }).catch(() => caches.match(INDEX))
+      }) // not reachable and not cached: a network error, not index.html posing as a script
     )
   );
 });

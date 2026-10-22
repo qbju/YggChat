@@ -13,19 +13,34 @@
   const LS = 'yggchat_pwa_v1';
   const MAXTTL = 4 * 7 * 86400;
   const now = () => Math.floor(Date.now() / 1000);
+  // A sender's timestamp as stored: a number, not in the future (non-numbers broke sorting and dates, far-future ones stuck to the bottom and hid unread).
+  const inTs = t => { t = Math.trunc(+t); return t > 0 && t <= now() + 300 ? t : now(); };
 
   // ---- persistent state ----
   // Outer record (always readable): key, peers, enc. Inner data (encrypted when
   // a passcode is set): nick, bio, avatar, contacts, messages, blocked.
   // Stored in IndexedDB (images need more room than localStorage's ~5 MB);
   // older versions kept everything in localStorage and are migrated once.
-  const idb = new Promise((res, rej) => {
-    const q = indexedDB.open('yggchat', 1);
-    q.onupgradeneeded = () => q.result.createObjectStore('kv');
-    q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error);
-  });
-  const idbGet = k => idb.then(db => new Promise((res, rej) => { const q = db.transaction('kv').objectStore('kv').get(k); q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error); }));
-  const idbPut = (k, v) => idb.then(db => new Promise((res, rej) => { const t = db.transaction('kv', 'readwrite'); t.objectStore('kv').put(v, k); t.oncomplete = res; t.onerror = () => rej(t.error); }));
+  // The connection is reopened when the browser drops it (Safari: "Connection to
+  // Indexed Database server lost" after the app was in the background), so later
+  // writes don't all fail silently.
+  let idbP = null;
+  function openIDB() {
+    const p = new Promise((res, rej) => {
+      let q; try { q = indexedDB.open('yggchat', 1); } catch (e) { rej(e); return; }
+      q.onupgradeneeded = () => q.result.createObjectStore('kv');
+      q.onsuccess = () => { const db = q.result; db.onclose = () => { if (idbP === p) idbP = null; }; db.onversionchange = () => { db.close(); if (idbP === p) idbP = null; }; res(db); };
+      q.onerror = () => rej(q.error || new Error('indexedDB open failed'));
+    });
+    p.catch(() => { if (idbP === p) idbP = null; });
+    return (idbP = p);
+  }
+  async function idbDo(fn) {
+    try { return await fn(await (idbP || openIDB())); }
+    catch (e) { if (e && e.name === 'QuotaExceededError') throw e; idbP = null; return fn(await openIDB()); } // once more on a fresh connection
+  }
+  const idbGet = k => idbDo(db => new Promise((res, rej) => { const q = db.transaction('kv').objectStore('kv').get(k); q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error); }));
+  const idbPut = (k, v) => idbDo(db => new Promise((res, rej) => { const t = db.transaction('kv', 'readwrite'); t.objectStore('kv').put(v, k); t.oncomplete = res; t.onerror = () => rej(t.error); t.onabort = () => rej(t.error || new DOMException('transaction aborted', 'AbortError')); }));
   let raw = {};
   const outer = { key: '', peers: null, enc: null };
   const blank = () => ({ nick: 'anon', bio: '', avatar: '', contacts: {}, messages: [], blocked: {}, nostrOn: true, nostrRelays: [], ctl: [], groups: {}, powStrict: false, joins: {} });
@@ -47,10 +62,30 @@
       m.status = 'queued';
     }
   };
+  function storeError(what, e) {
+    const x = new Error('storage ' + what + ': ' + ((e && (e.name || e.message)) || e)); x.store = true; x.cause = e; return x;
+  }
+  let storeWarnAt = 0;
+  function storeWarn(e) { // a write failed: tell the user (at most once a minute) instead of only the console
+    console.error('save', e);
+    if (Date.now() - storeWarnAt < 60000) return; storeWarnAt = Date.now();
+    const full = e && e.name === 'QuotaExceededError';
+    try { emit('notice', { k: 'store', text: full ? '端末の保存容量が足りず、保存できませんでした。写真の多い会話を削除するか、空き容量を増やしてください' : '保存に失敗しました（' + ((e && e.name) || 'error') + '）。アプリを開き直してください' }); } catch {}
+  }
   async function loadStore() {
-    raw = (await idbGet('state').catch(() => null)) || null;
+    // A store that can't be read is not an empty one: starting fresh here made a
+    // new identity, and its first write replaced the real store once IndexedDB
+    // answered again. Retry, then stop with an error instead (never overwrite).
+    let got, err = null;
+    for (let i = 0; i < 3; i++) {
+      try { got = await idbGet('state'); err = null; break; } catch (e) { err = e; await new Promise(r => setTimeout(r, 400 * (i + 1))); }
+    }
+    if (err) throw storeError('read', err);
+    if (got != null && (typeof got !== 'object' || Array.isArray(got))) throw storeError('read', new Error('unexpected record'));
+    raw = got || null;
     if (!raw) {
-      raw = JSON.parse(localStorage.getItem(LS) || '{}');
+      try { raw = JSON.parse(localStorage.getItem(LS) || '{}'); } catch { raw = {}; }
+      if (!raw || typeof raw !== 'object') raw = {};
       if (Object.keys(raw).length) { await idbPut('state', raw); localStorage.removeItem(LS); }
     }
     Object.assign(outer, { key: raw.key || '', peers: raw.peers || null, enc: raw.enc || null });
@@ -63,27 +98,57 @@
 
   // Outbox (v0.19.2): a message we just sent is also written to localStorage at
   // once (synchronously), until the IndexedDB write that holds it is done, so a
-  // reload or close right after tapping send can't lose it. Not with a
-  // passcode (that store is encrypted, and encrypting is async).
-  const OUTBOX = 'yggchat-outbox';
-  const outboxGet = () => { try { const o = JSON.parse(localStorage.getItem(OUTBOX) || '[]'); return Array.isArray(o) ? o : []; } catch { return []; } };
+  // reload or close right after tapping send can't lose it. With a passcode the
+  // entry is encrypted with the store key first (AES-GCM of one message takes
+  // well under a millisecond, the full store write much longer) and is merged
+  // back after the next unlock.
+  const OUTBOX = 'yggchat-outbox', OUTBOX_ENC = 'yggchat-outbox-enc';
+  const lsList = k => { try { const o = JSON.parse(localStorage.getItem(k) || '[]'); return Array.isArray(o) ? o : []; } catch { return []; } };
+  const lsSet = (k, o) => { try { if (o.length) localStorage.setItem(k, JSON.stringify(o)); else localStorage.removeItem(k); return true; } catch { return false; } };
+  const outboxGet = () => lsList(OUTBOX);
+  const outboxEncPending = new Set(), outboxDone = new Set();
   function outboxPut(v, cs) {
-    if (aesKey || locked) return;
+    if (locked) return;
+    outboxDone.delete(v.id);
+    if (aesKey) {
+      const key = aesKey, salt = outer.enc && outer.enc.salt;
+      const put = async e => {
+        const iv = crypto.getRandomValues(new Uint8Array(12));
+        const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, new TextEncoder().encode(JSON.stringify(e)));
+        if (outboxDone.has(v.id)) return true; // already in IndexedDB
+        return lsSet(OUTBOX_ENC, lsList(OUTBOX_ENC).concat([{ id: v.id, salt, iv: b64(iv), ct: b64(ct) }]));
+      };
+      const p = put({ v, cs }).then(ok => ok || put({ v: Object.assign({}, v, { img: undefined, lost: !!v.img || undefined }), cs })).catch(() => {}).finally(() => outboxEncPending.delete(p));
+      outboxEncPending.add(p);
+      return;
+    }
     const o = outboxGet(); o.push({ v, cs });
-    try { localStorage.setItem(OUTBOX, JSON.stringify(o)); } catch { try { localStorage.setItem(OUTBOX, JSON.stringify(outboxGet().concat([{ v: Object.assign({}, v, { img: undefined, lost: !!v.img || undefined }), cs }]))); } catch {} }
+    if (!lsSet(OUTBOX, o)) lsSet(OUTBOX, outboxGet().concat([{ v: Object.assign({}, v, { img: undefined, lost: !!v.img || undefined }), cs }]));
   }
-  function outboxDrop(id) { const o = outboxGet(), k = o.filter(e => !(e && e.v && e.v.id === id)); try { if (k.length) localStorage.setItem(OUTBOX, JSON.stringify(k)); else localStorage.removeItem(OUTBOX); } catch {} }
-  function restoreOutbox(r) {
-    const o = outboxGet(); if (!o.length || r.enc) return;
+  function outboxDrop(id) {
+    outboxDone.add(id);
+    lsSet(OUTBOX, outboxGet().filter(e => !(e && e.v && e.v.id === id)));
+    lsSet(OUTBOX_ENC, lsList(OUTBOX_ENC).filter(e => !(e && e.id === id)));
+  }
+  function mergeOutbox(r, o) {
+    let n = 0;
     r.messages = r.messages || [];
     for (const e of o) {
       if (!e || !e.v || !e.v.id || e.v.lost || r.messages.some(m => m.id === e.v.id && m.peer === e.v.peer)) continue;
-      r.messages.push(e.v); for (const c of e.cs || []) if (!r.messages.some(m => m.id === c.id && m.peer === c.peer)) r.messages.push(c);
+      r.messages.push(e.v); n++; for (const c of e.cs || []) if (!r.messages.some(m => m.id === c.id && m.peer === c.peer)) r.messages.push(c);
     }
+    return n;
+  }
+  function restoreOutbox(r) {
+    const o = outboxGet(); if (!o.length || r.enc) return;
+    mergeOutbox(r, o);
     outboxRestored = true;
   }
   let outboxRestored = false;
-  const b64 = u8 => btoa(String.fromCharCode(...new Uint8Array(u8)));
+  // In chunks: spreading a whole encrypted store (100+ KB, e.g. any photo) into
+  // fromCharCode threw "Maximum call stack size exceeded", so with a passcode
+  // nothing was saved any more and the store on disk stayed unencrypted.
+  const b64 = u8 => { u8 = new Uint8Array(u8); let s = ''; for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000)); return btoa(s); };
   const unb64 = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
   async function kdf(pass, salt) {
     const base = await crypto.subtle.importKey('raw', new TextEncoder().encode(pass), 'PBKDF2', false, ['deriveKey']);
@@ -93,22 +158,29 @@
   // One pending write at a time, which takes the state as it is when it runs:
   // a burst of changes is one write, and the newest state is never stuck behind
   // a queue of stale ones (a reload/close right after sending lost messages, v0.19.2).
+  // Resolves true once the state is in IndexedDB, false if the write failed.
   function save() {
     if (locked) return saving;
     if (saveQueued) return saving;
     saveQueued = true;
     saving = saving.then(async () => {
       saveQueued = false;
+      // Locked since this write was queued (lock blanks st and drops the key):
+      // writing now would replace the encrypted store with an empty plain one.
+      if (locked || (outer.enc && !aesKey)) return false;
       const rec = { key: outer.key, peers: outer.peers };
       if (aesKey) {
+        const key = aesKey, salt = outer.enc.salt; // the pair as it is now: a passcode change mid-write can't mix them
         const iv = crypto.getRandomValues(new Uint8Array(12));
-        const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, aesKey, new TextEncoder().encode(JSON.stringify(st)));
-        rec.enc = { v: 1, salt: outer.enc.salt, iv: b64(iv), ct: b64(ct) };
+        const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, new TextEncoder().encode(JSON.stringify(st)));
+        rec.enc = { v: 1, salt, iv: b64(iv), ct: b64(ct) };
+        if (key !== aesKey) return false; // passcode changed meanwhile: the write queued after this one stores it
         outer.enc = rec.enc;
       } else Object.assign(rec, st);
-      raw = rec;
       await idbPut('state', rec);
-    }).catch(e => console.error('save', e));
+      raw = rec;
+      return true;
+    }).catch(e => { storeWarn(e); return false; });
     return saving;
   }
   // Write now (the page may be going away): pending saveSoon included.
@@ -212,7 +284,7 @@
 
   const handleMsg = (src, w) => w.g ? onGroupMsg(src, w) : Promise.resolve(!!w.text && acceptMsg(src, w, ''));
   function acceptMsg(src, w, img) {
-    if ((!w.text && !img) || u8len(w.text) > MAXRECV || !/^[0-9A-Za-z_-]{1,40}$/.test(String(w.id))) return false;
+    if ((w.text != null && typeof w.text !== 'string') || (!w.text && !img) || u8len(w.text) > MAXRECV || !/^[0-9A-Za-z_-]{1,40}$/.test(String(w.id))) return false;
     if (locked || st.blocked[src]) return false;
     if (st.messages.some(m => m.peer === src && m.id === w.id)) return true;
     if (!powCheck(src, w)) return false;
@@ -220,7 +292,7 @@
     // Only a message newer than the last change moves the timer (late Nostr copies come in any order), v0.19.2.
     const c0 = st.contacts[src], at = Math.min(Math.trunc(+w.ts || 0), now() + 300);
     if (c0 && at >= (c0.ttlat || 0)) { if ((c0.ttl || 0) !== ttl) setTTL(src, ttl, false, at); else if (at > (c0.ttlat || 0)) { c0.ttlat = at; saveSoon(); } }
-    const m = { id: w.id, peer: src, from: src, nick: cleanNick(w.nick), text: w.text || '', ts: w.ts || now(), out: false };
+    const m = { id: w.id, peer: src, from: src, nick: cleanNick(w.nick), text: w.text || '', ts: inTs(w.ts), out: false };
     if (img) m.img = img;
     if (ttl) { m.ttl = ttl; m.exp = now() + ttl; }
     addMessage(m);
@@ -654,7 +726,7 @@
     return v;
   }
   async function onGroupMsg(src, w, img) {
-    if (!okGID(w.g) || (!w.text && !img) || u8len(w.text) > MAXRECV || !/^[0-9A-Za-z_-]{1,40}$/.test(String(w.id))) return false;
+    if (!okGID(w.g) || (w.text != null && typeof w.text !== 'string') || (!w.text && !img) || u8len(w.text) > MAXRECV || !/^[0-9A-Za-z_-]{1,40}$/.test(String(w.id))) return false;
     if (locked || st.blocked[src]) return false;
     let g = st.groups[w.g], ask = false;
     const known = !!g;
@@ -681,7 +753,7 @@
     if (img && nf) { if (!w.text) return true; img = ''; } // photos off: ack and drop
     let ttl = w.ttl | 0; const gt = (g.set && g.set.ttl) | 0;
     if (gt && (ttl <= 0 || ttl > gt)) ttl = gt; if (ttl < 0 || ttl > MAXTTL) ttl = 0;
-    const m = { id: postIDf(w.id), peer: key, from: src, nick: cleanNick(w.nick), text: w.text || '', ts: w.ts || now(), out: false }; // stored under the post id
+    const m = { id: postIDf(w.id), peer: key, from: src, nick: cleanNick(w.nick), text: w.text || '', ts: inTs(w.ts), out: false }; // stored under the post id
     if (img) m.img = img;
     if (ttl) { m.ttl = ttl; m.exp = now() + ttl; }
     addMessage(m);
@@ -1197,7 +1269,9 @@
     const take = () => new Promise(got => {
       navigator.locks.request('yggchat-node', { ifAvailable: true }, l => { if (!l) { got(false); return; } got(true); return new Promise(() => {}); });
     });
-    bc.onmessage = e => { if (e.data === 'take' && holding) { try { sessionStorage.setItem('yggpassive', '1'); } catch {} location.reload(); } };
+    // Write pending state before going passive: the other tab reads the store as
+    // soon as our lock is released, and a write cut off by the reload was lost.
+    bc.onmessage = async e => { if (e.data === 'take' && holding) { holding = false; try { sessionStorage.setItem('yggpassive', '1'); } catch {} await Promise.race([saveNow(), new Promise(r => setTimeout(r, 3000))]); location.reload(); } };
     let holding = false, passive = false;
     try { passive = sessionStorage.getItem('yggpassive') === '1'; sessionStorage.removeItem('yggpassive'); } catch {}
     if (!passive && await take()) { holding = true; return; }
@@ -1207,6 +1281,38 @@
     holding = true;
   }
 
+  // A wasm cached half-way (e.g. fetched while a deploy was in progress) never
+  // parses: fetch it fresh from the network and replace only that cache entry.
+  // Offline, or on a failure that isn't the file's (out of memory), the caches
+  // stay as they are; wiping them all used to leave an offline PWA with nothing.
+  async function loadWasm(go) {
+    let first;
+    try { return await WebAssembly.instantiateStreaming(fetch('ygg.wasm'), go.importObject); } catch (e) { first = e; }
+    try { // a server/worker that sends the wrong MIME type: same bytes, non-streaming
+      const r = await fetch('ygg.wasm');
+      if (r.ok && !/text\/html/i.test(r.headers.get('content-type') || '')) return await WebAssembly.instantiate(await r.arrayBuffer(), go.importObject);
+    } catch (e) { if (e instanceof RangeError) throw e; }
+    if (navigator.onLine === false) throw new Error('オフラインのためアプリ本体(ygg.wasm)を読み込めません: ' + (first && first.message));
+    // Drop just the bad copy first (an older service worker answers cache-first,
+    // query string ignored), remembering where it was to put the good one back.
+    const had = [];
+    try { for (const k of await caches.keys()) if (await (await caches.open(k)).delete('ygg.wasm', { ignoreSearch: true })) had.push(k); } catch {}
+    let buf;
+    try {
+      const r = await fetch('ygg.wasm?fresh=' + Date.now(), { cache: 'reload' });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      buf = await r.arrayBuffer();
+    } catch (e) { throw new Error('ygg.wasm を取得できません: ' + e.message); }
+    const res = await WebAssembly.instantiate(buf, go.importObject);
+    try {
+      for (const k of had) await (await caches.open(k)).put('ygg.wasm', new Response(buf, { headers: { 'Content-Type': 'application/wasm' } }));
+      for (const k of await caches.keys()) { const c = await caches.open(k); for (const q of await c.keys()) if (/[?&]fresh=/.test(q.url)) await c.delete(q); }
+    } catch {}
+    try { navigator.serviceWorker && navigator.serviceWorker.getRegistration().then(r => r && r.update()); } catch {}
+    return res;
+  }
+  // Save what is pending now (the page is about to reload for an update).
+  window.yggSaveNow = () => saveNow();
   const ready = (async () => {
     await tabLock();
     await loadStore();
@@ -1214,14 +1320,7 @@
     const wasmReady = new Promise(r => addEventListener('yggready', r, { once: true }));
     // A wasm cached half-way (e.g. fetched while a deploy was in progress) never
     // parses; drop the caches and fetch it fresh from the network once.
-    let res;
-    try { res = await WebAssembly.instantiateStreaming(fetch('ygg.wasm'), go.importObject); }
-    catch (e) {
-      try { for (const k of await caches.keys()) await caches.delete(k); } catch {}
-      const buf = await (await fetch('ygg.wasm?fresh=' + Date.now(), { cache: 'reload' })).arrayBuffer();
-      res = await WebAssembly.instantiate(buf, go.importObject);
-      try { navigator.serviceWorker && navigator.serviceWorker.getRegistration().then(r => r && r.update()); } catch {}
-    }
+    const res = await loadWasm(go);
     go.run(res.instance);
     await wasmReady;
     const r = yggStart(outer.key, outer.peers, onPacket);
@@ -1232,7 +1331,7 @@
     addr = r.addr; outer.key = r.key; saveOuter();
     if (fresh) await saving;
     try { navigator.storage && navigator.storage.persist && navigator.storage.persist(); } catch {}
-    if (outboxRestored && !locked) { outboxRestored = false; save().then(() => { try { localStorage.removeItem(OUTBOX); } catch {} }); } // sends caught by the outbox are in IndexedDB now
+    if (outboxRestored && !locked) { outboxRestored = false; save().then(ok => { if (ok) try { localStorage.removeItem(OUTBOX); } catch {} }); } // sends caught by the outbox are in IndexedDB now
     let last = -1;
     setInterval(() => {
       const n = yggPeers();
@@ -1249,6 +1348,12 @@
     setInterval(nostrFetch, 180000);
   })();
 
+  // The node could not start: say why (the UI alone only shows "offline" forever).
+  ready.catch(e => {
+    console.error('yggchat start', e);
+    if (e && e.store) tabCover('保存データを読み込めませんでした', '再読み込み', () => location.reload(), 'データは消していません。ほかのタブを閉じてから再読み込みしてください。直らないときはブラウザの空き容量を確認してください（' + (e.cause && e.cause.name || '') + '）');
+    else tabCover('YggChatを起動できませんでした', '再読み込み', () => location.reload(), String((e && e.message) || e).slice(0, 300));
+  });
   const norm = a => { try { return new URL('http://[' + a.trim() + ']/').hostname.slice(1, -1) } catch { return null } };
   const isYgg = a => !!a && /^0?[23][0-9a-f]{0,2}:/.test(a);
   const cleanDomain = d => { d = String(d || '').trim().toLowerCase().replace(/\.$/, ''); return (d.length <= 253 && /^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9-]{2,63}$/.test(d)) ? d : ''; };
@@ -1286,7 +1391,10 @@
           const k = await kdf(String(body.Pass || ''), unb64(outer.enc.salt));
           const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: unb64(outer.enc.iv) }, k, unb64(outer.enc.ct));
           st = Object.assign(blank(), JSON.parse(new TextDecoder().decode(plain)));
-          aesKey = k; locked = false; migrate();
+          aesKey = k; locked = false;
+          { const o = lsList(OUTBOX_ENC); if (o.length) { const got = []; for (const e of o) { if (!e || e.salt !== outer.enc.salt) continue; try { got.push(JSON.parse(new TextDecoder().decode(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: unb64(e.iv) }, k, unb64(e.ct))))); } catch {} } mergeOutbox(st, got); } }
+          migrate();
+          if (lsList(OUTBOX_ENC).length) { const o = lsList(OUTBOX_ENC); save().then(ok => { if (ok) lsSet(OUTBOX_ENC, lsList(OUTBOX_ENC).filter(e => !o.some(x => x.id === e.id))); }); }
           setTimeout(() => { helloAll(); nostrFetch(); }, 500);
           return ok({});
         } catch { await new Promise(r => setTimeout(r, 700)); return bad('パスコードが違います', 403); }
@@ -1303,11 +1411,17 @@
           const salt = crypto.getRandomValues(new Uint8Array(16));
           aesKey = await kdf(nw, salt); outer.enc = { salt: b64(salt) };
         }
-        save(); await saving; return ok({});
+        if (!(await save())) return bad('パスコードを保存できませんでした（端末の保存領域のエラー）', 500); // the store on disk would not match what the user was told
+        return ok({});
       }
       case 'lock': {
         if (!aesKey) return bad('パスコードが未設定です');
-        save(); await saving;
+        // Every write queued until now goes out first (a save queued while the
+        // last one ran used to land after the lock, with blank state).
+        let wrote = false;
+        for (let s0 = save(); ; s0 = saving) { wrote = await s0; if (s0 === saving && !saveQueued) break; }
+        if (!wrote) return bad('保存できなかったのでロックしませんでした（ロックすると未保存の内容が消えます）', 500);
+        if (outboxEncPending.size) await Promise.allSettled([...outboxEncPending]);
         locked = true; aesKey = null; st = blank();
         emit('locked', { locked: true });
         return ok({});
@@ -1329,7 +1443,7 @@
           const gg = st.groups[gid]; if (body.Img && gg && gg.set && gg.set.nf) return bad('このグループでは写真を送れません（ホストの設定）');
           const v = sendGroup(gid, t, body.Img || ''); if (!v) return bad('このグループには送れません');
           outboxPut(v, st.messages.filter(m => m.hid && m.grp === gid && m.of === v.id));
-          await saveNow(); outboxDrop(v.id); return ok(v); // stored before the UI shows it (v0.19.2)
+          if (await saveNow()) outboxDrop(v.id); return ok(v); // stored before the UI shows it (v0.19.2)
         }
         if (body.Retry) {
           const m = st.messages.find(x => x.peer === norm(body.To || '') && x.id === body.Retry && x.out);
@@ -1348,7 +1462,7 @@
         const m = { id: Date.now().toString(16) + Math.random().toString(16).slice(2, 6), peer: dst, from: addr, nick: st.nick, text: body.Text || '', ts: now(), out: true, status: 'sending' };
         if (body.Img) m.img = body.Img;
         if (ttl) { m.ttl = ttl; m.exp = m.ts + ttl; }
-        addMessage(m); outboxPut(m, []); if (share) sendProf(dst); deliver(m); await saveNow(); outboxDrop(m.id); return ok(m); // stored before the UI shows it (v0.19.2)
+        addMessage(m); outboxPut(m, []); if (share) sendProf(dst); deliver(m); if (await saveNow()) outboxDrop(m.id); return ok(m); // stored before the UI shows it (v0.19.2)
       }
       case 'group/sync': { syncGroup(String(body.ID || '')); return ok({}); }
       case 'group/create': {
