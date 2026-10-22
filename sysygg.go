@@ -82,7 +82,7 @@ func (a *App) watchSys() {
 }
 
 func (a *App) pub() []byte {
-	if a.sys {
+	if a.sys || a.core == nil { // nil core: test apps (a late probeSoon hello crashed the test binary)
 		return nil
 	}
 	return a.core.PublicKey()

@@ -28,8 +28,14 @@ Notes on specific licenses
   *_dial_other.go so the core compiles to WebAssembly. The modified files carry
   a notice; the complete modified source is in the YggChat source repository
   under third_party/yggdrasil-go, under the same license.
-* ironwood and phony are MPL-2.0 and are used unmodified. Their Source Code
-  Form is available from the upstream URLs listed below.
+* ironwood is MPL-2.0. YggChat ships a MODIFIED copy (third_party/ironwood,
+  based on the version listed below): encrypted/session.go changes how
+  sessions are re-keyed after a peer restarts or under high latency (the
+  file carries a notice and a description). The complete Source Code Form of
+  the modified file is in the YggChat source repository under
+  third_party/ironwood, under the MPL-2.0; the rest is unmodified.
+* phony is MPL-2.0 and is used unmodified. Its Source Code Form is available
+  from the upstream URL listed below.
 * The LGPLv3 text below refers to the GNU GPLv3, whose full text is in the
   LICENSE file shipped alongside this notice.
 * Apache-2.0 components (gVisor, google/btree, jsQR) are used unmodified
@@ -44,7 +50,7 @@ Termux and the browser/WebAssembly build)
     Copyright 2009 The Go Authors.
  2. github.com/Arceliar/ironwood v0.0.0-20260613025018-d50055b11f5e
     https://github.com/Arceliar/ironwood
-    License: MPL-2.0
+    License: MPL-2.0 (modified copy, see above)
  3. github.com/Arceliar/phony v0.0.0-20220903101357-530938a4b13d
     https://github.com/Arceliar/phony
     License: MPL-2.0

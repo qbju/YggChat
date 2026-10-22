@@ -3,6 +3,7 @@ module github.com/h6e/yggchat
 go 1.27.2
 
 require (
+	github.com/Arceliar/ironwood v0.0.0-20260613025018-d50055b11f5e
 	github.com/btcsuite/btcd/btcec/v2 v2.5.0
 	github.com/coder/websocket v1.8.15
 	github.com/gologme/log v1.3.0
@@ -14,7 +15,6 @@ require (
 )
 
 require (
-	github.com/Arceliar/ironwood v0.0.0-20260613025018-d50055b11f5e // indirect
 	github.com/Arceliar/phony v0.0.0-20220903101357-530938a4b13d // indirect
 	github.com/bits-and-blooms/bitset v1.24.5 // indirect
 	github.com/bits-and-blooms/bloom/v3 v3.7.1 // indirect
@@ -33,3 +33,6 @@ require (
 )
 
 replace github.com/yggdrasil-network/yggdrasil-go => ./third_party/yggdrasil-go
+
+// Modified copy: session rekeying fixes (third_party/ironwood/encrypted/session.go)
+replace github.com/Arceliar/ironwood => ./third_party/ironwood
