@@ -23,7 +23,7 @@ jobs:
         if: github.event.schedule != '0 1 * * *'
         run: python3 .github/watchers/fdroid_mr.py
       - name: YggChat peers
-        if: github.event.schedule == '0 1 * * *' || github.event_name == 'workflow_dispatch'
+        if: always() && (github.event.schedule == '0 1 * * *' || github.event_name == 'workflow_dispatch')
         run: python3 .github/watchers/ygg_peers.py
       - name: save state
         if: always()
