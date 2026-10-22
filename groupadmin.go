@@ -566,8 +566,9 @@ func (a *App) onDelta(from string, w wire, g Group, known bool) {
 		}
 		return
 	}
-	if !host && w.GV == g.V {
+	if !host && w.GV == g.V && !(byHost && out) {
 		// Same version, different change: keep ours, let the host merge.
+		// (The host removing us is final even then, v0.19.3.)
 		a.store.mu.Unlock()
 		if from == g.Owner {
 			a.answerInfo(g.Owner, g)

@@ -632,3 +632,48 @@ func TestLeaveRepeatedAfterCut(t *testing.T) {
 		t.Fatalf("answer gl sent %d times", n)
 	}
 }
+
+// Chaos 6d rerun: the host (cut off) removed C at V2 while an admin let D in,
+// also V2. C had the admin's V2, so the host's V2 without C was a "collision"
+// and C kept itself in; the host's merged V3 then went only to the members.
+func TestRemovalAtCollidingVersion(t *testing.T) {
+	gid := "abab5555abab5555"
+	c := tApp(t, tMem)
+	tJoinedG := Group{ID: gid, Name: "G", Members: cleanMembers([]string{tHost, tAdm, tNew}, tMem), Owner: tHost, Admins: []string{tAdm}, V: 2}
+	c.store.Groups[gid] = tJoinedG
+	// without gr it may just predate the admin's addition: kept (TestVersionCollisionKeepsMembers)
+	c.onGroupCtl(tHost, wire{T: "gi", G: gid, GN: "G", GM: []string{tHost, tAdm}, GO: tHost, GAD: []string{tAdm}, GV: 2})
+	if g := c.store.Groups[gid]; g.Left {
+		t.Fatalf("no gr: %+v", g)
+	}
+	// the host's notice to a removed member says so
+	h, pc := tAppPC(t, tHost)
+	h.store.Groups[gid] = Group{ID: gid, Name: "G", Members: []string{tHost, tAdm}, Owner: tHost, Admins: []string{tAdm}, V: 2, Gone: []string{tMem}, GoneAt: map[string]int64{tMem: time.Now().Unix() - 5}}
+	h.onGroupMsg(tMem, wire{T: "msg", ID: "ffg1", G: gid, Text: "x", TS: time.Now().Unix()}, "")
+	ws := waitSent(pc, tMem, "gi")
+	if len(ws) == 0 {
+		t.Fatal("no notice")
+	}
+	c.onGroupCtl(tHost, ws[0])
+	if g := c.store.Groups[gid]; !g.Left {
+		t.Fatalf("removed member kept itself in: %+v", g)
+	}
+	// an admin's same-version list without us is still a collision (the host decides)
+	d := tApp(t, tMem)
+	d.store.Groups[gid] = tJoinedG
+	d.onGroupCtl(tAdm, wire{T: "gi", G: gid, GN: "G", GM: []string{tHost, tAdm}, GO: tHost, GAD: []string{tAdm}, GV: 2})
+	if g := d.store.Groups[gid]; g.Left || !hasMember(g, tMem) {
+		t.Fatalf("admin's colliding list: %+v", g)
+	}
+}
+
+// Same in a big group: the host's removal delta at the version we hold from an admin.
+func TestRemovalDeltaAtCollidingVersion(t *testing.T) {
+	gid := "abab6666abab6666"
+	c := tApp(t, tMem)
+	c.store.Groups[gid] = Group{ID: gid, Name: "G", Members: cleanMembers([]string{tHost, tAdm, tNew}, tMem), Owner: tHost, Admins: []string{tAdm}, V: 2}
+	c.onGroupCtl(tHost, wire{T: "gd", G: gid, GV: 2, GR: packAddrs([]string{tMem}), K: "kick"})
+	if g := c.store.Groups[gid]; !g.Left {
+		t.Fatalf("host's removal delta ignored: %+v", g)
+	}
+}

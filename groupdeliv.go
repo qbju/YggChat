@@ -110,7 +110,16 @@ func (a *App) goneNotice(peer string, g Group) {
 	}
 	goneNoticeAt[k] = time.Now()
 	goneNoticeMu.Unlock()
-	for _, p := range a.infoPackets(g) {
+	for i, p := range a.infoPackets(g) {
+		if i == 0 {
+			// say it is them who are out ("gr"): a list at the version they
+			// hold from an admin is then not taken as a collision (v0.19.3)
+			x := p
+			x.GR = packAddrs([]string{peer})
+			if wireLen(x) <= dgramMax {
+				p = x
+			}
+		}
 		a.sendWire(peer, p)
 	}
 }

@@ -799,7 +799,10 @@ func (a *App) onGroupCtl(from string, w wire) {
 		adopted := !known // the list came from the host/an admin and replaces ours
 		if known && g.Owner != "" {
 			switch {
-			case w.GV != 0 && w.GV == g.V && g.Owner != a.addr && !sameMembers(ms, g.Members):
+			case w.GV != 0 && w.GV == g.V && g.Owner != a.addr && !sameMembers(ms, g.Members) && !(byHost && !in && hasMember(Group{Members: unpackAddrs(w.GR)}, a.addr)):
+				// (Unless the host's list says it removed us ("gr"): its merge
+				// keeps that, so it is taken even at the same version, v0.19.3.
+				// Without gr a list lacking us may just predate an admin adding us.)
 				// Same version, different list: two changes were made from the
 				// same base (the host missed an admin's, or an admin worked from
 				// an old list). Keep ours; the host merges them into a new
