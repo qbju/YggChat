@@ -226,6 +226,23 @@ func pub(this js.Value, args []js.Value) any {
 func sign(this js.Value, args []js.Value) any {
 	return hex.EncodeToString(ed25519.Sign(priv, []byte(args[0].String())))
 }
+// yggVerify(addr, pkHex, msg, sigB64) -> bool: sigB64 (base64, no padding)
+// is pk's Ed25519 signature of msg and pk belongs to addr (signed group
+// posts, groupssig.go; v0.19.3).
+func verify(this js.Value, args []js.Value) any {
+	if len(args) < 4 {
+		return false
+	}
+	pk, err := hex.DecodeString(args[1].String())
+	if err != nil || len(pk) != ed25519.PublicKeySize || !mbox.AddrOK(args[0].String(), pk) {
+		return false
+	}
+	sig, err := base64.RawStdEncoding.DecodeString(args[3].String())
+	if err != nil || len(sig) != ed25519.SignatureSize {
+		return false
+	}
+	return ed25519.Verify(ed25519.PublicKey(pk), []byte(args[2].String()), sig)
+}
 func sealBox(this js.Value, args []js.Value) any {
 	pk, err := hex.DecodeString(args[0].String())
 	if err != nil || len(pk) != ed25519.PublicKeySize {
@@ -303,6 +320,7 @@ func nostrDefaults(this js.Value, args []js.Value) any {
 func main() {
 	js.Global().Set("yggPub", js.FuncOf(pub))
 	js.Global().Set("yggSign", js.FuncOf(sign))
+	js.Global().Set("yggVerify", js.FuncOf(verify))
 	js.Global().Set("yggSeal", js.FuncOf(sealBox))
 	js.Global().Set("yggOpen", js.FuncOf(openBox))
 	js.Global().Set("yggAddrOK", js.FuncOf(addrOK))

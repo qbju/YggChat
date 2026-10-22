@@ -43,7 +43,7 @@
   const idbPut = (k, v) => idbDo(db => new Promise((res, rej) => { const t = db.transaction('kv', 'readwrite'); t.objectStore('kv').put(v, k); t.oncomplete = res; t.onerror = () => rej(t.error); t.onabort = () => rej(t.error || new DOMException('transaction aborted', 'AbortError')); }));
   let raw = {};
   const outer = { key: '', peers: null, enc: null };
-  const blank = () => ({ nick: 'anon', bio: '', avatar: '', contacts: {}, messages: [], blocked: {}, nostrOn: true, nostrRelays: [], ctl: [], groups: {}, powStrict: false, joins: {} });
+  const blank = () => ({ nick: 'anon', bio: '', avatar: '', contacts: {}, messages: [], blocked: {}, nostrOn: true, nostrRelays: [], ctl: [], groups: {}, powStrict: false, joins: {}, gone: {}, early: {} });
   let st = blank();
   let locked = false;
   let aesKey = null; // CryptoKey while unlocked with a passcode
@@ -93,7 +93,7 @@
     if (!outer.peers) outer.peers = RECOMMENDED.slice();
     locked = !!outer.enc;
     if (!locked) restoreOutbox(raw);
-    if (!locked) { Object.assign(st, { nick: raw.nick || 'anon', bio: raw.bio || '', avatar: raw.avatar || '', contacts: raw.contacts || {}, messages: raw.messages || [], blocked: raw.blocked || {}, domain: raw.domain || undefined, nostrOn: raw.key ? !!raw.nostrOn : true, nostrLegacy: !!raw.nostrLegacy, nostrRelays: raw.nostrRelays || [], ctl: raw.ctl || [], groups: raw.groups || {}, powStrict: !!raw.powStrict, joins: raw.joins || {} }); migrate(); }
+    if (!locked) { Object.assign(st, { nick: raw.nick || 'anon', bio: raw.bio || '', avatar: raw.avatar || '', contacts: raw.contacts || {}, messages: raw.messages || [], blocked: raw.blocked || {}, domain: raw.domain || undefined, nostrOn: raw.key ? !!raw.nostrOn : true, nostrLegacy: !!raw.nostrLegacy, nostrRelays: raw.nostrRelays || [], ctl: raw.ctl || [], groups: raw.groups || {}, powStrict: !!raw.powStrict, joins: raw.joins || {}, gone: raw.gone || {}, early: raw.early || {} }); migrate(); }
   }
 
   // Outbox (v0.19.2): a message we just sent is also written to localStorage at
@@ -201,7 +201,7 @@
 
   function addMessage(m) {
     if (isG(m.peer) && !m.out && !m.sys && m.from && st.messages.some(x => x.peer === m.peer && x.from === m.from && !x.out && samePost(x.id, m.id))) return; // one post, one message (v0.19.2)
-    st.messages.push(m);
+    if (!m.out && !m.sys && !isG(m.peer)) insertByTime(m); else st.messages.push(m);
     // Cap the visible history; pending group copies are never dropped (v0.19.1).
     if (st.messages.length > 5000) { let over = st.messages.length - 5000; st.messages = st.messages.filter(x => { if (over > 0 && !x.hid && !(x.out && x.status !== 'sent')) { over--; return false; } return true; }); }
     let c = st.contacts[m.peer];
@@ -210,6 +210,62 @@
     else if (!m.out && m.nick && !c.renamed && c.nick !== m.nick) { c.nick = m.nick; emit('contact', c); }
     save();
     emit('message', m);
+  }
+
+  // Incoming 1:1 messages are stored in time order: queued and Nostr-parked ones
+  // arrive late and out of order (v0.19.3, as the native node).
+  function insertByTime(m) {
+    let i = st.messages.length;
+    for (let k = 0; i > 0 && k < 2000 && (st.messages[i - 1].ts || 0) > m.ts; k++) i--;
+    st.messages.splice(i, 0, m);
+  }
+
+  // ---- 1:1 tombstones and early edits (v0.19.3, same rules as msgedit.go) ----
+  // st.gone["peer/id"] = until: unsent by a contact, or deleted / expired here; a late
+  // Nostr box or a retry is acked and dropped. st.early["peer/id"] = {text, at}: an edit
+  // that overtook its message, applied when it lands.
+  const TOMBKEEP = 10 * 86400, GONEMAX = 20000, EARLYMAX = 500, EARLYPEER = 50;
+  function markGone(peer, id) {
+    const t = now(); st.gone = st.gone || {};
+    if (Object.keys(st.gone).length >= GONEMAX) {
+      for (const k in st.gone) if (st.gone[k] <= t) delete st.gone[k];
+      const ks = Object.keys(st.gone);
+      if (ks.length >= GONEMAX * 0.9) { ks.sort((a, b) => st.gone[a] - st.gone[b]); for (const k of ks.slice(0, ks.length - Math.floor(GONEMAX * 0.9) + 1)) delete st.gone[k]; }
+    }
+    st.gone[peer + '/' + id] = t + TOMBKEEP;
+    if (st.early) delete st.early[peer + '/' + id];
+  }
+  // An incoming 1:1 message removed here while a copy of it could still arrive.
+  function goneIfRecent(m) { if (!m || m.out || m.sys || m.hid || isG(m.peer) || (m.ts || 0) < now() - TOMBKEEP) return; markGone(m.peer, m.id); }
+  const isGoneMsg = (peer, id) => { const t = st.gone && st.gone[peer + '/' + id]; return !!t && t > now(); };
+  function addEarly(peer, id, text) {
+    const t = now(), k = peer + '/' + id; st.early = st.early || {};
+    let n = 0;
+    for (const x in st.early) { if (t - (st.early[x].at || 0) > TOMBKEEP) delete st.early[x]; else if (x.startsWith(peer + '/')) n++; }
+    if (!(k in st.early) && (n >= EARLYPEER || Object.keys(st.early).length >= EARLYMAX)) return;
+    st.early[k] = { text, at: t };
+  }
+  function takeEarly(peer, id) { const k = peer + '/' + id, e = st.early && st.early[k]; if (!e) return null; delete st.early[k]; return String(e.text || ''); }
+  const stillOut = (peer, id) => st.messages.some(x => x.peer === peer && x.id === id);
+  // An ack nobody waits for (the peer read our Nostr box and acked directly, or an
+  // earlier try got through after we gave up): the message is delivered; a pending
+  // edit/unsend is done (v0.19.3).
+  function lateAck(from, id) {
+    let found = false;
+    for (let i = st.messages.length - 1; i >= 0; i--) { const m = st.messages[i]; if (m.id === id && m.peer === from && m.out) { found = m.status === 'queued' || m.status === 'stored'; break; } }
+    const n = (st.ctl || []).length; st.ctl = (st.ctl || []).filter(c => !(c.peer === from && c.w.id === id));
+    if (st.ctl.length !== n) save();
+    if (found) setStatus(from, id, 'sent');
+  }
+  // Message requests (stranger / not yet accepted) are limited: 20/min per address,
+  // 120/min in all. Over the limit no ack, so the sender retries later (v0.19.3).
+  const reqT = { all: [], peer: new Map() };
+  function strangerOK(from) {
+    const t = Date.now(), cut = t - 60000, trim = a => { let i = 0; while (i < a.length && a[i] <= cut) i++; return i ? a.slice(i) : a; };
+    reqT.all = trim(reqT.all); const p = trim(reqT.peer.get(from) || []);
+    if (p.length >= 20 || reqT.all.length >= 120) { reqT.peer.set(from, p); return false; }
+    if (reqT.peer.size > 4096) for (const [k, v] of reqT.peer) if (!trim(v).length) reqT.peer.delete(k);
+    p.push(t); reqT.peer.set(from, p); reqT.all.push(t); return true;
   }
 
   function setStatus(peer, id, status) {
@@ -271,13 +327,21 @@
     const okID = x => /^[0-9A-Za-z_-]{1,40}$/.test(String(x || ''));
     if (!okID(w.id) || !okID(w.ref)) return false;
     const i = st.messages.findIndex(m => m.peer === src && m.id === w.ref && !m.out && m.from === src);
+    const t = String(w.text || ''), okText = !!t.trim() && u8len(t) <= MAXRECV;
+    let upd = null, del = false;
     if (i >= 0) {
-      if (w.t === 'edit') {
-        const t = String(w.text || '');
-        if (t.trim() && u8len(t) <= MAXRECV) { st.messages[i].text = t; st.messages[i].edited = true; save(); emit('msg_upd', st.messages[i]); }
-      } else { st.messages.splice(i, 1); save(); emit('msg_del', { peer: src, id: w.ref }); }
+      if (w.t === 'edit') { if (okText) { st.messages[i].text = t; st.messages[i].edited = true; upd = st.messages[i]; } }
+      else { st.messages.splice(i, 1); del = true; }
     }
-    return true;
+    // The message itself may still be on its way (retry, offline queue, Nostr box):
+    // remember the unsend / edit so it applies when it lands. Contacts only, so a
+    // stranger can't fill the store (v0.19.3).
+    const known = !!st.contacts[src];
+    if (known && w.t === 'del') markGone(src, w.ref);
+    else if (known && w.t === 'edit' && i < 0 && okText && !isGoneMsg(src, w.ref)) addEarly(src, w.ref, t);
+    if (i >= 0) save(); else if (known) saveSoon();
+    if (upd) emit('msg_upd', upd); else if (del) emit('msg_del', { peer: src, id: w.ref });
+    return true; // ack even if unknown, so the sender stops retrying
   }
   const hello = p => send(p, { t: 'hi', pk: myPK() });
   function helloAll() { if (!locked) for (const p of Object.keys(st.contacts)) hello(p); }
@@ -286,8 +350,9 @@
   function acceptMsg(src, w, img) {
     if ((w.text != null && typeof w.text !== 'string') || (!w.text && !img) || u8len(w.text) > MAXRECV || !/^[0-9A-Za-z_-]{1,40}$/.test(String(w.id))) return false;
     if (locked || st.blocked[src]) return false;
-    if (st.messages.some(m => m.peer === src && m.id === w.id)) return true;
+    if (isGoneMsg(src, String(w.id)) || st.messages.some(m => m.peer === src && m.id === w.id)) return true; // unsent by them, or deleted/expired here (v0.19.3)
     if (!powCheck(src, w)) return false;
+    { const c1 = st.contacts[src]; if ((!c1 || c1.req) && !strangerOK(src)) return false; } // request flood: no ack, they retry later
     let ttl = w.ttl | 0; if (ttl < 0 || ttl > MAXTTL) ttl = 0;
     // Only a message newer than the last change moves the timer (late Nostr copies come in any order), v0.19.2.
     const c0 = st.contacts[src], at = Math.min(Math.trunc(+w.ts || 0), now() + 300);
@@ -295,6 +360,7 @@
     const m = { id: w.id, peer: src, from: src, nick: cleanNick(w.nick), text: w.text || '', ts: inTs(w.ts), out: false };
     if (img) m.img = img;
     if (ttl) { m.ttl = ttl; m.exp = now() + ttl; }
+    { const e = takeEarly(src, m.id); if (e != null && e.trim()) { m.text = e; m.edited = true; } } // its edit overtook it
     addMessage(m);
     return true;
   }
@@ -337,13 +403,15 @@
     return out.reverse();
   }
   function sendHistory(to, gid, hist) {
-    const t = now();
+    const t = now(), g = st.groups[gid];
     const ws = [];
     for (const m of hist) {
       let text = m.img ? (m.text ? '📷 ' + m.text : '📷 写真') : m.text;
       if (u8len(text) > 700) { while (u8len(text) > 700) text = text.slice(0, -1); text += '…（省略）'; }
       const w = { t: 'ghs', g: gid, id: postIDf(m.id), by: m.from, nick: m.nick, text, ts: m.ts }; // the post id, not our copy's (v0.19.2)
+      { const s = text === m.text ? sigFor(g, m) : null; if (s) { w.sg = s[0]; w.pk = s[1]; } } // the sender's proof, valid only for the whole text (v0.19.3)
       if (m.exp) { const r = m.exp - t - 20; if (r <= 0) continue; w.ttl = r; } // it takes a few seconds to send
+      if (w.sg && goLen(w) > DGRAM) { delete w.sg; delete w.pk; } // it will be shortened: the signature no longer fits the text
       while (goLen(w) > DGRAM && w.text.length > 12) w.text = w.text.slice(0, -12 - 6) + '…（省略）';
       if (goLen(w) <= DGRAM) ws.push(w);
     }
@@ -354,20 +422,37 @@
     g.members = cleanMembers(g.members.concat([src]), addr); g.pend = (g.pend || []).filter(p => p.addr !== src); if (!g.pend.length) delete g.pend;
     if (g.owner === addr) trackGone(g, before);
     noteGone(g, before, 0);
-    g.v = (g.v | 0) + 1;
-    save(); emit('contact', gView(g)); gSys(g, (nick || nameOf(src)) + ' が' + how); gMembers(g, [src], []);
+    unban(g, src); // let in again (approved, or a direct add)
+    bumpV(g);
+    save(); emit('contact', gView(g)); gSys(g, (nick || nameOf(src)) + ' が' + how); gMembers(g, [src], [], false);
     if (g.set && g.set.hi) { const h = historyOf(g.id); if (h.length) sendHistory(src, g.id, h); }
   }
-  function onHistory(src, w) {
+  async function onHistory(src, w) {
     const g = st.groups[w.g], by = norm(String(w.by || ''));
     // Any member may relay what it has (v0.19.1); copies not from the sender, host or an admin show who relayed them.
-    if (!g || g.left || !g.members.includes(src) || !by || !isYgg(by) || by === addr || !w.text || String(w.text).length > 2000 || !/^[0-9A-Za-z_-]{1,40}$/.test(String(w.id)) || (w.ttl | 0) < 0) return;
-    { const at = goneAt(g, by); if (!hasM(g, by) && at && (at < 0 || !(+w.ts > 0) || +w.ts > at)) return; } // posted after they left or were removed (v0.19.2)
-    const key = 'g:' + g.id; if (st.messages.some(m => m.peer === key && m.from === by && samePost(m.id, w.id))) return;
-    let ts = +w.ts || 0; if (ts <= 0 || ts > now() + 300) ts = now();
-    const m = { id: postIDf(w.id), peer: key, from: by, nick: cleanNick(w.nick), text: String(w.text), ts, out: false, hist: true };
-    if (by !== src && !canMng(g, src)) m.via = src;
-    if (w.ttl | 0) m.exp = now() + (w.ttl | 0);
+    if (!g || g.left || !g.members.includes(src) || !by || !isYgg(by) || by === addr || !w.text || typeof w.text !== 'string' || w.text.length > 2000 || !/^[0-9A-Za-z_-]{1,40}$/.test(String(w.id)) || (w.ttl | 0) < 0) return;
+    // An ordinary member relays only when we asked it (ghq); the host and admins also send history to new members unasked (v0.19.3).
+    if (!canMng(g, src) && !histAsked(g.id, src)) return;
+    if (!hasM(g, by)) {
+      const at = goneAt(g, by);
+      if (at && (at < 0 || !(+w.ts > 0) || +w.ts > at)) return; // posted after they left or were removed (v0.19.2)
+      if (!at && !canMng(g, src)) return; // never a member as far as we know: only the host/an admin may relay that (v0.19.3)
+    }
+    const key = 'g:' + g.id, dup = () => st.messages.some(m => m.peer === key && m.from === by && samePost(m.id, w.id));
+    if (dup()) return;
+    const knownSigner = !!(g.keys && g.keys[by]);
+    // The sender's signature: a bad one is a forgery; a good one is its own words, whoever relays it (v0.19.3).
+    let signed = false;
+    if (w.sg) { const v = await verifyPost(by, w.pk, w.sg, g.id, postIDf(w.id), w.ts, w.text); if (v === false) return; signed = v === true; }
+    if (dup() || st.groups[w.g] !== g || g.left) return; // changed while checking
+    let ts = Math.trunc(+w.ts || 0); if (ts <= 0 || ts > now() + 300) ts = now();
+    const m = { id: postIDf(w.id), peer: key, from: by, nick: cleanNick(w.nick), text: w.text, ts, out: false, hist: true };
+    if (signed) { m.sg = String(w.sg); if (!knownSigner && hasM(g, by)) noteSigner(g.id, by, String(w.pk).toLowerCase()); }
+    // Unsigned relays show who relayed them; the host's and admins' too when the sender is known to sign.
+    if (by !== src && !signed && (!canMng(g, src) || knownSigner)) m.via = src;
+    // The group's timer applies to relayed posts too, counted from when they were posted (v0.19.3).
+    const [exp, live] = histExp(g, ts, w.ttl | 0); if (!live) return;
+    if (exp) { m.exp = exp; m.ttl = exp - ts > 0 ? exp - ts : exp - now(); }
     addMessage(m);
   }
   // Catch-up (v0.19.1): whoever of the group is online stands in as its mailbox.
@@ -375,9 +460,12 @@
   function onHistReq(src, w) {
     const g = st.groups[w.g];
     if (g && !g.left && !g.members.includes(src)) goneNotice(src, g); // a removed member catching up: tell it it is out
+    else if (g && g.left) leftNotice(src, g); // our heir catching up gets the hand-over (v0.19.3)
     if (!g || g.left || !g.members.includes(src) || !g.members.includes(addr) || src === addr) return;
-    const k = src + '/' + g.id, t = now(); if (t - (histSeen[k] || 0) < 20) return; histSeen[k] = t;
-    const h = historyOf(g.id).filter(m => m.from !== src && ((g.set && g.set.hi) || (m.ts || 0) >= (+w.ts || 0)));
+    const k = src + '/' + g.id, t = now(); if (t - (histSeen[k] || 0) < 20) return; capMap(histSeen); histSeen[k] = t;
+    // Without history sharing: only what was said since they were added, whatever "since" they ask for (v0.19.3).
+    const hi = !!(g.set && g.set.hi); let since = +w.ts || 0; { const aa = g.gaa && g.gaa[src]; if (!hi && aa > since) since = aa; }
+    const h = historyOf(g.id).filter(m => m.from !== src && (hi || (m.ts || 0) >= since) && !(m.from !== addr && !hasM(g, m.from) && goneAt(g, m.from) > 0 && (m.ts || 0) > goneAt(g, m.from))); // never relay what a removed member posted after its removal
     if (h.length) sendHistory(src, g.id, h);
   }
   function syncGroup(gid) {
@@ -387,9 +475,15 @@
     const add = x => { if (x && x !== addr && g.members.includes(x) && !ask.includes(x) && ask.length < 8) ask.push(x); };
     add(g.owner); for (const x of g.admins || []) add(x);
     for (const x of g.members.slice().sort(() => Math.random() - 0.5)) add(x);
-    for (const x of ask) send(x, { t: 'ghq', g: gid, ts: since });
+    // Their answer (ghs) is taken for a while. Asked twice a few seconds apart: members that aren't contacts get no
+    // hello first, so the first packet to one often goes nowhere while its route is looked up (answers are rate-limited).
+    for (const x of ask) { noteHistAsk(gid, x); send(x, { t: 'ghq', g: gid, ts: since }); setTimeout(() => { if (st.groups[gid] && !st.groups[gid].left) { noteHistAsk(gid, x); send(x, { t: 'ghq', g: gid, ts: since }); } }, 4000); }
   }
-  function syncAllGroups() { let d = 0; for (const id of Object.keys(st.groups)) { setTimeout(() => syncGroup(id), d); d += 200; } }
+  function syncAllGroups() {
+    let d = 0; for (const id of Object.keys(st.groups)) { setTimeout(() => syncGroup(id), d); d += 200; }
+    // Groups we left lately: our gl again (it may all have been lost while we were cut off), v0.19.3.
+    if (!locked) for (const g of Object.values(st.groups)) if (g.left && g.quit && g.qat > 0 && now() - g.qat < LEAVEREPEAT) repeatLeave(g);
+  }
   const okGID = id => /^[0-9a-f]{16}$/.test(String(id || ''));
   function cleanMembers(list, must) {
     const out = [];
@@ -406,7 +500,7 @@
     const p = (g.pend || []).find(x => x.addr === a && x.nick); return p ? p.nick : nameOf(a);
   }
   function gSys(g, text) { addMessage({ id: 's' + Date.now().toString(16) + Math.random().toString(16).slice(2, 5), peer: 'g:' + g.id, from: addr, ts: now(), sys: text, out: true }); }
-  const giWire = g => { const w = { t: 'gi', g: g.id, gn: g.name, gm: g.members, go: g.owner || undefined, gv: g.v || undefined, gsv: g.sv || undefined, gad: (g.admins && g.admins.length) ? g.admins : undefined }; if (g.owner) w.gs = cleanSet(g.set); return w; };
+  const giWire = g => { const w = { t: 'gi', g: g.id, gn: g.name, gm: g.members, go: g.owner || undefined, gv: g.v || undefined, gsv: g.sv || undefined, gad: (g.admins && g.admins.length) ? g.admins : undefined, ts: g.vat || undefined }; if (g.owner) w.gs = cleanSet(g.set); return w; };
   // ---- v0.19: large groups, co-admins, member-list versions (see groupadmin.go) ----
   const GCAP = 1024, GDEF = 24, MAXADM = 10, GIMAX = 1180, PARTN = 40, NOSTRG = 64, DGRAM = 1200;
   const GMAXES = [24, 32, 50, 64, 100, 128, 256, 512, 1024];
@@ -433,15 +527,139 @@
     for (const m in ga) if (g.members.includes(m) || t - ga[m] > GONEKEEP) delete ga[m];
     let ks = Object.keys(ga); if (ks.length > MAXGONE) { ks.sort((a, b) => ga[b] - ga[a]); for (const m of ks.slice(MAXGONE)) delete ga[m]; ks = ks.slice(0, MAXGONE); }
     if (ks.length) g.gat = ga; else delete g.gat;
+    noteAdded(g, before, 0); // and when the new ones came (history without sharing, v0.19.3)
+    if (g.ban) { g.ban = g.ban.filter(m => !g.members.includes(m)); if (!g.ban.length) delete g.ban; } // added back by any manager: no longer barred
   }
   const goneAt = (g, a) => (g.gat && a in g.gat) ? g.gat[a] : (g.owner && (g.gone || []).includes(a)) ? -1 : 0;
+  // ---- v0.19.3 group hardening (same rules as groupsguard.go / groupssig.go) ----
+  const LATEGRACE = 7 * 86400, LATEMAX = 30, MAXVJUMP = 64, MAXINVITES = 50, MAXINVITESPER = 3, HISTASK = 120, MAXBAN = 256, PENDKEEP = 3 * 86400, LEAVEREPEAT = 3 * 86400;
+  const bumpV = g => { g.v = (g.v | 0) + 1; g.vat = now(); }; // a new member-list version (host/admin side), with when
+  // The time of a member-list change as the manager who made it says ("ts" on gi/gd), when plausible; else 0 (= now).
+  const changeTime = ts => { const t = now(); ts = Math.trunc(+ts || 0); return ts <= 0 || ts > t + 300 || t - ts > GONEKEEP ? 0 : Math.min(ts, t); };
+  // A former member's post made before it dropped out is taken only for a while after that, and only so many (per run).
+  const lateN = {};
+  const lateOK = (g, from, ts) => { const at = goneAt(g, from); ts = +ts || 0; return at > 0 && ts > 0 && ts <= at && now() - at <= LATEGRACE; };
+  function lateTake(gid, from) { const k = gid + '|' + from; if ((lateN[k] | 0) >= LATEMAX) return false; if (Object.keys(lateN).length > 4096) for (const x in lateN) delete lateN[x]; lateN[k] = (lateN[k] | 0) + 1; return true; }
+  // When members not in before joined (local; history without sharing starts there for them).
+  function noteAdded(g, before, at) {
+    const t = now(); if (!(at > 0) || at > t) at = t;
+    const aa = Object.assign({}, g.gaa || {});
+    if (before.length) for (const m of g.members) if (!before.includes(m)) aa[m] = at;
+    for (const m in aa) if (!g.members.includes(m)) delete aa[m];
+    if (Object.keys(aa).length) g.gaa = aa; else delete g.gaa;
+  }
+  // Lower the drop-out times of members of before that left to the per-member times the manager gave ("gt").
+  function noteGoneEach(g, before, gt) {
+    if (!gt || typeof gt !== 'object') return;
+    for (const m of Object.keys(gt).slice(0, 64)) {
+      const t = changeTime(gt[m]); if (t <= 0 || g.members.includes(m) || !before.includes(m)) continue;
+      g.gat = g.gat || {}; if (!(m in g.gat) || t < g.gat[m]) g.gat[m] = t;
+    }
+  }
+  // What the host/an admin puts in its info as "gt": when the most recent (≤8) drop-outs happened.
+  function goneTimes(g) {
+    if (!g.gat || !g.owner) return null; const t = now();
+    const es = Object.entries(g.gat).filter(([m, x]) => !g.members.includes(m) && x > 0 && t - x <= GONEKEEP).sort((a, b) => b[1] - a[1]).slice(0, 8);
+    return es.length ? Object.fromEntries(es) : null;
+  }
+  // Drop the posts members of before (no longer in g) made after they dropped out: they reached us while we
+  // hadn't heard of the removal. Returns the msg_del events to send after saving.
+  function purgeGone(g, before) {
+    const gone = {}; let any = false;
+    for (const m of before) { const t = g.gat && g.gat[m]; if (!g.members.includes(m) && m !== addr && t > 0) { gone[m] = t; any = true; } }
+    if (!any) return [];
+    const key = 'g:' + g.id, del = [];
+    st.messages = st.messages.filter(m => { if (m.peer === key && !m.out && !m.sys && m.from in gone && (m.ts || 0) > gone[m.from]) { del.push({ peer: key, id: m.id }); return false; } return true; });
+    return del;
+  }
+  const emitDels = ds => { for (const d of ds) emit('msg_del', d); };
+  // Relayed history ("ghs") from an ordinary member is taken only when we asked it a moment ago.
+  const histAskAt = {};
+  function noteHistAsk(gid, p) { if (Object.keys(histAskAt).length > 4096) for (const x in histAskAt) delete histAskAt[x]; histAskAt[gid + '|' + p] = now(); }
+  const histAsked = (gid, p) => now() - (histAskAt[gid + '|' + p] || 0) <= HISTASK;
+  // A relayed post's expiry: its own timer, and the group's counted from when it was posted. [exp, live]
+  function histExp(g, ts, ttl) {
+    const t = now(); let exp = ttl > 0 ? t + ttl : 0; const gt = (g.set && g.set.ttl) | 0;
+    if (gt > 0) { const e = ts > 0 ? ts + gt : t + gt; if (!exp || e < exp) exp = e; }
+    return [exp, !exp || exp > t];
+  }
+  // Unanswered invitations from people we haven't accepted: 50 in all, 3 from one of them.
+  function inviteRoom(from) { let all = 0, by = 0; for (const x of Object.values(st.groups)) if (x.req && !x.left && !x.tomb) { all++; if (x.by === from) by++; } return all < MAXINVITES && by < MAXINVITESPER; }
+  // Bans (host/admin, local): removed by a manager; their link joins are refused. A direct add or approval lets them in again.
+  const banned = (g, a) => (g.ban || []).includes(a);
+  function addBan(g, as) { const b = (g.ban || []).slice(); for (const m of as) if (!b.includes(m)) b.push(m); g.ban = b.slice(-MAXBAN); if (!g.ban.length) delete g.ban; }
+  function unban(g, a) { if (g.ban) { g.ban = g.ban.filter(m => m !== a); if (!g.ban.length) delete g.ban; } }
+  // A leaving host hands the group to the co-admin we heard from last (most likely online), else the first.
+  function pickHeir(g) {
+    const ad = g.admins || []; if (!ad.length) return '';
+    for (let i = st.messages.length - 1; i >= 0; i--) { const m = st.messages[i]; if (m.peer === 'g:' + g.id && !m.out && ad.includes(m.from)) return m.from; }
+    return ad.slice().sort()[0];
+  }
+  // Our hand-over (the info naming the heir as host, from us) and then our leave, again to an heir that missed them; once a minute.
+  const handAt = {};
+  function handNotice(heir, g) {
+    if (!g.hand || !g.quit || g.owner !== heir) return;
+    const k = g.id + '|' + heir; if (Date.now() - (handAt[k] || 0) < 60000) return;
+    if (Object.keys(handAt).length > 1024) for (const x in handAt) delete handAt[x];
+    handAt[k] = Date.now();
+    const full = Object.assign({}, g, { members: cleanMembers(g.members, addr) }); // the hand-over lists us; the gl then takes us out
+    for (const p of infoPackets(full)) send(heir, p);
+    setTimeout(() => send(heir, { t: 'gl', g: g.id, ts: now() }), 3000);
+  }
+  // A packet about a group we left: the heir gets our hand-over again, anyone else our leave.
+  function leftNotice(peer, g) { if (!g || !g.quit) return; if (g.hand && peer === g.owner) { handNotice(peer, g); return; } leaveNoticeAt(peer, g.id, g.qat); }
+  // Our gl again for a group we left lately (it may all have been lost while we were cut off). Posts from before
+  // the leave that never got out get another push first; members on v0.19.2+ still take them by their time.
+  async function repeatLeave(g) {
+    const cs = st.messages.filter(m => m.hid && m.out && m.grp === g.id && m.status !== 'sent' && m.ts > 0 && m.ts <= g.qat);
+    if (cs.length) { for (const m of cs) if (m.status === 'failed') m.status = 'queued'; saveSoon(); await flushBeforeLeave(g.id, 8000); failLeftCopies(g.id); }
+    for (const m of g.members) { if (m === addr) continue; if (g.hand && m === g.owner) { handNotice(m, g); continue; } send(m, { t: 'gl', g: g.id, ts: g.qat }); }
+  }
+  // ---- signed group text posts (groupssig.go): sg = Ed25519(key, "ygg-gpost1\n"+gid+"\n"+postID+"\n"+ts+"\n"+hex(sha256(text))), base64 without padding ----
+  const postSigMsg = (gid, pid, ts, text) => 'ygg-gpost1\n' + gid + '\n' + pid + '\n' + Math.trunc(Number(ts) || 0) + '\n' + hexOf(sha256s(new TextEncoder().encode(String(text))));
+  function signPost(gid, pid, ts, text) { if (!text) return ''; try { const h = yggSign(postSigMsg(gid, pid, ts, text)); return h ? b64(hexBytes(h)).replace(/=+$/, '') : ''; } catch { return ''; } }
+  // true / false (a forgery) / null (this browser can't check: treated as unsigned)
+  async function verifyPost(by, pk, sg, gid, pid, ts, text) {
+    pk = String(pk || '').toLowerCase(); sg = String(sg || '');
+    if (!/^[0-9a-f]{64}$/.test(pk) || !/^[A-Za-z0-9+/]{86}$/.test(sg)) return false;
+    const msg = postSigMsg(gid, pid, ts, text);
+    if (typeof yggVerify === 'function') { try { return !!yggVerify(by, pk, msg, sg); } catch { return null; } }
+    try { // an older ygg.wasm: WebCrypto Ed25519 where the browser has it
+      if (!yggAddrOK(by, pk)) return false;
+      const k = await crypto.subtle.importKey('raw', hexBytes(pk), { name: 'Ed25519' }, false, ['verify']);
+      return await crypto.subtle.verify({ name: 'Ed25519' }, k, unb64(sg + '=='), new TextEncoder().encode(msg));
+    } catch { return null; }
+  }
+  // Whether from's latest direct post in gid was signed (pk = its key) or not (''). Members only.
+  function noteSigner(gid, from, pk) {
+    const g = st.groups[gid]; if (!g || !hasM(g, from) || ((g.keys || {})[from] || '') === pk) return;
+    const k = Object.assign({}, g.keys || {}); if (pk) k[from] = pk; else delete k[from];
+    for (const m in k) if (!hasM(g, m)) delete k[m];
+    if (Object.keys(k).length) g.keys = k; else delete g.keys;
+    saveSoon();
+  }
+  // The signature and key to put on a relay of m (null when unknown).
+  function sigFor(g, m) { if (!m.sg || m.img) return null; if (m.from === addr) return [m.sg, myPK()]; const k = g && g.keys && g.keys[m.from]; return k ? [m.sg, k] : null; }
+  // A relayed version of a post (history from someone else, maybe altered) is replaced by the sender's own copy.
+  async function replaceRelayed(key, from, w) {
+    const ok = w.sg ? await verifyPost(from, w.pk, w.sg, w.g, postIDf(w.id), w.ts, w.text) : false;
+    let m = null; for (let i = st.messages.length - 1; i >= 0; i--) { const x = st.messages[i]; if (x.peer === key && x.from === from && !x.out && samePost(x.id, w.id)) { m = x; break; } }
+    if (!m) return;
+    m.text = String(w.text); delete m.via; delete m.hist; delete m.sg; if (ok === true) m.sg = String(w.sg);
+    const n = cleanNick(w.nick); if (n) m.nick = n;
+    if (+w.ts > 0 && +w.ts <= now() + 300) m.ts = Math.trunc(+w.ts);
+    save();
+    emit('msg_upd', { id: m.id, peer: m.peer, from: m.from, nick: m.nick, text: m.text, ts: m.ts, via: '', hist: false }); // spelled out: the UI merges it
+    if (ok === true) noteSigner(w.g, from, String(w.pk).toLowerCase());
+  }
   // The host tells a recently removed member that still posts or asks (its list without them), at most every 15 s.
   const goneAt_ = {};
   function goneNotice(peer, g) {
     if (g.owner !== addr || g.left || g.members.includes(peer) || !goneAt(g, peer)) return;
     const k = g.id + '|' + peer; if (Date.now() - (goneAt_[k] || 0) < 15000) return;
     if (Object.keys(goneAt_).length > 4096) for (const x in goneAt_) delete goneAt_[x];
-    goneAt_[k] = Date.now(); for (const p of infoPackets(g)) send(peer, p);
+    goneAt_[k] = Date.now();
+    infoPackets(g).forEach((p, i) => { if (i === 0) { const x = Object.assign({}, p, { gr: packAddrs([peer]) }); if (goLen(x) <= DGRAM) p = x; } send(peer, p); }); // "gr": it is them who are out, so a list at the version they hold from an admin isn't taken as a collision (v0.19.3)
   }
   // Our undelivered copies of posts to a group we are out of: failed, never retried.
   function failLeftCopies(gid) {
@@ -461,7 +679,8 @@
   function mergeAdds(g, list) { const out = []; for (const m of list) if (!g.members.includes(m) && !(g.gone || []).includes(m) && !out.includes(m) && g.members.length + out.length < gMax(g)) out.push(m); return out; }
   // Re-send gl to someone who still treats us as a member of a group we left, at most every 5 min.
   const glAt = {};
-  function leaveNotice(peer, gid) { const k = gid + '|' + peer; if (Date.now() - (glAt[k] || 0) < 300000) return; if (Object.keys(glAt).length > 4096) for (const x in glAt) delete glAt[x]; glAt[k] = Date.now(); send(peer, { t: 'gl', g: gid }); }
+  // Twice a few seconds apart and at most once a minute: the first packets after a peer comes back often go nowhere (v0.19.3).
+  function leaveNoticeAt(peer, gid, ts) { const k = gid + '|' + peer; if (Date.now() - (glAt[k] || 0) < 60000) return; if (Object.keys(glAt).length > 4096) for (const x in glAt) delete glAt[x]; glAt[k] = Date.now(); const w = { t: 'gl', g: gid, ts: ts || undefined }; send(peer, w); setTimeout(() => send(peer, w), 3000); }
   const cleanAdmins = (list, g) => [...new Set((list || []).map(x => norm(String(x || ''))).filter(a => a && isYgg(a) && a !== g.owner && g.members.includes(a)))].sort().slice(0, MAXADM);
   const jlen = w => u8len(JSON.stringify(w));
   function addrBytes(a) {
@@ -479,8 +698,11 @@
   const gHashS = (name, ms) => hexOf(sha256s(new TextEncoder().encode(name + '\n' + ms.slice().sort().join(',')))).slice(0, 8);
   function infoPackets(g) {
     const w = giWire(g);
-    if (jlen(w) <= GIMAX) return [w];
+    // The host/an admin says when the members it lists as gone dropped out ("gt", v0.19.3), when it still fits.
+    const gt = canMng(g, addr) ? goneTimes(g) : null;
+    if (goLen(w) <= GIMAX) { if (gt) { const x = Object.assign({}, w, { gt }); if (goLen(x) <= GIMAX) return [x]; } return [w]; }
     delete w.gm; w.gc = g.members.length; w.gh = gHashS(g.name, g.members);
+    if (gt) { w.gt = gt; if (goLen(w) > DGRAM) delete w.gt; }
     const parts = chunkAddrs(g.members);
     return [w].concat(parts.map((p, i) => ({ t: 'gp', g: g.id, gv: g.v || undefined, gh: w.gh, i: i || undefined, n: parts.length, gmb: packAddrs(p) })));
   }
@@ -493,22 +715,36 @@
     if (ps.length === 1) { sendPackets(g.members.concat(extra || []), ps); return; }
     sendPackets(g.members, ps.slice(0, 1)); sendPackets(extra || [], ps);
   }
-  function gMembers(g, added, removed) {
-    const ps = infoPackets(g);
-    if (ps.length === 1) { sendPackets(g.members.concat(removed), ps); return; }
+  // kick: removed by a manager (not a leave), so other managers refuse their link joins too. The classic gi
+  // also carries what was removed ("gr"), so a host merging two admins' same-version changes keeps both (v0.19.3).
+  function gMembers(g, added, removed, kick) {
+    let ps = infoPackets(g);
+    if (ps.length === 1) {
+      if (removed.length) { const x = Object.assign({}, ps[0], { gr: packAddrs(removed) }); if (kick) x.k = 'kick'; if (goLen(x) <= DGRAM) ps = [x]; }
+      sendPackets(g.members.concat(removed), ps); return;
+    }
     const old = g.members.filter(m => !added.includes(m)), gh = gHashS(g.name, g.members), ds = [];
-    for (const c of chunkAddrs(added)) if (c.length) ds.push({ t: 'gd', g: g.id, gv: g.v, ga: packAddrs(c), gh });
-    for (const c of chunkAddrs(removed)) if (c.length) ds.push({ t: 'gd', g: g.id, gv: g.v, gr: packAddrs(c), gh });
+    for (const c of chunkAddrs(added)) if (c.length) ds.push({ t: 'gd', g: g.id, gv: g.v, ga: packAddrs(c), gh, ts: g.vat || undefined });
+    for (const c of chunkAddrs(removed)) if (c.length) ds.push({ t: 'gd', g: g.id, gv: g.v, gr: packAddrs(c), gh, ts: g.vat || undefined, k: kick ? 'kick' : undefined });
     sendPackets(old.concat(removed), ds); sendPackets(added, ps);
   }
   const qAt = {}, rAt = {}, pbufs = {};
-  function askInfo(peer, gid) { const k = gid + '|' + peer; if (Date.now() - (qAt[k] || 0) < 15000) return; qAt[k] = Date.now(); send(peer, { t: 'gq', g: gid }); }
-  function answerInfo(peer, g) { const k = g.id + '|' + peer; if (Date.now() - (rAt[k] || 0) < 10000) return; rAt[k] = Date.now(); for (const p of infoPackets(g)) send(peer, p); }
+  const capMap = o => { if (Object.keys(o).length > 4096) for (const x in o) delete o[x]; }; // strangers can make keys up (v0.19.3)
+  function askInfo(peer, gid) { const k = gid + '|' + peer; if (Date.now() - (qAt[k] || 0) < 15000) return; capMap(qAt); qAt[k] = Date.now(); send(peer, { t: 'gq', g: gid }); }
+  function answerInfo(peer, g) { const k = g.id + '|' + peer; if (Date.now() - (rAt[k] || 0) < 10000) return; capMap(rAt); rAt[k] = Date.now(); for (const p of infoPackets(g)) send(peer, p); }
   function pbuf(src, gid, v, gh) {
     const k = gid + '|' + src; let b = pbufs[k];
     if (!b || b.v !== (v | 0) || b.gh !== gh || Date.now() - b.at > 60000) {
-      b = pbufs[k] = { v: v | 0, gh, n: 0, parts: {}, hdr: null, at: Date.now() };
-      for (const [kk, x] of Object.entries(pbufs)) if (Date.now() - x.at > 120000) delete pbufs[kk];
+      b = { v: v | 0, gh, n: 0, parts: {}, hdr: null, at: Date.now() };
+      // Drop stale buffers and keep their number bounded: anyone can send parts for made-up group ids (v0.19.3).
+      let mine = 0, oldK = '', oldAt = 0, oldMine = '', oldMineAt = 0;
+      for (const [kk, x] of Object.entries(pbufs)) {
+        if (Date.now() - x.at > 120000) { delete pbufs[kk]; continue; }
+        if (!oldK || x.at < oldAt) { oldK = kk; oldAt = x.at; }
+        if (kk.endsWith('|' + src)) { mine++; if (!oldMine || x.at < oldMineAt) { oldMine = kk; oldMineAt = x.at; } }
+      }
+      if (mine >= 4 && oldMine) delete pbufs[oldMine]; else if (Object.keys(pbufs).length >= 64 && oldK) delete pbufs[oldK];
+      pbufs[k] = b;
     }
     return b;
   }
@@ -525,8 +761,9 @@
     const gc = w.gc | 0; if (gc <= 0 || gc > GCAP || !w.gh) return;
     const g = st.groups[w.g];
     if (g && gHashS(cleanNick(w.gn) || 'グループ', g.members) === w.gh) { onGroupCtl(src, Object.assign({}, w, { gm: g.members.slice(), gc: undefined })); return; }
-    const b = pbuf(src, w.g, w.gv, w.gh); b.hdr = w;
+    const b = pbuf(src, w.g, w.gv, w.gh), first = !b.hdr; b.hdr = w;
     const full = partsDone(src, b); if (full) { onGroupCtl(src, full); return; }
+    if (!first) return; // a repeat: the check below is already scheduled
     setTimeout(() => { if (pbufs[w.g + '|' + src] === b) askInfo(src, w.g); }, 5000);
   }
   function onInfoPart(src, w) {
@@ -549,10 +786,14 @@
   }
   function onDelta(src, w) {
     const g = st.groups[w.g];
-    if (!g || g.left || !canMng(g, src) || !g.members.includes(addr)) return;
+    // A host that left (no heir) is still the owner on file but no longer runs the group (v0.19.3).
+    if (!g || g.left || !canMng(g, src) || !hasM(g, src) || !g.members.includes(addr)) return;
+    const host = g.owner === addr, gv = w.gv | 0;
+    // An admin far ahead of us: the host's list decides, so an admin can't push the version out of reach (v0.19.3).
+    if (!host && src !== g.owner && gv > (g.v | 0) + MAXVJUMP) { askInfo(g.owner, g.id); return; }
     // An admin's delta the host gets late or from an old base is merged into a new version:
     // its additions (not ones removed since), its removals only at the same version (v0.19.2).
-    const host = g.owner === addr, gv = w.gv | 0, merge = host && gv <= (g.v | 0);
+    const merge = host && gv <= (g.v | 0);
     if (gv < (g.v | 0) && !merge) return;
     let add = unpackAddrs(w.ga) || [], rm = unpackAddrs(w.gr) || [];
     if (merge) { add = mergeAdds(g, add); if (gv < (g.v | 0)) rm = []; }
@@ -562,17 +803,25 @@
     for (const x of add) if (!ms.includes(x) && ms.length < GCAP) { ms.push(x); added.push(x); }
     ms = ms.filter(m => { const d = rm.includes(m) && (byHost || (m !== g.owner && !isAdm(g, m))); if (d) removed.push(m); return !d; });
     if (!added.length && !removed.length && gv <= (g.v | 0)) return; // a repeat
-    if (!host && gv === (g.v | 0)) { if (src === g.owner) answerInfo(g.owner, g); else askInfo(g.owner, g.id); return; } // same version, different change: the host merges
+    const out = removed.includes(addr);
+    if (!byHost && ms.length > gMax(g)) { if (!host) askInfo(g.owner, g.id); return; } // an admin can't take the group over its limit (v0.19.3)
+    // Same version, different change: the host merges (the host removing us is final even then, v0.19.3).
+    if (!host && gv === (g.v | 0) && !(byHost && out)) { if (src === g.owner) answerInfo(g.owner, g); else askInfo(g.owner, g.id); return; }
     const before = g.members;
-    g.members = ms.sort(); g.admins = cleanAdmins(g.admins, g); g.v = merge ? (g.v | 0) + 1 : gv;
+    g.members = ms.sort(); g.admins = cleanAdmins(g.admins, g);
+    let at = 0;
+    if (merge) bumpV(g); else { g.v = gv; at = changeTime(w.ts); if (at) g.vat = at; else delete g.vat; } // 0 = unknown (an older sender): never pass on a stale time
     if (host) trackGone(g, before);
-    noteGone(g, before, 0);
+    noteGone(g, before, at);
+    const dels = purgeGone(g, before); // what they posted after the removal reached us late (v0.19.3)
+    const kick = w.k === 'kick' || (merge && removed.length > 0);
+    if (kick && canMng(g, addr)) addBan(g, removed);
     if (g.pend) { g.pend = g.pend.filter(p => !added.includes(p.addr)); if (!g.pend.length) delete g.pend; }
-    const out = removed.includes(addr); if (out) g.left = true;
-    save(); emit('contact', gView(g));
+    if (out) g.left = true;
+    save(); emit('contact', gView(g)); emitDels(dels);
     if (out) { gSys(g, 'グループから外されました'); failLeftCopies(g.id); return; }
     memberSys(g, src, added, removed);
-    if (merge) { gMembers(g, added, removed); return; } // everyone (the admin too) gets the merged version
+    if (merge) { gMembers(g, added, removed, kick); return; } // everyone (the admin too) gets the merged version
     if (g.owner === addr && !byHost && (added.length || removed.length)) { const ps = infoPackets(g); if (ps.length === 1) sendPackets(g.members.concat(removed), ps); }
     const v = w.gv | 0, gh = w.gh;
     setTimeout(() => { const x = st.groups[w.g]; if (x && !x.left && (x.v | 0) === v && gHashS(x.name, x.members) !== gh) askInfo(src, w.g); }, 6000);
@@ -686,7 +935,7 @@
   }
   function msgPktBare(m) {
     const w = { t: 'msg', id: m.id, nick: m.nick, text: m.text, ts: m.ts, ttl: m.ttl || undefined };
-    if (m.grp) { w.g = m.grp; const g = st.groups[m.grp]; if (g) w.gh = gHashS(g.name, g.members); }
+    if (m.grp) { w.g = m.grp; const g = st.groups[m.grp]; if (g) w.gh = gHashS(g.name, g.members); if (m.sg) { w.sg = m.sg; w.pk = myPK(); } }
     return w;
   }
   async function msgPkt(m) { const w = msgPktBare(m); withPow(m, w, ''); return w; }
@@ -703,8 +952,9 @@
     const ttl = (g.set && g.set.ttl) | 0, tx = ttl ? { ttl, exp: ts + ttl } : {};
     const v = Object.assign({ id, peer: 'g:' + gid, from: addr, nick: st.nick, text, ts, out: true, status: 'sending' }, tx);
     if (img) v.img = img;
+    else { const sg = signPost(gid, id, ts, text); if (sg) v.sg = sg; } // relays can then prove it is ours (v0.19.3)
     // The photo stays on the visible message only (gimg on the copies).
-    const cs = g.members.map((a, i) => [a, i]).filter(([a]) => a !== addr).map(([a, i]) => Object.assign({ id: id + 'g' + i, peer: a, from: addr, nick: st.nick, text, ts, out: true, status: 'sending', grp: gid, of: id, hid: true, gimg: img ? true : undefined }, tx));
+    const cs = g.members.map((a, i) => [a, i]).filter(([a]) => a !== addr).map(([a, i]) => Object.assign({ id: id + 'g' + i, peer: a, from: addr, nick: st.nick, text, ts, out: true, status: 'sending', grp: gid, of: id, hid: true, gimg: img ? true : undefined, sg: v.sg }, tx));
     if (!cs.length) v.status = 'sent';
     if (cs.length) v.tot = cs.length; // recipients at send time (for 届いた n/m)
     const need = gPow(g);
@@ -736,26 +986,38 @@
       const c = st.contacts[src];
       g = st.groups[w.g] = { id: w.g, name: 'グループ', members: cleanMembers([src], addr), req: !(c && c.shared && !c.req), stub: true };
       ask = true; save(); emit('contact', gView(g));
-    } else if (g.left) { if (g.quit) leaveNotice(src, w.g); return true; } // we're out: ack and drop (and re-tell a missed gl)
-    else if (!hasM(g, src)) {
+    } else if (g.left) { leftNotice(src, g); return true; } // we're out: ack and drop (and re-tell a missed gl / hand-over)
+    let late = false;
+    if (!g.left && !hasM(g, src)) {
       const at = goneAt(g, src);
       if (!at) { askInfo(src, w.g); if (g.owner && g.owner !== src && g.owner !== addr) askInfo(g.owner, w.g); return false; }
-      // A member who left or was removed: a post made before that still counts; a later one is
-      // acked and dropped so they stop retrying, and the host tells them they are out (v0.19.2).
-      if (at < 0 || !(+w.ts > 0) || +w.ts > at) { goneNotice(src, g); return true; }
+      // A member who left or was removed: a post made before that still counts (only for a while and only so many,
+      // v0.19.3); a later one is acked and dropped so they stop retrying, and the host tells them they are out.
+      if (!lateOK(g, src, w.ts)) { goneNotice(src, g); return true; }
+      late = true;
     }
-    else if (w.gh && w.gh !== gHashS(g.name, g.members)) ask = true;
+    else if (known && w.gh && w.gh !== gHashS(g.name, g.members)) ask = true;
     if (ask) { askInfo(src, w.g); if (g.owner && g.owner !== src && g.owner !== addr) askInfo(g.owner, w.g); }
     const key = 'g:' + w.g;
-    if (st.messages.some(m => m.peer === key && m.from === src && samePost(m.id, w.id))) return true;
-    if (!powCheck(src, w)) return false;
+    const ex = st.messages.find(m => m.peer === key && m.from === src && samePost(m.id, w.id));
+    if (late && !ex && !lateTake(w.g, src)) return true; // too many late posts from a former member
     const nf = !!(g.set && g.set.nf);
+    // We hold it as someone's relay: the sender's own copy is the real one (v0.19.3).
+    if (ex && !ex.out && !img && (ex.via || ex.hist) && (ex.text !== w.text || ex.via)) { if (!powCheck(src, w)) return false; await replaceRelayed(key, src, w); return true; }
+    if (ex) return true;
+    if (!powCheck(src, w)) return false;
     if (img && nf) { if (!w.text) return true; img = ''; } // photos off: ack and drop
     let ttl = w.ttl | 0; const gt = (g.set && g.set.ttl) | 0;
     if (gt && (ttl <= 0 || ttl > gt)) ttl = gt; if (ttl < 0 || ttl > MAXTTL) ttl = 0;
     const m = { id: postIDf(w.id), peer: key, from: src, nick: cleanNick(w.nick), text: w.text || '', ts: inTs(w.ts), out: false }; // stored under the post id
     if (img) m.img = img;
     if (ttl) { m.ttl = ttl; m.exp = now() + ttl; }
+    if (!img) {
+      // A signed text post: keep the signature to pass on with relays; the sender is known to sign while its posts are signed (v0.19.3).
+      let pk = ''; if (w.sg && await verifyPost(src, w.pk, w.sg, w.g, postIDf(w.id), w.ts, w.text) === true) { m.sg = String(w.sg); pk = String(w.pk).toLowerCase(); }
+      if (st.messages.some(x => x.peer === key && x.from === src && samePost(x.id, w.id))) return true; // landed while checking
+      noteSigner(w.g, src, pk);
+    }
     addMessage(m);
     return true;
   }
@@ -789,6 +1051,8 @@
     const g = st.groups[w.g];
     if (!g || g.left || !canMng(g, addr) || !g.tok || w.tok !== g.tok || st.blocked[src]) { send(src, { t: 'gjn', g: w.g, text: 'この招待リンクは使えません（リセットされたか、グループがなくなりました）' }); return; }
     if (hasM(g, src)) { answerInfo(src, g); return; }
+    // removed by the host or an admin: only a direct add (or approval of a request made before) brings them back (v0.19.3)
+    if (banned(g, src)) { send(src, { t: 'gjn', g: w.g, text: 'このグループからは外されているため、リンクからは参加できません' }); return; }
     if (g.members.length >= gMax(g)) { send(src, { t: 'gjn', g: w.g, text: 'グループが満員です（最大' + gMax(g) + '人）' }); return; }
     const nick = cleanNick(w.nick);
     if ((w.pn || st.powStrict) && !joinPowOK(src, w.g, String(w.tok || ''), w.pn)) { send(src, { t: 'gjn', g: w.g, text: '参加にはYggChat v0.19.0以上が必要です（PoW）' }); return; }
@@ -800,6 +1064,7 @@
     }
     if (g.set && g.set.ap) {
       const fresh = !(g.pend || []).some(p => p.addr === src);
+      if (fresh && (g.pend || []).length >= 20) { g.pend = g.pend.filter(p => now() - (p.ts || 0) < PENDKEEP); if (!g.pend.length) delete g.pend; } // requests nobody answered for days make room (v0.19.3)
       if (fresh) { if ((g.pend || []).length >= 20) { send(src, { t: 'gjn', g: w.g, text: '参加申請がいっぱいです。しばらくしてからもう一度開いてね' }); return; } (g.pend = g.pend || []).push({ addr: src, nick, ts: now() }); save(); }
       send(src, { t: 'gjn', g: w.g, k: 'wait', text: 'ホストの承認待ちです。承認されると自動で参加します' });
       if (fresh) { emit('contact', gView(g)); gSys(g, (nick || nameOf(src)) + ' が参加を申請しています'); emit('notice', { text: '「' + g.name + '」に参加申請があります' }); }
@@ -818,15 +1083,15 @@
     if (w.t === 'gk') { onKey(src, w); return; }
     if (w.t === 'gkq') { if (g && !g.left && g.owner === addr && isAdm(g, src)) sendKey(g, [src]); return; }
     if (w.t === 'gp') { onInfoPart(src, w); return; }
-    if (w.t === 'gq') { if (g && !g.left && hasM(g, src) && hasM(g, addr)) answerInfo(src, g); else if (g && !g.left && !hasM(g, src)) goneNotice(src, g); return; }
+    if (w.t === 'gq') { if (g && !g.left && hasM(g, src) && hasM(g, addr)) answerInfo(src, g); else if (g && !g.left && !hasM(g, src)) goneNotice(src, g); else if (g && g.left) leftNotice(src, g); return; }
     if (w.t === 'gl') {
       if (!g || g.left || !hasM(g, src)) return;
       const before = g.members, host = g.owner === addr;
       g.members = g.members.filter(a => a !== src); g.admins = cleanAdmins(g.admins, g);
       noteGone(g, before, +w.ts || 0); // gl carries when they left (v0.19.2): their posts from before still count
-      if (host) { g.v = (g.v | 0) + 1; trackGone(g, before); } // the host makes a leave a new version, so members who missed the gl follow (v0.19.2)
+      if (host) { bumpV(g); trackGone(g, before); } // the host makes a leave a new version, so members who missed the gl follow (v0.19.2)
       save(); emit('contact', gView(g)); gSys(g, gNameOf(g, src) + ' が退出しました');
-      if (host) gMembers(g, [], [src]);
+      if (host) gMembers(g, [], [src], false);
       return;
     }
     if (w.t === 'gi') {
@@ -834,6 +1099,10 @@
       if (!Array.isArray(w.gm) || !w.gm.length) return;
       const stubReq = g ? !!g.req : false;
       if (g && g.stub && !g.left) g = null; // a placeholder made from a message: take this as the first info
+      // An unanswered invitation while we wait for the host whose link we opened: anyone who saw the group id may
+      // have sent it first, maybe without the host in it; the host's own info starts the group afresh (v0.19.3).
+      if (g && g.req && !g.left && joinHost(w.g) === src) g = null;
+      const wasKnown = !!g;
       const gv = w.gv | 0;
       // The host's settings/name/admins carry their own version (gsv): a late repeat of older info must not undo a change.
       const staleSet = !!(g && g.owner && (w.gsv | 0) < (g.sv | 0));
@@ -841,22 +1110,33 @@
       if (g && !g.left && !hasM(g, src)) return;
       if (g && g.left) {
         // We left ourselves: a list with us is from someone who missed our gl, not an invitation (v0.19.2).
-        if (g.quit) { if (inG) leaveNotice(src, w.g); return; }
+        if (g.quit) { if (inG) leftNotice(src, g); return; }
         // Only the host (or an admin) adding us back with a newer list brings us back.
         if (!inG || !canMng(g, src) || (gv && gv <= (g.v | 0))) return;
         g.left = false; g.req = true; delete g.tomb; rejoined = true;
       }
       const byHost = !!(g && g.owner && src === g.owner);
-      let collide = false, hint = false, stale = false, resync = false, merged = [];
+      let collide = false, hint = false, stale = false, resync = false, askHost = false, merged = [], unmerged = [], adopted = !g; // adopted: the list came from the host/an admin and replaces ours
+      const gr = unpackAddrs(w.gr) || [];
       if (g && g.owner) {
         // Same version, different list: two changes from the same base. Keep ours; the host merges (v0.19.2).
-        if (gv && gv === (g.v | 0) && g.owner !== addr && !sameM(ms, g.members)) { ms = g.members.slice(); inG = true; collide = true; }
-        else if (byHost && (!gv || gv >= (g.v | 0))) { /* the host's list */ }
-        else if (!byHost && isAdm(g, src) && gv > (g.v | 0)) { for (const x of [g.owner].concat(g.admins || [])) if (g.members.includes(x) && !ms.includes(x)) ms.push(x); ms.sort(); inG = ms.includes(addr); }
+        // (Unless the host's list says it removed us ("gr"): its merge keeps that, v0.19.3.)
+        if (gv && gv === (g.v | 0) && g.owner !== addr && !sameM(ms, g.members) && !(byHost && !inG && gr.includes(addr))) { ms = g.members.slice(); inG = true; collide = true; }
+        else if (byHost && (!gv || gv >= (g.v | 0))) { adopted = !sameM(ms, g.members); /* the host's list */ }
+        // An admin's list far ahead of ours or over the limit: an admin can't brick the versions or overfill the group (v0.19.3).
+        else if (!byHost && isAdm(g, src) && gv > (g.v | 0) && (gv > (g.v | 0) + MAXVJUMP || ms.length > gMax(g)) && g.owner !== addr) { ms = g.members.slice(); inG = true; askHost = true; }
+        else if (!byHost && isAdm(g, src) && gv > (g.v | 0) && gv <= (g.v | 0) + MAXVJUMP && ms.length <= gMax(g)) { for (const x of [g.owner].concat(g.admins || [])) if (g.members.includes(x) && !ms.includes(x)) ms.push(x); ms.sort(); inG = ms.includes(addr); adopted = true; }
         else { // only the host (or an admin) changes members
-          if (g.owner === addr && gv && !sameM(ms, g.members)) { if (isAdm(g, src)) { merged = mergeAdds(g, ms); if (!merged.length) { resync = gv === (g.v | 0); stale = gv < (g.v | 0); } } else if (gv >= (g.v | 0)) hint = true; else stale = true; }
+          if (g.owner === addr && gv && !sameM(ms, g.members)) {
+            if (isAdm(g, src)) {
+              merged = mergeAdds(g, ms);
+              // its removals too, when it worked from the same base (two admins removing at once, v0.19.3)
+              if (gv === (g.v | 0)) for (const x of gr) if (hasM(g, x) && x !== g.owner && !isAdm(g, x) && x !== addr && !ms.includes(x)) unmerged.push(x);
+              if (!merged.length && !unmerged.length) { resync = gv === (g.v | 0); stale = gv < (g.v | 0); }
+            } else if (gv >= (g.v | 0)) hint = true; else stale = true;
+          }
           ms = g.members.slice(); inG = true;
-          if (merged.length) ms = cleanMembers(g.members.concat(merged), addr);
+          if (merged.length || unmerged.length) ms = cleanMembers(g.members.filter(m => !unmerged.includes(m)).concat(merged), addr);
         }
       }
       let known = !!g, viaLink = false;
@@ -864,7 +1144,9 @@
       if (!g) {
         if (!inG) return; const c = st.contacts[src];
         const prev = st.groups[w.g];
-        g = st.groups[w.g] = { id: w.g, name: '', members: [], req: prev && prev.stub ? stubReq : !(c && c.shared && !c.req) };
+        // a stranger flooding us with invitations (v0.19.3)
+        if (!(c && c.shared && !c.req) && joinHost(w.g) !== src && !(prev && prev.stub) && !inviteRoom(src)) return;
+        g = st.groups[w.g] = { id: w.g, name: '', members: [], req: prev && prev.stub ? stubReq : !(c && c.shared && !c.req), by: src };
         const o = norm(String(w.go || '')); if (o && isYgg(o) && ms.includes(o)) { g.owner = o; g.admins = cleanAdmins(w.gad, { owner: o, members: ms }); }
         if (joinHost(w.g) === src && canMng(g, src)) { g.req = false; viaLink = true; } // we asked through this host's/admin's link
       }
@@ -872,11 +1154,19 @@
       const old = { name: g.name, members: g.members.slice(), admins: (g.admins || []).slice(), set: g.set, v: g.v | 0 }, wasAdm = isAdm(g, addr);
       known = known && !!old.name;
       if (!staleSet) g.name = cleanNick(w.gn) || 'グループ';
-      noteGone(Object.assign(g, { members: ms }), old.members, 0); if (!inG) g.left = true;
-      if (gv > (g.v | 0) && (byHost || old.admins.includes(src) || !known)) g.v = gv;
-      if (merged.length || resync) g.v = old.v + 1; // the host re-issues the merged list as a new version
+      // The manager who made this list says when; a member removed then can't have posted after it (v0.19.3).
+      const at = adopted && wasKnown ? changeTime(w.ts) : 0;
+      noteGone(Object.assign(g, { members: ms }), old.members, at); if (!inG) g.left = true;
+      if (adopted && wasKnown) noteGoneEach(g, old.members, w.gt);
+      const dels = purgeGone(g, old.members);
+      if (gv > (g.v | 0) && (byHost || old.admins.includes(src) || !known) && !askHost) { g.v = gv; const t = changeTime(w.ts); if (t) g.vat = t; else delete g.vat; }
+      if (merged.length || unmerged.length || resync) { g.v = old.v; bumpV(g); } // the host re-issues the merged list as a new version
+      if (w.k === 'kick' && canMng({ owner: g.owner, admins: old.admins }, src) && canMng(g, addr)) for (const x of gr) if (!hasM(g, x)) addBan(g, [x]); // removed by a manager: no coming back by link
+      if (unmerged.length) addBan(g, unmerged);
       if (g.owner === addr) trackGone(g, old.members);
-      let diffs = [], handed = '';
+      let diffs = [], handed = '', claimed = false;
+      // The host left (it is no longer a member) and we missed its hand-over: the admin it named says so itself (v0.19.3).
+      if (known && g.owner && src !== g.owner && !hasM(g, g.owner) && old.admins.includes(src) && hasM(g, src) && (w.gsv | 0) > (g.sv | 0) && norm(String(w.go || '')) === src) { g.owner = src; claimed = true; }
       if (g.owner && src === g.owner && !staleSet) {
         if ((w.gsv | 0) > (g.sv | 0)) g.sv = w.gsv | 0;
         const o = norm(String(w.go || '')); if (o && isYgg(o) && o !== g.owner && g.members.includes(o)) { g.owner = o; handed = o; } // the host handed the group over
@@ -886,13 +1176,14 @@
       if ((wasAdm || !isAdm(g, addr)) && !isAdm(g, addr) && g.owner !== addr) { delete g.tok; delete g.pend; delete g.pwh; }
       if (g.pend) { g.pend = g.pend.filter(p => !g.members.includes(p.addr)); if (!g.pend.length) delete g.pend; }
       if (!g.admins.length) delete g.admins;
-      save(); emit('contact', gView(g));
+      save(); emit('contact', gView(g)); emitDels(dels);
+      if (askHost) askInfo(g.owner, g.id);
       if (isAdm(g, addr) && g.set && g.set.pw && !g.pwh) send(g.owner, { t: 'gkq', g: g.id });
       if (collide) { if (src === g.owner) answerInfo(g.owner, g); else askInfo(g.owner, g.id); }
       else if (hint) for (const x of g.admins || []) askInfo(x, g.id);
       else if (stale) answerInfo(src, g);
       else if (resync) gInfo(g, [src]);
-      else if (merged.length) { gMembers(g, merged, []); if (g.set && g.set.hi) { const h = historyOf(g.id); if (h.length) for (const x of merged) sendHistory(x, g.id, h); } }
+      else if (merged.length || unmerged.length) { gMembers(g, merged, unmerged, unmerged.length > 0); if (g.set && g.set.hi) { const h = historyOf(g.id); if (h.length) for (const x of merged) sendHistory(x, g.id, h); } }
       if (fresh && inG && viaLink) gSys(g, 'あなたが参加しました'); // the UI puts history before this line
       else if (fresh && inG) gSys(g, gNameOf(g, src) + ' があなたを追加しました');
       else if (rejoined) gSys(g, gNameOf(g, src) + ' があなたをグループに戻しました');
@@ -900,6 +1191,7 @@
       else if (known && old.name !== g.name && old.name !== 'グループ') gSys(g, gNameOf(g, src) + ' がグループ名を「' + g.name + '」にしました');
       if (inG) for (const t of diffs) gSys(g, gNameOf(g, src) + ' が' + t);
       if (handed) gSys(g, gNameOf(g, src) + ' が ' + gNameOf(g, handed) + ' をホストにしました');
+      if (claimed) gSys(g, gNameOf(g, src) + ' がホストになりました');
       if (known && inG) { memberSys(g, src, ms.filter(m => !old.members.includes(m) && m !== addr), old.members.filter(m => !ms.includes(m) && m !== src)); adminSys(g, src, old.admins, g.admins || []); }
     }
   }
@@ -929,7 +1221,12 @@
     if (w.t === 'mh' || w.t === 'mc') { if (!(st.blocked && st.blocked[src])) onMoveIn(src, w); return; }
     if (w.t === 'mha' || w.t === 'mca' || w.t === 'mok' || w.t === 'mng') { onMoveAck(src, w); return; }
     if (w.t === 'fca') { const g = chunkAcks.get(w.id); if (g && ackFrom.get(w.id) === src) g.add(w.i | 0); return; }
-    if (w.t === 'ack') { const f = acks.get(w.id); if (f && ackFrom.get(w.id) === src) { acks.delete(w.id); ackFrom.delete(w.id); f(); } askPK(src); return; }
+    if (w.t === 'ack') {
+      const f = acks.get(w.id);
+      if (f && ackFrom.get(w.id) === src) { acks.delete(w.id); ackFrom.delete(w.id); f(); }
+      else if (!f && !locked && /^[0-9A-Za-z_-]{1,40}$/.test(String(w.id))) lateAck(src, String(w.id));
+      askPK(src); return;
+    }
     if (w.t === 'pow') { onPowNeed(src, w); return; }
     if (locked || st.blocked[src]) return; // stay silent: the sender keeps it queued
     if (w.pk) learnPK(src, String(w.pk));
@@ -966,6 +1263,39 @@
     const bytes = unb64(m[2]);
     return bytes.length && bytes.length <= IMGMAX ? { mime: m[1], bytes } : null;
   }
+  // Decompression bombs (v0.19.3, as imgdims.go): a 600 KB PNG/GIF/WebP can claim
+  // 50000x50000 px. Only the header is read; at most 8192 px a side and ~25 MP.
+  function imgDims(mime, b) {
+    const be16 = i => (b[i] << 8) | b[i + 1], le16 = i => b[i] | (b[i + 1] << 8), be32 = i => ((b[i] << 24) >>> 0) + (b[i + 1] << 16) + (b[i + 2] << 8) + b[i + 3];
+    if (mime === 'image/png') { if (b.length < 24 || b[0] !== 0x89 || b[1] !== 0x50 || String.fromCharCode(...b.subarray(12, 16)) !== 'IHDR') return null; return [be32(16), be32(20)]; }
+    if (mime === 'image/gif') { if (b.length < 10 || !/^GIF8[79]a$/.test(String.fromCharCode(...b.subarray(0, 6)))) return null; return [le16(6), le16(8)]; }
+    if (mime === 'image/webp') {
+      if (b.length < 30 || String.fromCharCode(...b.subarray(0, 4)) !== 'RIFF' || String.fromCharCode(...b.subarray(8, 12)) !== 'WEBP') return null;
+      const k = String.fromCharCode(...b.subarray(12, 16));
+      if (k === 'VP8X') return [(b[24] | (b[25] << 8) | (b[26] << 16)) + 1, (b[27] | (b[28] << 8) | (b[29] << 16)) + 1];
+      if (k === 'VP8 ') { if (b[23] !== 0x9d || b[24] !== 0x01 || b[25] !== 0x2a) return null; return [le16(26) & 0x3fff, le16(28) & 0x3fff]; }
+      if (k === 'VP8L') { if (b[20] !== 0x2f) return null; const v = (b[21] | (b[22] << 8) | (b[23] << 16) | (b[24] << 24)) >>> 0; return [(v & 0x3fff) + 1, ((v >>> 14) & 0x3fff) + 1]; }
+      return null;
+    }
+    if (mime === 'image/jpeg') {
+      if (b.length < 4 || b[0] !== 0xff || b[1] !== 0xd8) return null;
+      let i = 2;
+      while (i + 3 < b.length) {
+        if (b[i] !== 0xff) return null;
+        const mk = b[i + 1];
+        if (mk === 0xff) { i++; continue; } // fill byte
+        if (mk === 0xd8 || mk === 0x01 || (mk >= 0xd0 && mk <= 0xd7)) { i += 2; continue; } // no length
+        if (mk === 0xd9 || mk === 0xda) return null; // image data before any frame header
+        const len = be16(i + 2); if (len < 2) return null;
+        if (mk >= 0xc0 && mk <= 0xcf && mk !== 0xc4 && mk !== 0xc8 && mk !== 0xcc) { if (i + 9 > b.length) return null; return [be16(i + 7), be16(i + 5)]; }
+        i += 2 + len;
+      }
+      return null;
+    }
+    return null;
+  }
+  const imgDimsOK = (mime, b) => { const d = imgDims(mime, b); return !!d && d[0] > 0 && d[1] > 0 && d[0] <= 8192 && d[1] <= 8192 && d[0] * d[1] <= 24 * 1048576; };
+  const IMGDIMS = '画像の縦横が大きすぎるか、読み取れません（1辺8192px・約2500万画素まで）';
   const chunkAcks = new Map();
   const inFiles = new Map();
 
@@ -1059,7 +1389,7 @@
     const isText = p.mime === TEXTMIME, mm = isText ? Object.assign({}, m, { textFile: true }) : m;
     const n = Math.ceil(p.bytes.length / CHUNK);
     const hdr = { t: 'fh', id: m.id, nick: m.nick, text: isText ? undefined : (m.text || undefined), ts: m.ts, ttl: m.ttl || undefined, mime: p.mime, size: p.bytes.length, n, sha: await sha(p.bytes) };
-    if (m.grp) { const gw = msgPktBare(m); hdr.g = gw.g; hdr.gh = gw.gh; }
+    if (m.grp) { const gw = msgPktBare(m); hdr.g = gw.g; hdr.gh = gw.gh; if (gw.sg) { hdr.sg = gw.sg; hdr.pk = gw.pk; } }
     withPow(mm, hdr, hdr.sha); let asked = powNeed[m.peer + '/' + m.id] | 0;
     const got = new Set(); chunkAcks.set(m.id, got);
     const acked = waitAck(m.peer, m.id);
@@ -1067,6 +1397,7 @@
     try {
       let idle = 0, last = -1;
       while (idle < tries) {
+        if (last >= 0 && !m.hid && !stillOut(m.peer, m.id)) { acks.delete(m.id); ackFrom.delete(m.id); return true; } // deleted meanwhile
         if ((powNeed[m.peer + '/' + m.id] | 0) > asked) { asked = powNeed[m.peer + '/' + m.id] | 0; mm.pn = ''; withPow(mm, hdr, hdr.sha); }
         send(m.peer, hdr);
         if (got.size === last) idle++; else { idle = 0; last = got.size; }
@@ -1086,14 +1417,19 @@
     const n = w.n | 0, size = w.size | 0;
     const isText = w.mime === TEXTMIME;
     if (!/^[0-9A-Za-z_-]{1,40}$/.test(String(w.id)) || !(MIMES.has(w.mime) || isText) || n < 1 || n > MAXN || size < 1 || size > (isText ? MAXRECV : IMGMAX) || Math.ceil(size / CHUNK) !== n || !/^[0-9a-f]{64}$/.test(String(w.sha)) || u8len(w.text) > CAPMAX || (isText && w.text) || u8len(w.nick) > 120) return;
-    if (st.messages.some(m => (m.peer === src || (w.g && m.peer === 'g:' + w.g && m.from === src)) && m.id === w.id) || (w.g && !w.text && !isText && st.groups[w.g] && st.groups[w.g].set && st.groups[w.g].set.nf)) { send(src, { t: 'ack', id: w.id }); return; }
-    if (w.g && st.groups[w.g] && st.groups[w.g].left && !locked && !st.blocked[src]) { send(src, { t: 'ack', id: w.id }); if (st.groups[w.g].quit) leaveNotice(src, w.g); return; } // we're out (v0.19.2)
+    if ((!w.g && isGoneMsg(src, String(w.id))) || st.messages.some(m => (m.peer === src || (w.g && m.peer === 'g:' + w.g && m.from === src)) && m.id === w.id) || (w.g && !w.text && !isText && st.groups[w.g] && st.groups[w.g].set && st.groups[w.g].set.nf)) { send(src, { t: 'ack', id: w.id }); return; }
+    if (w.g && st.groups[w.g] && st.groups[w.g].left && !locked && !st.blocked[src]) { send(src, { t: 'ack', id: w.id }); leftNotice(src, st.groups[w.g]); return; } // we're out (v0.19.2)
     if (locked || st.blocked[src] || !powCheck(src, w)) return;
     const t = Date.now();
     for (const [k, f] of inFiles) if (t - f.at > 180000) inFiles.delete(k);
     const key = src + '/' + w.id;
-    if (inFiles.has(key) || inFiles.size >= 16) return;
-    inFiles.set(key, { hdr: w, chunks: new Array(n), got: 0, at: t });
+    if (inFiles.has(key) || inFiles.size >= 32) return;
+    // One peer holds at most 4 slots and all strangers together 12, so nobody can keep
+    // every slot busy and block photos and long texts from everyone else (v0.19.3).
+    const c = st.contacts[src], stranger = !c || !!c.req;
+    let np = 0, ns = 0; for (const [k, f] of inFiles) { if (k.startsWith(src + '/')) np++; if (f.stranger) ns++; }
+    if (np >= 4 || (stranger && ns >= 12)) return;
+    inFiles.set(key, { hdr: w, chunks: new Array(n), got: 0, at: t, stranger });
   }
   async function onFileChunk(src, w) {
     const key = src + '/' + w.id, f = inFiles.get(key), i = w.i | 0;
@@ -1112,6 +1448,7 @@
     const h = Object.assign({}, f.hdr, { _checked: true }); // the header's proof of work was checked
     let img = '';
     if (h.mime === TEXTMIME) { try { h.text = new TextDecoder('utf-8', { fatal: true }).decode(all); } catch { return; } }
+    else if (!imgDimsOK(h.mime, all)) { send(src, { t: 'ack', id: w.id }); return; } // a decompression bomb would crash the UI: dropped, acked so it stops (v0.19.3)
     else { let s = ''; for (let j = 0; j < all.length; j += 0x8000) s += String.fromCharCode(...all.subarray(j, j + 0x8000)); img = 'data:' + h.mime + ';base64,' + btoa(s); }
     if (h.g) { if (await onGroupMsg(src, h, img)) { await saveNow(); send(src, { t: 'ack', id: w.id }); } return; }
     if (acceptMsg(src, h, img)) { await saveNow(); send(src, { t: 'ack', id: w.id }); }
@@ -1146,6 +1483,7 @@
     const acked = waitAck(m.peer, m.id);
     try {
       for (let i = 0; i < tries; i++) {
+        if (i > 0 && !m.hid && !stillOut(m.peer, m.id)) { acks.delete(m.id); ackFrom.delete(m.id); return true; } // deleted meanwhile: don't keep sending it
         if ((powNeed[m.peer + '/' + m.id] | 0) > asked) { asked = powNeed[m.peer + '/' + m.id] | 0; pkt = JSON.stringify(await msgPkt(Object.assign({}, m, { pn: '' }))); } // the receiver wants more work
         yggSend(m.peer, pkt);
         const got = await Promise.race([acked.then(() => true), new Promise(r => setTimeout(() => r(false), 2500))]);
@@ -1227,6 +1565,7 @@
     const rs = nRelays(); if (!rs || m.img || m.nostr) return;
     if (m.grp && st.groups[m.grp] && st.groups[m.grp].members.length > NOSTRG) return; // don't flood relays for a big group
     const c = st.contacts[m.peer]; if (!c || !c.pk) return;
+    { const x0 = st.messages.find(y => y.peer === m.peer && y.id === m.id); if (!x0 || x0.status !== 'queued') return; } // delivered, deleted or unsent meanwhile
     const ev = yggNostrWrap(c.pk, JSON.stringify(await msgPkt(m)));
     let ok = !!ev && await nostrPublish(rs, ev);
     if (st.nostrLegacy) { const lev = yggNostrWrap(c.pk, JSON.stringify(await msgPkt(m)), true); if (lev && await nostrPublish(rs, lev)) ok = true; }
@@ -1241,6 +1580,7 @@
     if (locked) return;
     const t = now(), gone = st.messages.filter(m => m.exp && m.exp <= t);
     if (!gone.length) return;
+    for (const m of gone) goneIfRecent(m); // a late copy must not bring it back (v0.19.3)
     st.messages = st.messages.filter(m => !(m.exp && m.exp <= t)); save();
     for (const m of gone) emit('msg_del', { peer: m.peer, id: m.id });
   }, 2000);
@@ -1440,6 +1780,7 @@
           const t = String(body.Text || ''); if ((!t && !body.Img) || u8len(t) > MAXSEND) return bad('message empty or too long');
           if (body.Img && goLen(t) - 2 > CAPMAX) return bad('写真の説明が長すぎます（日本語でおよそ260文字まで）');
           if (body.Img && !parseImg(body.Img)) return bad('unsupported or too large image (max 600KB)');
+          if (body.Img) { const pi = parseImg(body.Img); if (!imgDimsOK(pi.mime, pi.bytes)) return bad(IMGDIMS); }
           const gg = st.groups[gid]; if (body.Img && gg && gg.set && gg.set.nf) return bad('このグループでは写真を送れません（ホストの設定）');
           const v = sendGroup(gid, t, body.Img || ''); if (!v) return bad('このグループには送れません');
           outboxPut(v, st.messages.filter(m => m.hid && m.grp === gid && m.of === v.id));
@@ -1454,6 +1795,7 @@
         if (!isYgg(dst)) return bad('not a Yggdrasil address: ' + body.To);
         if ((!body.Text && !body.Img) || u8len(body.Text) > MAXSEND) return bad('message empty or too long');
         if (body.Img && !parseImg(body.Img)) return bad('unsupported or too large image (max 600KB)');
+        if (body.Img) { const pi = parseImg(body.Img); if (!imgDimsOK(pi.mime, pi.bytes)) return bad(IMGDIMS); }
         if (body.Img && goLen(String(body.Text || '')) - 2 > CAPMAX) return bad('写真の説明が長すぎます（日本語でおよそ260文字まで）');
         const c = st.contacts[dst];
         const share = !c || !c.shared;
@@ -1462,13 +1804,15 @@
         const m = { id: Date.now().toString(16) + Math.random().toString(16).slice(2, 6), peer: dst, from: addr, nick: st.nick, text: body.Text || '', ts: now(), out: true, status: 'sending' };
         if (body.Img) m.img = body.Img;
         if (ttl) { m.ttl = ttl; m.exp = m.ts + ttl; }
-        addMessage(m); outboxPut(m, []); if (share) sendProf(dst); deliver(m); if (await saveNow()) outboxDrop(m.id); return ok(m); // stored before the UI shows it (v0.19.2)
+        addMessage(m); outboxPut(m, []); if (share) sendProf(dst);
+        deliver(m).then(ok => { if (ok && queuedFor(dst).length) flush(dst); }); // older queued ones follow at once (v0.19.3)
+        if (await saveNow()) outboxDrop(m.id); return ok(m); // stored before the UI shows it (v0.19.2)
       }
       case 'group/sync': { syncGroup(String(body.ID || '')); return ok({}); }
       case 'group/create': {
         const ms = cleanMembers(body.Members, addr); if (ms.length < 2) return bad('メンバーを1人以上選んでください');
         const id = hexOf(crypto.getRandomValues(new Uint8Array(8)));
-        const g = st.groups[id] = { id, name: cleanNick(body.Name) || 'グループ', members: ms, owner: addr, v: 1, set: { hi: true } };
+        const g = st.groups[id] = { id, name: cleanNick(body.Name) || 'グループ', members: ms, owner: addr, v: 1, vat: now(), set: { hi: true } };
         { const mx = GMAXES.find(c => c >= ms.length); if (mx && mx > GDEF) g.set.mx = mx; }
         save(); emit('contact', gView(g)); gSys(g, 'グループ「' + g.name + '」を作りました'); gInfo(g); return ok(gView(g));
       }
@@ -1499,7 +1843,10 @@
         const removed = g.members.filter(m => rm.includes(m)); g.members = g.members.filter(m => !rm.includes(m));
         if (body.Admins) g.admins = cleanAdmins(body.Admins, g);
         g.admins = cleanAdmins(g.admins, g); if (!g.admins.length) delete g.admins;
-        if (added.length || removed.length) { g.v = (g.v | 0) + 1; if (host) trackGone(g, old.members); noteGone(g, old.members, 0); }
+        if (added.length || removed.length) {
+          bumpV(g); if (host) trackGone(g, old.members); noteGone(g, old.members, 0);
+          addBan(g, removed); for (const m of added) unban(g, m); // removed by us: their link joins are refused (v0.19.3)
+        }
         if (host && (ns || pwChanged || body.Admins || g.name !== old.name)) g.sv = (g.sv | 0) + 1; // a late repeat of the old info can't undo this
         if (g.pend) { g.pend = g.pend.filter(p => !added.includes(p.addr)); if (!g.pend.length) delete g.pend; }
         g.req = false;
@@ -1508,7 +1855,7 @@
         for (const t of setDiff(oldSet, g.set || {})) gSys(g, 'あなたが' + t);
         if (body.Pass && hadPw) gSys(g, 'あなたが参加パスワードを変更しました');
         memberSys(g, addr, added, removed); adminSys(g, addr, old.admins, g.admins || []);
-        if (added.length || removed.length) gMembers(g, added, removed);
+        if (added.length || removed.length) gMembers(g, added, removed, removed.length > 0); // the removed hear it too, so they know they're out
         if (added.length && g.set && g.set.hi) { const h = historyOf(g.id); if (h.length) for (const x of added) sendHistory(x, g.id, h); }
         if (g.name !== old.name || ns || pwChanged || body.Admins) gInfo(g);
         if (host) { const na = (g.admins || []).filter(x => !old.admins.includes(x) || pwChanged); if (na.length) sendKey(g, na); }
@@ -1526,7 +1873,9 @@
         if (j.host === addr) return bad('自分のグループの招待リンクです');
         const g0 = st.groups[j.gid];
         if (g0 && !g0.left && !g0.req && hasM(g0, addr)) return ok({ already: true, addr: 'g:' + j.gid });
-        if (g0 && g0.left) { delete st.groups[j.gid]; save(); }
+        // Joining again starts fresh; so does an unanswered invitation (anyone who knows the group id can make one,
+        // and its list could leave out the host so the host's answer is refused), v0.19.3.
+        if (g0 && (g0.left || g0.req)) { delete st.groups[j.gid]; save(); }
         setJoin(j.gid, j.host, JOINTTL);
         const jw = { t: 'gj', g: j.gid, tok: j.tok, nick: st.nick, pw: body.Pw ? String(body.Pw) : undefined, pn: joinPow(addr, j.gid, j.tok) };
         hello(j.host); // the first packets to a new peer often go nowhere while its route is looked up
@@ -1544,14 +1893,20 @@
         const g = st.groups[body.ID]; if (!g) return bad('no such group');
         const was = g.left;
         // A leaving host hands the group to the first co-admin, so it can still be run.
+        // (the co-admin we heard from last, most likely online; re-sent if it missed it, v0.19.3)
         let heir = '';
-        if (!was && g.owner === addr && (g.admins || []).length) { heir = g.admins[0]; g.owner = heir; g.admins = cleanAdmins(g.admins, g); if (!g.admins.length) delete g.admins; g.v = (g.v | 0) + 1; g.sv = (g.sv | 0) + 1; }
+        if (!was && g.owner === addr && (g.admins || []).length) { heir = pickHeir(g); g.owner = heir; g.admins = cleanAdmins(g.admins, g); if (!g.admins.length) delete g.admins; bumpV(g); g.sv = (g.sv | 0) + 1; g.hand = true; }
+        const full = Object.assign({}, g, { members: g.members.slice() }); // the list as it was, for the hand-over and our gl
+        if (!was) { // we are out: our own list no longer shows us (v0.19.3)
+          g.members = g.members.filter(m => m !== addr); g.admins = cleanAdmins(g.admins, g); if (!g.admins.length) delete g.admins;
+          g.qat = now(); // our gl is repeated on reconnects for a while
+        }
         g.left = true; g.req = false; g.quit = true; save(); emit('contact', gView(g));
-        if (heir) { gInfo(g); gSys(g, nameOf(heir) + ' をホストにしました'); }
+        if (heir) { gInfo(full); gSys(g, nameOf(heir) + ' をホストにしました'); }
         if (!was) {
           // Posts still on their way get one last push before the gl (a pre-v0.19.2 member drops
           // them once it has it); what is left is failed. gl says when we left (v0.19.2).
-          const at = now(), ms = g.members.slice();
+          const at = g.qat, ms = full.members.slice();
           flushBeforeLeave(g.id, 8000).then(() => { failLeftCopies(g.id); const d = heir ? 5000 : 0; for (let i = 0; i < 3; i++) setTimeout(() => { for (const m of ms) if (m !== addr) send(m, { t: 'gl', g: g.id, ts: at }); }, d + i * 2000); });
           gSys(g, 'グループを退出しました');
         }
@@ -1584,11 +1939,12 @@
           st.messages = st.messages.filter(m => m.peer !== body.Addr && m.grp !== gid); save(); emit('contact_del', { addr: body.Addr }); return ok({});
         }
         const a = norm(body.Addr || ''); if (!a) return bad('bad address');
-        delete st.contacts[a]; st.messages = st.messages.filter(m => m.peer !== a || m.hid); save(); // pending group copies to them still count (v0.19.2) emit('contact_del', { addr: a }); return ok({});
+        delete st.contacts[a]; st.messages = st.messages.filter(m => { if (m.peer !== a || m.hid) return true; goneIfRecent(m); return false; }); save(); // pending group copies to them still count (v0.19.2)
+        emit('contact_del', { addr: a }); return ok({});
       }
       case 'block': {
         const a = norm(body.Addr || ''); if (!a) return bad('bad address');
-        if (body.Block) { st.blocked[a] = true; delete st.contacts[a]; st.messages = st.messages.filter(m => m.peer !== a || m.hid); emit('contact_del', { addr: a }); }
+        if (body.Block) { st.blocked[a] = true; delete st.contacts[a]; st.messages = st.messages.filter(m => { if (m.peer !== a || m.hid) return true; goneIfRecent(m); return false; }); emit('contact_del', { addr: a }); }
         else delete st.blocked[a];
         save(); return ok({});
       }
@@ -1633,7 +1989,7 @@
       case 'identity/reset': {
         if (!body.Confirm) return bad('confirm required');
         // Everything tied to the old address goes (chats, groups, pending edits, the verified domain).
-        outer.key = ''; st.contacts = {}; st.messages = []; st.groups = {}; st.ctl = []; st.blocked = {}; st.joins = {}; delete st.domain; save(); saveOuter(); await saving;
+        outer.key = ''; st.contacts = {}; st.messages = []; st.groups = {}; st.ctl = []; st.blocked = {}; st.joins = {}; st.gone = {}; st.early = {}; delete st.domain; save(); saveOuter(); await saving;
         setTimeout(() => location.reload(), 300);
         return ok({});
       }
@@ -1674,7 +2030,8 @@
         if (!m || m.img) return bad('編集できるのは自分の文章メッセージだけです', 400);
         if (!t.trim() || u8len(t) > 8000) return bad('bad request', 400);
         if (goLen({ t: 'edit', id: ctlID(), ref: m.id, text: t }) > DGRAM) return bad('長すぎて編集できません（日本語でおよそ350文字まで）。送り直してね', 400);
-        m.text = t; const remote = isSent(m); if (remote) m.edited = true; save();
+        // A "queued" message may have reached them already (lost ack), v0.19.3; group posts are edited here only.
+        m.text = t; const remote = !isG(m.peer) && m.status !== 'failed'; if (remote) m.edited = true; save();
         if (remote) queueCtl(m.peer, { t: 'edit', id: ctlID(), ref: m.id, text: t });
         emit('msg_upd', m);
         return ok(m);
@@ -1685,9 +2042,11 @@
         const m = st.messages[i];
         if (body.Everyone && !m.out) return bad('相手のメッセージは自分の端末からだけ削除できます', 400);
         st.messages.splice(i, 1);
+        if (!m.out && !m.sys && !isG(m.peer)) markGone(m.peer, m.id); // a late copy must not bring it back
         st.ctl = (st.ctl || []).filter(c => !(c.peer === m.peer && c.w.ref === m.id));
         save();
-        if (body.Everyone && isSent(m) && !isG(m.peer)) queueCtl(m.peer, { t: 'del', id: ctlID(), ref: m.id });
+        // "queued" may still have reached them (lost ack, retry, Nostr box): everything but a failed send gets the unsend (v0.19.3).
+        if (body.Everyone && !m.sys && m.status !== 'failed' && !isG(m.peer)) queueCtl(m.peer, { t: 'del', id: ctlID(), ref: m.id });
         emit('msg_del', { peer: m.peer, id: m.id });
         return ok({});
       }
