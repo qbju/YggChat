@@ -222,6 +222,7 @@ func (s *Store) resetData() {
 	s.Contacts, s.Messages, s.Blocked, s.Groups, s.Ctl = nil, nil, nil, nil, nil
 	s.NostrOn, s.NostrRelays, s.NostrLegacy, s.PowStrict = false, nil, false, false
 	s.Joins, s.Gone, s.Early, s.GDel = nil, nil, nil, nil
+	s.GDelH, s.NRecall = nil, nil
 	s.JGen = ""
 }
 
@@ -465,6 +466,7 @@ func (a *App) resetIdentity() error {
 	a.store.Domain = ""
 	a.store.Blocked = map[string]bool{}
 	a.store.Joins, a.store.Gone, a.store.Early, a.store.GDel = nil, nil, nil, nil
+	a.store.GDelH = nil // (pending recalls stay: they only delete boxes we parked)
 	a.store.save()
 	a.store.mu.Unlock()
 	go func() {

@@ -60,6 +60,7 @@ function makeNode(opts = {}) {
     yggNostrOpen: opts.nostrOpen || (() => ({ error: 'no' })),
     yggNostrWrap: () => '',
   };
+  if (opts.wasm) Object.assign(ctx, opts.wasm(addr)); // extra / replaced fake wasm exports
   ctx.window = ctx; ctx.globalThis = ctx; ctx.self = ctx;
   vm.createContext(ctx);
   vm.runInContext(SRC, ctx, { filename: 'shim.js' });

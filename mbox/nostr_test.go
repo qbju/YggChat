@@ -6,11 +6,15 @@ package mbox
 import (
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/btcsuite/btcd/btcec/v2/schnorr"
 )
 
 func TestNostrPairTagAndPadding(t *testing.T) {
@@ -57,4 +61,62 @@ func TestNostrPairTagAndPadding(t *testing.T) {
 	if len(sizes) != 1 {
 		t.Fatalf("payload sizes leak: %v", sizes)
 	}
+}
+
+// The sender can recall its box: the deletion is signed by the box's own key
+// (the same key NostrOpen gives the recipient), so relays accept it (NIP-09).
+func TestNostrDeleteBySender(t *testing.T) {
+	bpub, bpriv, _ := ed25519.GenerateKey(rand.Reader)
+	_, apriv, _ := ed25519.GenerateKey(rand.Reader)
+	for _, legacy := range []bool{false, true} {
+		ev, id, nk, err := NostrWrapKey(bpub, apriv, []byte(`{"t":"msg","id":"x1","text":"hi"}`), legacy)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var e Event
+		json.Unmarshal([]byte(ev), &e)
+		if e.ID != id {
+			t.Fatal("id mismatch")
+		}
+		del, err := NostrDelete(nk, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var d Event
+		json.Unmarshal([]byte(del), &d)
+		if d.Kind != 5 || d.PubKey != e.PubKey || d.Tags[0][0] != "e" || d.Tags[0][1] != id {
+			t.Fatalf("bad deletion %s", del)
+		}
+		if !checkSig(d) {
+			t.Fatal("deletion signature invalid")
+		}
+		_, _, _, rdel, err := NostrOpen(ev, bpriv)
+		var r Event
+		json.Unmarshal([]byte(rdel), &r)
+		if err != nil || r.PubKey != d.PubKey {
+			t.Fatal("recipient's deletion uses another key")
+		}
+	}
+	if _, err := NostrDelete("zz", "00"); err == nil {
+		t.Fatal("bad key accepted")
+	}
+}
+
+func checkSig(e Event) bool {
+	pkb, err1 := hex.DecodeString(e.PubKey)
+	sb, err2 := hex.DecodeString(e.Sig)
+	if err1 != nil || err2 != nil {
+		return false
+	}
+	pk, err := schnorr.ParsePubKey(pkb)
+	if err != nil {
+		return false
+	}
+	sig, err := schnorr.ParseSignature(sb)
+	if err != nil {
+		return false
+	}
+	ser := marshalNoEsc([]any{0, e.PubKey, e.CreatedAt, e.Kind, e.Tags, e.Content})
+	h := sha256.Sum256(ser)
+	return hex.EncodeToString(h[:]) == e.ID && sig.Verify(h[:], pk)
 }

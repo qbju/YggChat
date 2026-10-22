@@ -8,6 +8,7 @@
 package main
 
 import (
+	"crypto/ed25519"
 	"encoding/json"
 	"log"
 	"net"
@@ -83,6 +84,14 @@ func (a *App) watchSys() {
 
 func (a *App) pub() []byte {
 	if a.sys {
+		return nil
+	}
+	if a.core == nil {
+		// Not started (unit tests): a late hello from a retry goroutine used
+		// to crash the test binary here.
+		if a.cfg != nil && len(a.cfg.PrivateKey) == ed25519.PrivateKeySize {
+			return ed25519.PrivateKey(a.cfg.PrivateKey).Public().(ed25519.PublicKey)
+		}
 		return nil
 	}
 	return a.core.PublicKey()

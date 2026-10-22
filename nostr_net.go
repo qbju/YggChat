@@ -136,37 +136,19 @@ const maxFetchEvents = 2000 // per relay and fetch
 
 func itoa(n int) string { b, _ := json.Marshal(n); return string(b) }
 
-// nostrPut parks m on the relays if the feature is on and we know the peer's key.
-func (a *App) nostrPut(m Message) bool {
-	relays := a.nostrRelays()
-	if relays == nil || m.Img != "" {
-		return false
+// nostrPut parks m on the relays if the feature is on and we know the peer's
+// key. It returns the boxes made (none: not parked).
+func (a *App) nostrPut(m Message) []nostrRef {
+	if m.Img != "" {
+		return nil
 	}
 	a.store.mu.Lock()
-	c := a.store.Contacts[m.Peer]
-	legacy := a.store.NostrLegacy
 	big := m.Grp != "" && len(a.store.Groups[m.Grp].Members) > nostrGroupMax
 	a.store.mu.Unlock()
 	if big {
-		return false // don't flood the relays with one copy per member of a big group
+		return nil // don't flood the relays with one copy per member of a big group
 	}
-	pk, err := hex.DecodeString(c.PK)
-	if err != nil || len(pk) != 32 {
-		return false
-	}
-	wb, _ := json.Marshal(a.msgWire(m))
-	ev, err := mbox.NostrWrap(pk, a.privKey(), wb)
-	if err != nil {
-		return false
-	}
-	ok := nostrPublish(relays, ev)
-	if legacy {
-		// A second box with the old static tag, for peers still on v0.12.
-		if lev, err := mbox.NostrWrapLegacy(pk, a.privKey(), wb); err == nil {
-			ok = nostrPublish(relays, lev) || ok
-		}
-	}
-	return ok
+	return a.nostrPutWire(m.Peer, a.msgWire(m))
 }
 
 var nostrSeen sync.Map // event id -> time handled (unix)
@@ -233,20 +215,25 @@ func (a *App) nostrFetch() {
 		}
 		from, pk, wb, del, err := mbox.NostrOpen(ev, a.privKey())
 		var w wire
-		if err != nil || json.Unmarshal(wb, &w) != nil || w.T != "msg" || strings.TrimSpace(from) == "" {
-			continue
+		if err != nil || json.Unmarshal(wb, &w) != nil || (w.T != "msg" && w.T != "del" && w.T != "edit") || strings.TrimSpace(from) == "" {
+			continue // (an unsend / edit is parked too since v0.19.4; older nodes skip it)
 		}
 		a.learnPK(from, hex.EncodeToString(pk))
 		ps = append(ps, parked{id, from, del, w})
 	}
 	sort.SliceStable(ps, func(i, j int) bool {
+		// Unsends / edits first: they leave a tombstone / early edit, so a
+		// copy of the post fetched in the same round can't show (v0.19.4).
+		if ci, cj := ps[i].w.T != "msg", ps[j].w.T != "msg"; ci != cj {
+			return ci
+		}
 		if ps[i].w.TS != ps[j].w.TS {
 			return ps[i].w.TS < ps[j].w.TS
 		}
 		return ps[i].w.ID < ps[j].w.ID
 	})
 	for _, p := range ps {
-		if a.handleMsg(p.from, p.w) {
+		if a.handleParked(p.from, p.w) {
 			nostrSeen.Store(p.id, time.Now().Unix())
 			go a.sendWire(p.from, wire{T: "ack", ID: p.w.ID}) // tell the sender directly if it is online
 			if p.del != "" {
@@ -256,9 +243,29 @@ func (a *App) nostrFetch() {
 	}
 }
 
+// handleParked applies a packet read from a box (the sender is proven by the
+// box's signature, like a datagram's source address). Returns true to ack.
+func (a *App) handleParked(from string, w wire) bool {
+	if w.T == "msg" {
+		return a.handleMsg(from, w)
+	}
+	a.store.mu.Lock()
+	blocked := a.store.Blocked[from]
+	a.store.mu.Unlock()
+	if blocked {
+		return false
+	}
+	if w.G != "" {
+		// Group unsend (groupunsend.go); group posts can't be edited remotely.
+		return w.T == "del" && a.onGroupDel(from, w) || w.T == "edit" && validID(w.ID)
+	}
+	return a.onCtl(from, w)
+}
+
 func (a *App) nostrLoop() {
 	time.Sleep(5 * time.Second)
 	for {
+		a.runRecall() // deletions made offline or refused by a relay
 		a.nostrFetch()
 		time.Sleep(3 * time.Minute)
 	}

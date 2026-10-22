@@ -20,8 +20,9 @@ package mbox
 // time travels inside the box. Relays still see the poster's and fetcher's
 // IP addresses and, within one fetch, which tags one client asks for.
 //
-// The throw-away key travels inside the box, so only the recipient can
-// publish the NIP-09 deletion after reading. NIP-40 expiration makes
+// The throw-away key travels inside the box, so only the recipient (and the
+// sender, who keeps it to recall an unsent message, v0.19.4) can publish the
+// NIP-09 deletion. NIP-40 expiration makes
 // well-behaved relays drop it after the TTL anyway.
 
 import (
@@ -159,19 +160,46 @@ func signEvent(sk *btcec.PrivateKey, e *Event) error {
 
 // NostrWrap returns a signed Nostr event (JSON) carrying wb for recipient `to`.
 func NostrWrap(to ed25519.PublicKey, priv ed25519.PrivateKey, wb []byte) (string, error) {
-	return nostrWrap(to, priv, wb, false)
+	ev, _, _, err := nostrWrap(to, priv, wb, false)
+	return ev, err
+}
+
+// NostrWrapKey is NostrWrap (or NostrWrapLegacy) that also returns the event
+// id and its throw-away key (hex), so the sender can recall the box later
+// with NostrDelete (e.g. when the message is unsent).
+func NostrWrapKey(to ed25519.PublicKey, priv ed25519.PrivateKey, wb []byte, legacy bool) (ev, id, nk string, err error) {
+	return nostrWrap(to, priv, wb, legacy)
+}
+
+// NostrDelete returns a signed NIP-09 deletion (JSON) of event id, signed by
+// the box's throw-away key nk (hex), as NostrOpen gives the recipient.
+func NostrDelete(nk, id string) (string, error) {
+	kb, err := hex.DecodeString(nk)
+	if err != nil || len(kb) != 32 {
+		return "", errors.New("bad key")
+	}
+	if ib, err := hex.DecodeString(id); err != nil || len(ib) != 32 {
+		return "", errors.New("bad id")
+	}
+	sk, _ := btcec.PrivKeyFromBytes(kb)
+	d := &Event{CreatedAt: time.Now().Unix(), Kind: 5, Tags: [][]string{{"e", id}, {"k", itoa(NostrKind)}}}
+	if err := signEvent(sk, d); err != nil {
+		return "", err
+	}
+	return string(marshalNoEsc(d)), nil
 }
 
 // NostrWrapLegacy is NostrWrap with the pre-v0.13 static tag and no
 // back-dating, so v0.12 receivers find it. Opt-in; remove in v0.24.
 func NostrWrapLegacy(to ed25519.PublicKey, priv ed25519.PrivateKey, wb []byte) (string, error) {
-	return nostrWrap(to, priv, wb, true)
+	ev, _, _, err := nostrWrap(to, priv, wb, true)
+	return ev, err
 }
 
-func nostrWrap(to ed25519.PublicKey, priv ed25519.PrivateKey, wb []byte, legacy bool) (string, error) {
+func nostrWrap(to ed25519.PublicKey, priv ed25519.PrivateKey, wb []byte, legacy bool) (ev, id, nk string, err error) {
 	sk, err := btcec.NewPrivateKey()
 	if err != nil {
-		return "", err
+		return "", "", "", err
 	}
 	// Put the deletion key inside the box together with the packet, padded so
 	// the box size only reveals a coarse bucket.
@@ -191,12 +219,12 @@ func nostrWrap(to ed25519.PublicKey, priv ed25519.PrivateKey, wb []byte, legacy 
 	inner, _ := json.Marshal(in)
 	box, err := Seal(to, priv, inner)
 	if err != nil {
-		return "", err
+		return "", "", "", err
 	}
 	now := time.Now().Unix()
 	tag, err := NostrPairTag(priv, to, day(now))
 	if err != nil {
-		return "", err
+		return "", "", "", err
 	}
 	created := now - int64(randInt(nostrBackdate))
 	if legacy {
@@ -207,9 +235,9 @@ func nostrWrap(to ed25519.PublicKey, priv ed25519.PrivateKey, wb []byte, legacy 
 		{"expiration", itoa(now + NostrTTL - int64(randInt(12*3600)))},
 	}}
 	if err := signEvent(sk, e); err != nil {
-		return "", err
+		return "", "", "", err
 	}
-	return string(marshalNoEsc(e)), nil
+	return string(marshalNoEsc(e)), e.ID, hex.EncodeToString(sk.Serialize()), nil
 }
 
 // NostrOpen opens an event addressed to us. It returns the sender's address and

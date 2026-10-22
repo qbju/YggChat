@@ -301,6 +301,35 @@ func nostrWrap(this js.Value, args []js.Value) any {
 	}
 	return ev
 }
+
+// yggNostrWrapK(toPkHex, wireJSON, legacy) -> JSON {ev, id, nk} | "": like
+// yggNostrWrap, plus the box's id and throw-away key, so the box can be
+// recalled with yggNostrDel(nk, id) -> NIP-09 deletion JSON | "" (v0.19.4).
+func nostrWrapK(this js.Value, args []js.Value) any {
+	if len(args) < 2 {
+		return ""
+	}
+	pk, err := hex.DecodeString(args[0].String())
+	if err != nil || len(pk) != ed25519.PublicKeySize {
+		return ""
+	}
+	ev, id, nk, err := mbox.NostrWrapKey(pk, priv, []byte(args[1].String()), len(args) > 2 && args[2].Truthy())
+	if err != nil {
+		return ""
+	}
+	b, _ := json.Marshal(map[string]string{"ev": ev, "id": id, "nk": nk})
+	return string(b)
+}
+func nostrDel(this js.Value, args []js.Value) any {
+	if len(args) < 2 {
+		return ""
+	}
+	d, err := mbox.NostrDelete(args[0].String(), args[1].String())
+	if err != nil {
+		return ""
+	}
+	return d
+}
 func nostrOpen(this js.Value, args []js.Value) any {
 	from, pk, w, del, err := mbox.NostrOpen(args[0].String(), priv)
 	if err != nil {
@@ -341,6 +370,8 @@ func main() {
 	js.Global().Set("yggTag", js.FuncOf(tag))
 	js.Global().Set("yggNostrWrap", js.FuncOf(nostrWrap))
 	js.Global().Set("yggNostrOpen", js.FuncOf(nostrOpen))
+	js.Global().Set("yggNostrWrapK", js.FuncOf(nostrWrapK))
+	js.Global().Set("yggNostrDel", js.FuncOf(nostrDel))
 	js.Global().Set("yggNostrTag", js.FuncOf(nostrTag))
 	js.Global().Set("yggNostrTags", js.FuncOf(nostrTags))
 	js.Global().Set("yggNostrDefaults", js.FuncOf(nostrDefaults))

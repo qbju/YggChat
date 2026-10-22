@@ -26,9 +26,11 @@ package main
 
 import (
 	"crypto/ed25519"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
+	"sort"
 	"strconv"
 	"time"
 
@@ -119,12 +121,61 @@ func (s *Store) markGDelLocked(gid, by, pid string, t gTomb) {
 	}
 	t.Exp = now + tombKeep
 	s.GDel[k] = t
+	s.markGDelHLocked(k, now)
+}
+
+// The full tombstones go after 10 days (they are what is passed on), but an
+// old peer (v0.19.3 and older keeps unsent posts) could still relay the post
+// after that. So a short hash of every deleted post is kept for 90 days
+// (bounded): a post on that list is never shown again here (v0.19.4).
+const (
+	gdelHKeep = 90 * 86400
+	gdelHMax  = 10000
+)
+
+func gdelHash(k string) string {
+	h := sha256.Sum256([]byte("ygg-gdelh\n" + k))
+	return hex.EncodeToString(h[:12])
+}
+
+// markGDelHLocked: caller holds s.mu.
+func (s *Store) markGDelHLocked(k string, now int64) {
+	if s.GDelH == nil {
+		s.GDelH = map[string]int64{}
+	}
+	if len(s.GDelH) >= gdelHMax {
+		for x, e := range s.GDelH {
+			if e <= now {
+				delete(s.GDelH, x)
+			}
+		}
+		if len(s.GDelH) >= gdelHMax { // still full: the ones that go soonest make room
+			type he struct {
+				k string
+				e int64
+			}
+			all := make([]he, 0, len(s.GDelH))
+			for x, e := range s.GDelH {
+				all = append(all, he{x, e})
+			}
+			sort.Slice(all, func(i, j int) bool { return all[i].e < all[j].e })
+			for _, x := range all[:len(all)-gdelHMax*9/10] {
+				delete(s.GDelH, x.k)
+			}
+		}
+	}
+	s.GDelH[gdelHash(k)] = now + gdelHKeep
 }
 
 // isGDelLocked: caller holds s.mu.
 func (s *Store) isGDelLocked(gid, by, pid string) bool {
-	t, ok := s.GDel[gdelKey(gid, by, pid)]
-	return ok && t.Exp > time.Now().Unix()
+	now := time.Now().Unix()
+	k := gdelKey(gid, by, pid)
+	if t, ok := s.GDel[k]; ok && t.Exp > now {
+		return true
+	}
+	e, ok := s.GDelH[gdelHash(k)]
+	return ok && e > now
 }
 
 func (a *App) groupGone(gid, by, pid string) bool {
@@ -134,9 +185,11 @@ func (a *App) groupGone(gid, by, pid string) bool {
 }
 
 // dropGroupPostLocked removes author's post pid from the group chat (and,
-// for our own post, the copies not delivered yet). Caller holds s.mu.
-func (a *App) dropGroupPostLocked(gid, by, pid string) bool {
-	key, found := gKey(gid), false
+// for our own post, the copies not delivered yet). It returns whether the
+// post was shown, the Nostr boxes of the dropped copies (to recall) and the
+// members whose copy went out as a box. Caller holds s.mu.
+func (a *App) dropGroupPostLocked(gid, by, pid string) (found bool, refs []nostrRef, parked map[string]bool) {
+	key := gKey(gid)
 	kept := a.store.Messages[:0]
 	for _, m := range a.store.Messages {
 		if m.Peer == key && m.From == by && samePost(m.ID, pid) && m.Sys == "" {
@@ -144,12 +197,20 @@ func (a *App) dropGroupPostLocked(gid, by, pid string) bool {
 			continue
 		}
 		if by == a.addr && m.Hid && m.Grp == gid && m.Of == postID(pid) {
-			continue // never goes out now
+			// never goes out now; a box already parked is recalled (v0.19.4)
+			refs = append(refs, m.NEv...)
+			if m.Nostr {
+				if parked == nil {
+					parked = map[string]bool{}
+				}
+				parked[m.Peer] = true
+			}
+			continue
 		}
 		kept = append(kept, m)
 	}
 	a.store.Messages = kept
-	return found
+	return
 }
 
 // groupUnsend deletes post pid by author for everyone (API). Caller checked
@@ -173,7 +234,7 @@ func (a *App) groupUnsend(gid, by, pid string) error {
 	}
 	now := time.Now().Unix()
 	a.store.markGDelLocked(gid, by, pid, gTomb{At: now, Dby: dby, PK: pk, Sg: sg})
-	a.dropGroupPostLocked(gid, by, pid)
+	_, refs, parked := a.dropGroupPostLocked(gid, by, pid)
 	var to []string
 	for _, m := range g.Members {
 		if m != a.addr {
@@ -183,13 +244,17 @@ func (a *App) groupUnsend(gid, by, pid string) error {
 	a.store.save()
 	a.store.mu.Unlock()
 	a.broadcast("msg_del", map[string]string{"peer": gKey(gid), "id": pid})
-	a.queueGroupCtl(to, wire{T: "del", G: gid, Ref: pid, By: by, Dby: dby, PK: pk, Sg: sg, TS: now})
+	a.nostrRecall(refs)
+	// A member whose copy went out as a Nostr box gets the unsend that way
+	// too when it can't be reached (it may only come back while we're away).
+	a.queueGroupCtl(to, wire{T: "del", G: gid, Ref: pid, By: by, Dby: dby, PK: pk, Sg: sg, TS: now}, parked)
 	return nil
 }
 
 // queueGroupCtl stores one control packet per member (each with its own id)
-// and sends them, at most groupSem at once.
-func (a *App) queueGroupCtl(peers []string, w wire) {
+// and sends them, at most groupSem at once. park: members to park it for
+// (see ctlItem.Park).
+func (a *App) queueGroupCtl(peers []string, w wire, park map[string]bool) {
 	if len(peers) == 0 {
 		return
 	}
@@ -200,11 +265,14 @@ func (a *App) queueGroupCtl(peers []string, w wire) {
 		want[p] = true
 	}
 	kept := a.store.Ctl[:0]
+	var gone []ctlItem
 	for _, c := range a.store.Ctl {
 		if c.W.G != "" && c.W.TS > 0 && c.W.TS < old {
+			gone = append(gone, c)
 			continue // a member who never came back
 		}
 		if want[c.Peer] && c.W.Ref == w.Ref && c.W.G == w.G {
+			gone = append(gone, c)
 			continue
 		}
 		kept = append(kept, c)
@@ -213,11 +281,12 @@ func (a *App) queueGroupCtl(peers []string, w wire) {
 	for i, p := range peers {
 		x := w
 		x.ID = base + "-" + strconv.Itoa(i)
-		kept = append(kept, ctlItem{Peer: p, W: x})
+		kept = append(kept, ctlItem{Peer: p, W: x, Park: park[p]})
 	}
 	a.store.Ctl = kept
 	a.store.save()
 	a.store.mu.Unlock()
+	a.nostrRecall(ctlRefs(gone))
 	for _, p := range peers {
 		go func(p string) {
 			groupSem <- struct{}{}
@@ -266,13 +335,14 @@ func (a *App) onGroupDel(from string, w wire) bool {
 		t.At = w.TS
 	}
 	a.store.markGDelLocked(w.G, by, pid, t)
-	found := a.dropGroupPostLocked(w.G, by, pid)
-	if found {
+	found, refs, _ := a.dropGroupPostLocked(w.G, by, pid)
+	if found || len(refs) > 0 {
 		a.store.save()
 	} else {
 		a.store.saveSoon()
 	}
 	a.store.mu.Unlock()
+	a.nostrRecall(refs) // moderation of our own post: our boxes of it go too
 	if found {
 		a.broadcast("msg_del", map[string]string{"peer": gKey(w.G), "id": pid})
 	}

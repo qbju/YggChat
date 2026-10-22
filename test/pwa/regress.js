@@ -115,6 +115,76 @@ const postSig = (kp, gid, pid, ts, text) => Buffer.from(Y.signHex(kp, 'ygg-gpost
     ok(!n.st.messages.some(m => m.text === 'no id' || m.text === 'empty id'), 'msg without id dropped');
     ok(!n.sent.some(x => x.w.t === 'ack' && !x.w.id), 'no ack without id');
   }
+
+  { // 10. v0.19.4: unsent posts parked on Nostr are recalled (NIP-09 by the box key), the unsend is parked too,
+    // and a receiver reading the boxes never shows the post, also from a relay that ignores deletions.
+    for (const ignoreDel of [false, true]) {
+      const relay = new Map(); let dels = 0;
+      class RWS { constructor() { setTimeout(() => this.onopen && this.onopen(), 0); }
+        send(r) { const q = JSON.parse(r);
+          if (q[0] === 'EVENT') { const e = q[1]; if (e.kind === 5) { dels++; if (!ignoreDel) for (const t of e.tags) if (t[0] === 'e' && relay.has(t[1]) && relay.get(t[1]).pubkey === e.pubkey) relay.delete(t[1]); } else relay.set(e.id, e);
+            setTimeout(() => this.onmessage({ data: JSON.stringify(['OK', e.id, true, '']) }), 0); }
+          if (q[0] === 'REQ') setTimeout(() => { for (const e of relay.values()) this.onmessage({ data: JSON.stringify(['EVENT', q[1], e]) }); this.onmessage({ data: JSON.stringify(['EOSE', q[1]]) }); }, 0); }
+        close() {} }
+      const kpOf = a => Object.values(K).find(k => k.addr === a);
+      const fakeW = me => ({
+        yggNostrWrapK: (pk, pkt) => { const nk = crypto.randomBytes(32).toString('hex'), id = crypto.randomBytes(32).toString('hex');
+          return JSON.stringify({ ev: JSON.stringify({ id, pubkey: 'P' + nk, kind: 1059, tags: [['p', 't1']], content: JSON.stringify({ from: me, pk: kpOf(me).pk, w: pkt }) }), id, nk }); },
+        yggNostrDel: (nk, id) => JSON.stringify({ id: sha(nk + id), pubkey: 'P' + nk, kind: 5, tags: [['e', id]] }),
+        yggNostrOpen: ev => { const c = JSON.parse(JSON.parse(ev).content); return { from: c.from, pk: c.pk, w: c.w, del: '' }; },
+      });
+      const ME = K.ME.addr;
+      const n = await node({ nostrOn: true, contacts: { [A]: { addr: A, nick: 'alice', shared: true, hasprof: true, pk: K.A.pk } } }, { WebSocket: RWS, wasm: fakeW });
+      const m = { id: '18f00000000000b1', peer: A, from: ME, nick: 'me', text: 'secret', ts: now(), out: true, status: 'queued' };
+      n.st.messages.push(m);
+      await n.T.nostrPark(m); await n.settle(10);
+      const mm = n.st.messages.find(x => x.id === m.id);
+      ok(relay.size === 1 && mm && mm.nostr && mm.nev && mm.nev.length === 1, 'pwa: parked box recorded ' + ignoreDel);
+      const r = await n.api('message/delete', { Peer: A, ID: m.id, Everyone: true });
+      await wait(30); await n.settle(10);
+      ok(r.status === 200 && dels >= 1 && (ignoreDel || relay.size === 0), 'pwa: box recalled on unsend ' + ignoreDel);
+      const c = n.st.ctl.find(x => x.peer === A && x.w.t === 'del');
+      ok(c && c.park, 'pwa: unsend marked to park');
+      await n.T.parkCtl(A); await n.settle(5);
+      ok(c.nev && c.nev.length === 1, 'pwa: unsend parked');
+      // a group post: the parked copy for A is recalled, the unsend parked for A only
+      const vis = await n.api('send', { To: 'g:' + G1, Text: 'group oops' });
+      await wait(20);
+      const cp = n.st.messages.find(x => x.hid && x.peer === A && x.of === vis.json.id);
+      if (cp) { cp.status = 'queued'; await n.T.nostrPark(cp); }
+      const before = relay.size;
+      await n.api('message/delete', { Peer: 'g:' + G1, ID: vis.json.id, Everyone: true }); await wait(30); await n.settle(10);
+      ok(cp && cp.nev && (ignoreDel || relay.size === before - 1), 'pwa: group copy recalled ' + ignoreDel);
+      const gc = n.st.ctl.filter(x => x.w.g === G1);
+      ok(gc.length === 2 && gc.every(x => !!x.park === (x.peer === A)), 'pwa: group unsend parked for the parked member only');
+      await n.T.parkCtl(A); await n.settle(5);
+      // the receiver (A) fetches: post never shows, tombstones set, unsend acked
+      const ra = makeNode({ kp: K.A, store: { key: K.A.priv, peers: ['wss://x.test/'], nick: 'a', nostrOn: true, contacts: { [ME]: { addr: ME, nick: 'me', shared: true, hasprof: true, pk: K.ME.pk } }, messages: [], groups: { [G1]: { id: G1, name: 'g1', members: [ME, A, B].sort(), owner: ME, v: 1, sv: 1, set: {} } }, blocked: {} }, WebSocket: RWS, wasm: fakeW });
+      await ra.ready();
+      await ra.T.nostrFetch(); await ra.settle(20); await wait(30);
+      ok(!ra.st.messages.some(x => x.id === m.id), 'pwa receiver: unsent 1:1 not shown ' + ignoreDel);
+      ok(!!ra.st.gone[ME + '/' + m.id], 'pwa receiver: 1:1 unsend from box applied');
+      ok(!ra.st.messages.some(x => x.peer === 'g:' + G1 && x.text === 'group oops'), 'pwa receiver: unsent group post not shown ' + ignoreDel);
+      ok(ra.sent.some(x => x.peer === ME && x.w.t === 'ack' && x.w.id === c.w.id), 'pwa receiver: parked unsend acked');
+      // the author hears the ack: queue drains, the parked unsend is recalled
+      n.pkt(A, { t: 'ack', id: c.w.id }); await wait(30); await n.settle(10);
+      ok(!n.st.ctl.some(x => x.w.id === c.w.id) && (ignoreDel || ![...relay.values()].some(e => e.content.includes(c.w.id))), 'pwa: acked unsend drained and recalled');
+      ok(!(n.st.nrecall || []).length, 'pwa: recall queue empty');
+    }
+    // the 90-day hash list outlives the 10-day tombstone (B is a co-admin, so its history relay is taken)
+    const n = await node({ groups: { [G1]: { id: G1, name: 'g1', members: [K.ME.addr, A, B].sort(), owner: K.ME.addr, admins: [B], v: 1, sv: 1, set: {} } } });
+    const pid = '18f00000000000c1', ts = now() - 100, text = 'old';
+    n.pkt(A, { t: 'msg', id: pid + 'g1', g: G1, text, ts, sg: postSig(K.A, G1, pid, ts, text), pk: K.A.pk }); await wait(20); await n.settle(10);
+    const sg = Buffer.from(Y.signHex(K.A, 'ygg-gdel1\n' + G1 + '\n' + pid + '\n' + A + '\n'), 'hex').toString('base64').replace(/=+$/, '');
+    n.pkt(A, { t: 'del', id: 'cdel1', g: G1, ref: pid, by: A, pk: K.A.pk, sg, ts: now() }); await wait(20); await n.settle(10);
+    ok(!n.st.messages.some(x => x.text === text) && Object.keys(n.st.gdelh || {}).length === 1, 'pwa: unsend leaves a hash');
+    const pid2 = '18f00000000000c2';
+    n.pkt(B, { t: 'ghs', g: G1, id: pid2, by: A, text: 'control', ts, sg: postSig(K.A, G1, pid2, ts, 'control'), pk: K.A.pk }); await wait(20); await n.settle(10);
+    ok(n.st.messages.some(x => x.text === 'control'), 'pwa: control relay is taken');
+    for (const k in n.st.gdel) n.st.gdel[k].x = now() - 1;
+    n.pkt(B, { t: 'ghs', g: G1, id: pid, by: A, text, ts, sg: postSig(K.A, G1, pid, ts, text), pk: K.A.pk }); await wait(20); await n.settle(10);
+    ok(!n.st.messages.some(x => x.text === text), 'pwa: relay after the tombstone expired does not resurrect');
+  }
   clearInterval(keep);
   console.log(passes + ' passed, ' + fails + ' failed');
   process.exit(fails ? 1 : 0);

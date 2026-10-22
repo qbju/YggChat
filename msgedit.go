@@ -21,6 +21,10 @@ import (
 type ctlItem struct {
 	Peer string `json:"peer"`
 	W    wire   `json:"w"`
+	// Park: the message went out as a Nostr box, so this goes that way too
+	// when the peer can't be reached; NEv: the boxes it was parked in (v0.19.4).
+	Park bool       `json:"park,omitempty"`
+	NEv  []nostrRef `json:"nev,omitempty"`
 }
 
 const maxText = 8000
@@ -121,21 +125,25 @@ func (a *App) stillOut(peer, id string) bool {
 
 func ctlID() string { return fmt.Sprintf("c%x", time.Now().UnixNano()) }
 
-// queueCtl stores a control packet for peer and tries to send it now.
-func (a *App) queueCtl(peer string, w wire) {
+// queueCtl stores a control packet for peer and tries to send it now. park:
+// the message it is about went out as a Nostr box (see ctlItem.Park).
+func (a *App) queueCtl(peer string, w wire, park bool) {
 	a.store.mu.Lock()
 	// A newer edit of the same message replaces an unsent older one; a delete
 	// replaces any pending edit.
 	kept := a.store.Ctl[:0]
+	var old []ctlItem
 	for _, c := range a.store.Ctl {
 		if c.Peer == peer && c.W.Ref == w.Ref {
+			old = append(old, c)
 			continue
 		}
 		kept = append(kept, c)
 	}
-	a.store.Ctl = append(kept, ctlItem{Peer: peer, W: w})
+	a.store.Ctl = append(kept, ctlItem{Peer: peer, W: w, Park: park})
 	a.store.save()
 	a.store.mu.Unlock()
+	a.nostrRecall(ctlRefs(old)) // a parked older edit is replaced
 	go a.flushCtl(peer)
 }
 
@@ -166,6 +174,7 @@ func (a *App) flushCtl(peer string) {
 	defer func() { a.flMu.Lock(); delete(a.ctlBusy, peer); a.flMu.Unlock() }()
 	for _, c := range a.pendingCtl(peer) {
 		if !a.sendCtl(c, 6) {
+			go a.parkCtl(peer) // the peer may only come back while we're away
 			return
 		}
 	}
@@ -180,14 +189,18 @@ func (a *App) sendCtl(c ctlItem, tries int) bool {
 		case <-ch:
 			a.store.mu.Lock()
 			kept := a.store.Ctl[:0]
+			var done []ctlItem
 			for _, x := range a.store.Ctl {
 				if !(x.Peer == c.Peer && x.W.ID == c.W.ID) {
 					kept = append(kept, x)
+				} else {
+					done = append(done, x)
 				}
 			}
 			a.store.Ctl = kept
 			a.store.save()
 			a.store.mu.Unlock()
+			a.nostrRecall(ctlRefs(done)) // its parked copy isn't needed now
 			return true
 		case <-time.After(2500 * time.Millisecond):
 		}
@@ -304,7 +317,7 @@ func (a *App) msgEditHandlers(mux *http.ServeMux) {
 		a.store.save()
 		a.store.mu.Unlock()
 		if remote {
-			a.queueCtl(peer, wire{T: "edit", ID: ctlID(), Ref: cp.ID, Text: cp.Text})
+			a.queueCtl(peer, wire{T: "edit", ID: ctlID(), Ref: cp.ID, Text: cp.Text}, cp.Nostr)
 		}
 		a.broadcast("msg_upd", cp)
 		json.NewEncoder(w).Encode(cp)
@@ -373,18 +386,27 @@ func (a *App) msgEditHandlers(mux *http.ServeMux) {
 		}
 		// Drop pending edits for it; an unsent (queued) message just never goes out.
 		kept := a.store.Ctl[:0]
+		var old []ctlItem
 		for _, c := range a.store.Ctl {
 			if !(c.Peer == peer && c.W.Ref == m.ID) {
 				kept = append(kept, c)
+			} else {
+				old = append(old, c)
 			}
 		}
 		a.store.Ctl = kept
 		a.store.save()
 		a.store.mu.Unlock()
+		// Unsend: our boxes of it (and of its pending edits) are recalled
+		// from the relays, so it can't be fetched later (v0.19.4). A local
+		// delete leaves them, as before (a parked message still arrives).
+		if req.Everyone && m.Out {
+			a.nostrRecall(append(m.NEv, ctlRefs(old)...))
+		}
 		// "queued" may still have reached them (a lost ack, a retry or a Nostr
 		// box in flight), so everything but a failed send gets the unsend.
 		if req.Everyone && m.Sys == "" && m.Status != "failed" {
-			a.queueCtl(peer, wire{T: "del", ID: ctlID(), Ref: m.ID})
+			a.queueCtl(peer, wire{T: "del", ID: ctlID(), Ref: m.ID}, m.Nostr)
 		}
 		a.broadcast("msg_del", map[string]string{"peer": peer, "id": m.ID})
 		w.Write([]byte("{}"))
