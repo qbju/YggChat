@@ -132,6 +132,13 @@ func (a *App) onJoin(from string, w wire, g Group, known bool) {
 		a.answerInfo(from, g)
 		return
 	}
+	if !strangerOK(from) {
+		// Join requests from non-members share the message-request limit:
+		// each may be stored (approval list) and answered. Over it we stay
+		// silent; the joiner asks again (v0.19.3).
+		a.store.mu.Unlock()
+		return
+	}
 	if len(g.Members) >= groupMax(g) {
 		no(fmt.Sprintf("グループが満員です（最大%d人）", groupMax(g)))
 		return

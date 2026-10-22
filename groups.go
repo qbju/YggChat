@@ -493,8 +493,15 @@ func (a *App) onGroupMsg(from string, w wire, img string) bool {
 				stubs++
 			}
 		}
+		c, ok := a.store.Contacts[from]
+		accepted := ok && c.Shared && !c.Req
 		a.store.mu.Unlock()
 		if stubs >= maxStubs || !a.powCheck(from, w) {
+			return false
+		}
+		// Same request limit as 1:1 message requests: each placeholder is
+		// stored and rewrites the history file (v0.19.3).
+		if !accepted && !strangerOK(from) {
 			return false
 		}
 		a.store.mu.Lock()
@@ -508,7 +515,7 @@ func (a *App) onGroupMsg(from string, w wire, img string) bool {
 			return a.onGroupMsg(from, w, img) // it appeared meanwhile
 		}
 		// First we hear of it: keep it as an invitation until we know more.
-		c, ok := a.store.Contacts[from]
+		c, ok = a.store.Contacts[from]
 		g = Group{ID: w.G, Name: "グループ", Members: cleanMembers([]string{from}, a.addr), Req: !(ok && c.Shared && !c.Req), Stub: true}
 		a.store.Groups[w.G] = g
 		ask = true
@@ -873,7 +880,7 @@ func (a *App) onGroupCtl(from string, w wire) {
 			c, ok := a.store.Contacts[from]
 			jh, joining := a.joinHostLocked(w.G)
 			joining = joining && jh == from
-			if accepted := ok && c.Shared && !c.Req; !accepted && !joining && !g.Stub && !a.inviteRoomLocked(from) {
+			if accepted := ok && c.Shared && !c.Req; !accepted && !joining && !g.Stub && (!a.inviteRoomLocked(from) || !strangerOK(from)) {
 				a.store.mu.Unlock() // a stranger flooding us with invitations (v0.19.3)
 				return
 			}

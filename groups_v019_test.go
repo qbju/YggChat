@@ -18,6 +18,9 @@ const tAdm = "204:aaaa:bbbb:cccc:dddd:eeee:ffff:1111"
 func tApp(t *testing.T, me string) *App {
 	s := &Store{path: filepath.Join(t.TempDir(), "c.json")}
 	s.fix()
+	reqMu.Lock()
+	reqPeer, reqAll = map[string][]int64{}, nil // the request limiter is per process
+	reqMu.Unlock()
 	return &App{addr: me, store: s, subs: map[chan []byte]struct{}{}, acks: map[string]chan struct{}{}, inflight: map[string]bool{}, seen: map[string]bool{}, profAt: map[string]time.Time{}}
 }
 
