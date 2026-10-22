@@ -1533,7 +1533,7 @@ func main() {
 	// macOS/Linux desktops: open the UI in the default browser (the URL is printed too).
 	wantBrowser := !*cliMode && !*noWindow && runtime.GOOS != "windows" && runtime.GOOS != "android" && browserCmd(uiURL(*uiAddr), os.Getenv) != nil
 	if wantBrowser && apiUp(*uiAddr) {
-		fmt.Printf("YggChat is already running\n  open UI:      %s\n", uiURL(*uiAddr))
+		fmt.Printf("YggChat is already running\n  open UI:      %s\n", shownUIURL(*uiAddr, *dataDir, isCharDev(os.Stdout)))
 		openBrowser(uiURL(*uiAddr))
 		return
 	}
@@ -1698,7 +1698,7 @@ func main() {
 	a.vpnFWHandlers(mux, *dataDir)
 	a.lanHandlers(mux)
 	if !*cliMode {
-		fmt.Printf("YggChat\n  your address: %s\n  open UI:      %s\n", a.addr, uiURL(*uiAddr))
+		fmt.Printf("YggChat\n  your address: %s\n  open UI:      %s\n", a.addr, shownUIURL(*uiAddr, *dataDir, isCharDev(os.Stdout)))
 	}
 	ln, err := listenRetry(*uiAddr)
 	if err != nil {

@@ -74,7 +74,20 @@ type cli struct {
 var cliHTTP = &http.Client{Timeout: 30 * time.Second, Transport: keyTransport{}}
 
 // apiStatus is the HTTP status of GET /api/state on ui (0: nothing answers).
+// apiNoProof: something answers on ui but can't prove it holds our key
+// (another program, a node of another data directory, a node older than
+// v0.19.3). The key is never sent to it.
+const apiNoProof = -1
+
 func apiStatus(ui string) int {
+	if ok, answered := checkProof(ui); !answered {
+		return 0
+	} else if !ok {
+		return apiNoProof
+	}
+	proofMu.Lock()
+	proofAt[ui] = time.Now()
+	proofMu.Unlock()
 	c := &http.Client{Timeout: 1500 * time.Millisecond, Transport: keyTransport{}}
 	r, err := c.Get("http://" + ui + "/api/state")
 	if err != nil {
@@ -94,7 +107,10 @@ func apiUp(ui string) bool {
 		return true
 	}
 	if st != 0 && cliFlag(os.Args[1:]) {
-		if st == 401 || st == 403 {
+		if st == apiNoProof {
+			fmt.Fprintf(os.Stderr, "エラー: %s で動いているのは、このデータフォルダのYggChatノードではありません（別のデータフォルダのノード、別のプログラム、またはv0.19.2以前のノード）。鍵は送っていません。\n"+
+				"そのノードと同じ -data を指定するか、別の -ui ポートを使ってください（古いノードなら止めてから起動し直してください）。\n", ui)
+		} else if st == 401 || st == 403 {
 			fmt.Fprintf(os.Stderr, "エラー: %s で動いているノードは、別のデータフォルダのものです（データフォルダ/キーが違います）。\n"+
 				"そのノードと同じ -data を指定するか、別の -ui ポートを使ってください。\n", ui)
 		} else {

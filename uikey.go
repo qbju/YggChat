@@ -17,11 +17,16 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"io"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"time"
 )
 
 const uiKeyHeader = "X-YggChat-Key"
@@ -131,11 +136,79 @@ func keyGuard(addr string, h http.Handler) http.Handler {
 	})
 }
 
-// keyTransport adds the key to the CLI's own requests.
+// checkProof asks the program on host ("127.0.0.1:7780") for /api/proof
+// with a fresh nonce, without sending the key. ok: it holds our key.
+// answered: something speaks HTTP there at all.
+func checkProof(host string) (ok, answered bool) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil || uiKey == "" {
+		return false, false
+	}
+	n := hex.EncodeToString(b)
+	c := &http.Client{Timeout: 1500 * time.Millisecond}
+	r, err := c.Get("http://" + host + "/api/proof?n=" + n)
+	if err != nil {
+		return false, false
+	}
+	defer r.Body.Close()
+	var v struct{ Mac string }
+	body, _ := io.ReadAll(io.LimitReader(r.Body, 4096))
+	if r.StatusCode != 200 || json.Unmarshal(body, &v) != nil {
+		return false, true
+	}
+	got, err := hex.DecodeString(v.Mac)
+	want, _ := hex.DecodeString(uiProof(n))
+	return err == nil && hmac.Equal(got, want), true
+}
+
+// errNoProof: the program on the UI port can't prove it holds our key, so
+// the key is not sent to it.
+var errNoProof = errors.New("the program on the UI port can't prove it is this YggChat node (key not sent)")
+
+var (
+	proofMu sync.Mutex
+	proofAt = map[string]time.Time{}
+)
+
+// proofOK is checkProof, remembered for 2 s per host so a burst of CLI
+// requests doesn't double every round trip.
+func proofOK(host string) bool {
+	proofMu.Lock()
+	t, seen := proofAt[host]
+	proofMu.Unlock()
+	if seen && time.Since(t) < 2*time.Second {
+		return true
+	}
+	ok, _ := checkProof(host)
+	if ok {
+		proofMu.Lock()
+		proofAt[host] = time.Now()
+		proofMu.Unlock()
+	}
+	return ok
+}
+
+// keyTransport adds the key to the CLI's own requests, after checking that
+// whoever holds the UI port knows the key already. While our node is down
+// (restart, crash) another local program can bind the port; it would
+// otherwise collect the key from the CLI's next request (v0.19.3).
 type keyTransport struct{}
 
 func (keyTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	if !proofOK(r.URL.Host) {
+		return nil, errNoProof
+	}
 	r = r.Clone(r.Context())
 	r.Header.Set(uiKeyHeader, uiKey)
 	return http.DefaultTransport.RoundTrip(r)
+}
+
+// shownUIURL is the launch URL to print: with the key only on a terminal.
+// Captured stdout (Android's node.log, a service journal, a redirect) gets
+// the plain address; the key stays in <data>/ui-key (v0.19.3).
+func shownUIURL(addr, dataDir string, tty bool) string {
+	if tty {
+		return uiURL(addr)
+	}
+	return "http://" + addr + "/  (add ?k=<contents of " + filepath.Join(dataDir, "ui-key") + ">)"
 }
