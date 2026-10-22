@@ -257,7 +257,10 @@ var udpWriteMu sync.Mutex
 func (a *App) udpWrite(b []byte, dst *net.UDPAddr) {
 	udpWriteMu.Lock()
 	defer udpWriteMu.Unlock()
-	_, _ = a.udp.WriteTo(b, dst)
+	_, err := a.udp.WriteTo(b, dst)
+	if yggDbg {
+		log.Printf("[yggdbg] out %s %s err=%v", dst.IP, dbgType(b), err)
+	}
 }
 
 func (a *App) profWire() wire {

@@ -546,6 +546,9 @@ func (a *App) serveChat() {
 
 // handlePacket decodes and dispatches one datagram from rip.
 func (a *App) handlePacket(rip net.IP, pkt []byte) {
+	if yggDbg {
+		log.Printf("[yggdbg] in  %s %s", rip, dbgType(pkt))
+	}
 	if len(rip) != 16 || (rip[0]&0xfe) != 0x02 {
 		return // only Yggdrasil sources (system mode listens on the OS stack)
 	}
@@ -1726,6 +1729,7 @@ func main() {
 	a.lanInit(*dataDir, logger)
 	a.listenChat()
 	go a.serveChat()
+	go a.dbgLoop()
 	go a.sweep()
 	go a.nostrLoop()
 	// Offline queue: probe peers we owe messages to every 20 s, and greet every
