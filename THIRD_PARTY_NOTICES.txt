@@ -25,7 +25,8 @@ Notes on specific licenses
 * yggdrasil-go is LGPLv3 with a special exception that allows static linking.
   YggChat ships a MODIFIED copy (third_party/yggdrasil-go, based on v0.5.14):
   src/core/link_ws.go and link_wss.go were split into *_dial_js.go /
-  *_dial_other.go so the core compiles to WebAssembly. The modified files carry
+  *_dial_other.go so the core compiles to WebAssembly, and src/core/api_yggchat.go
+  (a peer count) was added. The modified files carry
   a notice; the complete modified source is in the YggChat source repository
   under third_party/yggdrasil-go, under the same license.
 * ironwood and phony are MPL-2.0 and are used unmodified. Their Source Code

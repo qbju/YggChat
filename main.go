@@ -1207,13 +1207,9 @@ func (a *App) upPeers() int {
 		}
 		return 0
 	}
-	n := 0
-	for _, p := range a.core.GetPeers() {
-		if p.Up {
-			n++
-		}
-	}
-	return n
+	// Not GetPeers: ironwood's peer debug info is read racily (seen in the
+	// r3 race chaos run), and this runs on every /api/state.
+	return a.core.UpPeerCount()
 }
 
 func (a *App) saveCfg() {
