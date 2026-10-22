@@ -14,7 +14,7 @@
   const MAXTTL = 4 * 7 * 86400;
   const now = () => Math.floor(Date.now() / 1000);
   // A sender's timestamp as stored: a number, not in the future (non-numbers broke sorting and dates, far-future ones stuck to the bottom and hid unread).
-  const inTs = t => { t = Math.trunc(+t); return t > 0 && t <= now() + 300 ? t : now(); };
+  const inTs = t => { t = Math.trunc(+t); return t > 0 && t <= now() + 600 ? t : now(); }; // +600 s as the native node (r2)
 
   // ---- persistent state ----
   // Outer record (always readable): key, peers, enc. Inner data (encrypted when
@@ -282,7 +282,7 @@
   const profAt = {};
   function maybeProf(p) { const c = st.contacts[p]; if (!c || !c.shared) return; if (Date.now() - (profAt[p] || 0) < 600000) return; profAt[p] = Date.now(); sendProf(p); }
   function setTTL(p, ttl, byMe, at) {
-    ttl = Math.max(0, Math.min(MAXTTL, ttl | 0));
+    if (!Number.isSafeInteger(ttl) || ttl < 0 || ttl > MAXTTL) return; // out of range: ignored as native (was clamped: ttl 99999999 set 4 weeks, -5 turned it off), r2
     const c = st.contacts[p]; if (!c || (c.ttl || 0) === ttl) return;
     c.ttl = ttl; c.ttlat = at == null ? now() : at; // when the setting it follows was made (v0.19.2)
     const m = { id: 's' + Date.now().toString(16) + Math.random().toString(16).slice(2, 5), peer: p, sys: 'ttl:' + ttl, ts: now(), out: !!byMe };
@@ -290,6 +290,7 @@
     if (byMe) for (let i = 0; i < 3; i++) setTimeout(() => send(p, { t: 'ttl', ttl }), i * 1500);
   }
   function learnPK(from, pk) {
+    pk = String(pk || '').toLowerCase(); // hex in any case, as native (r2)
     const c = st.contacts[from];
     if (c && pk && c.pk !== pk && /^[0-9a-f]{64}$/.test(pk) && yggAddrOK(from, pk)) { c.pk = pk; save(); }
   }
@@ -447,7 +448,7 @@
     if (dup() || st.groups[w.g] !== g || g.left) return; // changed while checking
     let ts = Math.trunc(+w.ts || 0); if (ts <= 0 || ts > now() + 300) ts = now();
     const m = { id: postIDf(w.id), peer: key, from: by, nick: cleanNick(w.nick), text: w.text, ts, out: false, hist: true };
-    if (signed) { m.sg = String(w.sg); if (!knownSigner && hasM(g, by)) noteSigner(g.id, by, String(w.pk).toLowerCase()); }
+    if (signed) { if (ts === w.ts) m.sg = String(w.sg); if (!knownSigner && hasM(g, by)) noteSigner(g.id, by, String(w.pk).toLowerCase()); } // a clamped time breaks the signature (r2)
     // Unsigned relays show who relayed them; the host's and admins' too when the sender is known to sign.
     if (by !== src && !signed && (!canMng(g, src) || knownSigner)) m.via = src;
     // The group's timer applies to relayed posts too, counted from when they were posted (v0.19.3).
@@ -645,9 +646,10 @@
     const ok = w.sg ? await verifyPost(from, w.pk, w.sg, w.g, postIDf(w.id), w.ts, w.text) : false;
     let m = null; for (let i = st.messages.length - 1; i >= 0; i--) { const x = st.messages[i]; if (x.peer === key && x.from === from && !x.out && samePost(x.id, w.id)) { m = x; break; } }
     if (!m) return;
-    m.text = String(w.text); delete m.via; delete m.hist; delete m.sg; if (ok === true) m.sg = String(w.sg);
+    m.text = String(w.text); delete m.via; delete m.hist; delete m.sg;
     const n = cleanNick(w.nick); if (n) m.nick = n;
     if (+w.ts > 0 && +w.ts <= now() + 300) m.ts = Math.trunc(+w.ts);
+    if (ok === true && m.ts === w.ts) m.sg = String(w.sg); // only for the time it was signed with (r2)
     save();
     emit('msg_upd', { id: m.id, peer: m.peer, from: m.from, nick: m.nick, text: m.text, ts: m.ts, via: '', hist: false }); // spelled out: the UI merges it
     if (ok === true) noteSigner(w.g, from, String(w.pk).toLowerCase());
@@ -1014,7 +1016,8 @@
     if (ttl) { m.ttl = ttl; m.exp = now() + ttl; }
     if (!img) {
       // A signed text post: keep the signature to pass on with relays; the sender is known to sign while its posts are signed (v0.19.3).
-      let pk = ''; if (w.sg && await verifyPost(src, w.pk, w.sg, w.g, postIDf(w.id), w.ts, w.text) === true) { m.sg = String(w.sg); pk = String(w.pk).toLowerCase(); }
+      // (a clamped time no longer matches what was signed: relaying it with the signature made others drop it as forged, r2)
+      let pk = ''; if (w.sg && await verifyPost(src, w.pk, w.sg, w.g, postIDf(w.id), w.ts, w.text) === true) { if (m.ts === w.ts) m.sg = String(w.sg); pk = String(w.pk).toLowerCase(); }
       if (st.messages.some(x => x.peer === key && x.from === src && samePost(x.id, w.id))) return true; // landed while checking
       noteSigner(w.g, src, pk);
     }
@@ -1210,8 +1213,46 @@
     });
   }
 
+  // A datagram as the native node decodes it (main.go type wire): only the known fields, each of its
+  // Go type, or the whole packet is dropped like a failed json.Unmarshal. Before this, a wrong type
+  // ("ts":"x", "gm":{...}) or a key like "__proto__" / "_checked" reached the handlers as is (r2).
+  const WSTR = ['t', 'id', 'nick', 'text', 'bio', 'av', 'dom', 'pk', 'mime', 'sha', 'd', 'ref', 'g', 'gn', 'go', 'gh', 'tok', 'pw', 'k', 'by', 'gmb', 'ga', 'gr', 'pn', 'sg'];
+  const WINT = ['ts', 'ttl', 'size', 'n', 'i', 'gv', 'gsv', 'gc'];
+  const wellFormed = s => typeof s.toWellFormed === 'function' ? s.toWellFormed() : s; // lone surrogates as Go reads them (U+FFFD)
+  const isInt = v => typeof v === 'number' && Number.isInteger(v) && Math.abs(v) < 2 ** 63; // Go int64 (big ones lose precision here, but aren't dropped)
+  function wireOf(json) {
+    let o; try { o = JSON.parse(json); } catch { return null; }
+    if (o === null || typeof o !== 'object' || Array.isArray(o)) return null;
+    const w = {};
+    for (const k of WSTR) { const v = o[k]; if (v == null) continue; if (typeof v !== 'string') return null; w[k] = wellFormed(v); }
+    for (const k of WINT) { const v = o[k]; if (v == null) continue; if (!isInt(v)) return null; w[k] = v; }
+    for (const k of ['gm', 'gad']) {
+      const v = o[k]; if (v == null) continue;
+      if (!Array.isArray(v) || v.some(x => x != null && typeof x !== 'string')) return null;
+      w[k] = v.map(x => x == null ? '' : wellFormed(x));
+    }
+    if (o.gs != null) {
+      const v = o.gs; if (typeof v !== 'object' || Array.isArray(v)) return null;
+      const s = {};
+      for (const k of ['nf', 'ap', 'hi', 'pw']) { if (v[k] == null) continue; if (typeof v[k] !== 'boolean') return null; if (v[k]) s[k] = true; }
+      for (const k of ['ttl', 'mx', 'pb']) { if (v[k] == null) continue; if (!isInt(v[k])) return null; if (v[k]) s[k] = v[k]; }
+      w.gs = s;
+    }
+    if (o.gt != null) {
+      const v = o.gt; if (typeof v !== 'object' || Array.isArray(v)) return null;
+      const m = {};
+      for (const k of Object.keys(v)) { if (v[k] == null) continue; if (!isInt(v[k])) return null; if (k !== '__proto__') m[wellFormed(k)] = v[k]; }
+      w.gt = m;
+    }
+    return w;
+  }
+  // Called synchronously by the wasm read loop: an exception here used to panic the Go side and stop
+  // the node until a reload (one {"t":...} packet or the text "null" was enough), r2.
   function onPacket(src, json) {
-    let w; try { w = JSON.parse(json) } catch { return }
+    try { onPacket_(src, json); } catch (e) { console.error('packet', e); }
+  }
+  function onPacket_(src, json) {
+    const w = wireOf(json); if (!w) return;
     if (w.t === 'fq' || w.t === 'fr') {
       if (st.blocked && st.blocked[src]) return;
       if (w.t === 'fr') { const f = fingerWait.get(src); if (f) f(w); return; }
@@ -1242,12 +1283,12 @@
       if (recheck) resolveYgg(dom).then(r => { const x = st.contacts[src]; if (!x || x.dom !== dom || r.err === 'net') return; x.domok = r.addr === src; x.domat = Math.floor(Date.now() / 1000); save(); emit('contact', x); });
       return;
     }
-    if (w.t === 'ttl') { setTTL(src, w.ttl | 0, false); return; }
+    if (w.t === 'ttl') { setTTL(src, w.ttl || 0, false); return; }
     if (w.t === 'fh') { onFileHeader(src, w); return; }
     if (w.t === 'fc') { onFileChunk(src, w); return; }
     if ((w.t === 'edit' || w.t === 'del') && onCtl(src, w)) { send(src, { t: 'ack', id: w.id }); return; }
     if (['gq', 'gi', 'gl', 'gj', 'gjn', 'ghs', 'ghq', 'gd', 'gp', 'gk', 'gkq'].includes(w.t)) { onGroupCtl(src, w); return; }
-    if (w.t === 'msg') handleMsg(src, w).then(async okm => { if (okm) { await saveNow(); send(src, { t: 'ack', id: w.id }); askPK(src); if (queuedFor(src).length) flush(src); } }); // ack once stored (v0.19.2)
+    if (w.t === 'msg') handleMsg(src, w).then(async okm => { if (okm) { await saveNow(); send(src, { t: 'ack', id: w.id }); askPK(src); if (queuedFor(src).length) flush(src); } }).catch(e => console.error('msg', e)); // ack once stored (v0.19.2)
   }
 
   // ---- images: header + 12 KiB chunks, per-chunk acks, SHA-256 check ----
@@ -1514,7 +1555,7 @@
       const t = setTimeout(() => fin(undefined), ms);
       try { ws = new WebSocket(url); } catch { return fin(undefined); }
       ws.onopen = () => ws.send(first);
-      ws.onmessage = e => { let m; try { m = JSON.parse(e.data); } catch { return; } const v = onMsg(m); if (v !== undefined) fin(v); };
+      ws.onmessage = e => { let m; try { m = JSON.parse(e.data); } catch { return; } if (!Array.isArray(m)) return; const v = onMsg(m); if (v !== undefined) fin(v); };
       ws.onerror = () => fin(undefined);
       ws.onclose = () => fin(undefined);
     });
@@ -1531,8 +1572,9 @@
       const t = setTimeout(fin, 25000);
       try { ws = new WebSocket(url); } catch { return fin(); }
       ws.onopen = () => reqs.forEach(r => ws.send(r));
-      ws.onmessage = e => { let m; try { m = JSON.parse(e.data); } catch { return; }
-        if (m[0] === 'EVENT' && m[2]) out.push(m[2]);
+      ws.onmessage = e => { if (done) return; let m; try { m = JSON.parse(e.data); } catch { return; }
+        if (!Array.isArray(m)) return;
+        if (m[0] === 'EVENT' && m[2] && typeof m[2] === 'object') { out.push(m[2]); if (out.length >= 2000) fin(); } // a relay streaming junk can't fill our memory (as nostr_net.go maxFetchEvents, r2)
         else if (m[0] === 'EOSE' || m[0] === 'CLOSED') { try { ws.send(JSON.stringify(['CLOSE', m[1]])); } catch {} if (--left <= 0) fin(); } };
       ws.onerror = fin; ws.onclose = fin;
     });
@@ -1551,8 +1593,7 @@
       for (const [id, e] of evs) {
         if (nSeen.has(id)) continue;
         const r = yggNostrOpen(JSON.stringify(e)); if (r.error) continue;
-        let w; try { w = JSON.parse(r.w); } catch { continue; }
-        if (w.t !== 'msg') continue;
+        const w = wireOf(r.w); if (!w || w.t !== 'msg') continue; // checked like a datagram (r2)
         learnPK(r.from, r.pk);
         ps.push({ id, r, w });
       }
@@ -1928,7 +1969,7 @@
         delete st.blocked[a];
         save(); emit('contact', c);
         if (share) sendProf(a);
-        if (body.TTL != null) setTTL(a, body.TTL, true);
+        if (body.TTL != null) setTTL(a, body.TTL, true); // out of range: ignored, as native
         return ok(c);
       }
       case 'contact/delete': {
@@ -2087,4 +2128,6 @@
     setTimeout(() => es.onopen && es.onopen({}), 0);
     return es;
   };
+  // Test hook (test/pwa/harness.js defines __yggTest before loading; never set in a page).
+  if (typeof __yggTest === 'object' && __yggTest) Object.assign(__yggTest, { st: () => st, ready, onPacket, nostrFetch });
 })();
