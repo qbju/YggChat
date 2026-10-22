@@ -1608,6 +1608,7 @@ func main() {
 	sys := sysModeOn(*dataDir)
 	vpn := !sys && vpnModeOn(*dataDir)
 	logger := gologme.New(logOut, "[ygg] ", gologme.LstdFlags)
+	logger.SetCallDepth(2) // gologme sets it lazily on the first line, racing between link goroutines
 	logger.EnableLevel("error")
 	logger.EnableLevel("warn")
 	opts := []core.SetupOption{}
