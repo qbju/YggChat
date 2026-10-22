@@ -185,7 +185,8 @@ func (a *App) admit(g Group, from, nick, how string) {
 	}
 	noteGone(&g, before, 0)
 	g.Pend = dropPend(g.Pend, from)
-	g.V++
+	unban(&g, from) // let in again (approved, or a direct add)
+	bumpV(&g)
 	a.store.Groups[g.ID] = g
 	a.store.save()
 	var hist []Message
@@ -198,7 +199,7 @@ func (a *App) admit(g Group, from, nick, how string) {
 		nick = a.nameOf(from)
 	}
 	a.groupSys(g, nick+" が"+how)
-	a.sendMembers(g, []string{from}, nil)
+	a.sendMembers(g, []string{from}, nil, false)
 	if len(hist) > 0 {
 		go a.sendHistory(from, g.ID, hist)
 	}
@@ -238,6 +239,15 @@ func (a *App) sendHistory(to, gid string, hist []Message) {
 	defer func() { recover() }() // a bad message must never take the node down
 	time.Sleep(3 * time.Second) // let the gi land first
 	now := time.Now().Unix()
+	sigs := map[string][2]string{}
+	a.store.mu.Lock()
+	g := a.store.Groups[gid]
+	for _, m := range hist {
+		if sg, pk := a.sigForLocked(g, m); sg != "" && pk != "" {
+			sigs[m.From+"|"+m.ID] = [2]string{sg, pk}
+		}
+	}
+	a.store.mu.Unlock()
 	ws := make([]wire, 0, len(hist))
 	for _, m := range hist {
 		text := m.Text
@@ -250,6 +260,9 @@ func (a *App) sendHistory(to, gid string, hist []Message) {
 		}
 		// The post id, not our copy's "<post>g<i>": every member then has the same one to dedupe on (v0.19.2).
 		w := wire{T: "ghs", G: gid, ID: postID(m.ID), By: m.From, Nick: m.Nick, Text: text, TS: m.TS}
+		if s, ok := sigs[m.From+"|"+m.ID]; ok && m.Img == "" {
+			w.Sg, w.PK = s[0], s[1] // the sender's proof, valid only for the whole text
+		}
 		if m.Exp > 0 {
 			r := m.Exp - now - 20 // it takes a few seconds to send
 			if r <= 0 {
@@ -258,6 +271,9 @@ func (a *App) sendHistory(to, gid string, hist []Message) {
 			w.TTL = int(r)
 		}
 		// Shorten until the datagram fits (JSON escapes can triple a text).
+		if w.Sg != "" && wireLen(w) > dgramMax {
+			w.Sg, w.PK = "", "" // it will be shortened: the signature no longer fits the text
+		}
 		for cut := min(len(text), histText); wireLen(w) > dgramMax && cut > 0; cut -= 60 {
 			for cut > 0 && cut < len(text) && !utf8Start(text[cut]) {
 				cut--
@@ -290,9 +306,26 @@ func (a *App) onHistory(from string, w wire, g Group, known bool) {
 		a.store.mu.Unlock()
 		return
 	}
-	if at := goneAt(g, by); !hasMember(g, by) && at != 0 && (at < 0 || w.TS <= 0 || w.TS > at) {
-		a.store.mu.Unlock() // posted after they left or were removed (v0.19.2)
+	// An ordinary member relays only when we asked it (ghq); the host and
+	// admins also send history to new members unasked (v0.19.3).
+	if !canManage(g, from) && !histAsked(g.ID, from) {
+		a.store.mu.Unlock()
 		return
+	}
+	if !hasMember(g, by) {
+		at := goneAt(g, by)
+		if at != 0 && (at < 0 || w.TS <= 0 || w.TS > at) {
+			a.store.mu.Unlock() // posted after they left or were removed (v0.19.2)
+			return
+		}
+		if at == 0 && !canManage(g, from) {
+			// Someone who was never a member as far as we know: only the
+			// host or an admin (history from before we joined) may relay
+			// such a post, an ordinary member can't make up posts by
+			// strangers (v0.19.3).
+			a.store.mu.Unlock()
+			return
+		}
 	}
 	key := gKey(g.ID)
 	for i := len(a.store.Messages) - 1; i >= 0; i-- {
@@ -301,19 +334,46 @@ func (a *App) onHistory(from string, w wire, g Group, known bool) {
 			return
 		}
 	}
+	knownSigner := g.Keys[by] != ""
 	a.store.mu.Unlock()
 	if by == a.addr {
 		return
 	}
+	// The sender's signature (groupssig.go): a bad one is a forgery; a good
+	// one is its own words, whoever relays it (v0.19.3).
+	signed := false
+	if w.Sg != "" {
+		if !verifyPost(by, w.PK, w.Sg, g.ID, postID(w.ID), w.TS, w.Text) {
+			return
+		}
+		signed = true
+	}
 	m := Message{ID: postID(w.ID), Peer: key, From: by, Nick: cleanNick(w.Nick), Text: w.Text, TS: w.TS, Hist: true}
-	if by != from && !canManage(g, from) {
+	if signed {
+		m.Sg = w.Sg
+		if !knownSigner && hasMember(g, by) {
+			a.noteSigner(g.ID, by, w.PK) // so we can pass the proof on too
+		}
+	}
+	// Unsigned relays show who relayed them; the host's and admins' too when
+	// the sender is known to sign (an unsigned post "by" it is not its own).
+	if by != from && !signed && (!canManage(g, from) || knownSigner) {
 		m.Via = from
 	}
 	if m.TS <= 0 || m.TS > time.Now().Unix()+300 {
 		m.TS = time.Now().Unix()
 	}
-	if w.TTL > 0 {
-		m.Exp = time.Now().Unix() + int64(w.TTL)
+	// The group's timer applies to relayed posts too, counted from when they were posted (v0.19.3).
+	exp, live := histExp(g, m.TS, w.TTL)
+	if !live {
+		return
+	}
+	m.Exp = exp
+	if exp > 0 {
+		m.TTL = int(exp - m.TS)
+		if m.TTL <= 0 {
+			m.TTL = int(exp - time.Now().Unix())
+		}
 	}
 	a.addMessage(m)
 }
@@ -393,8 +453,16 @@ func (a *App) onHistReq(from string, w wire, g Group, known bool) {
 		a.store.mu.Unlock()
 		if known && !g.Left && !hasMember(g, from) {
 			a.goneNotice(from, g) // a removed member catching up: tell it it is out
+		} else if known && g.Left {
+			a.leftNotice(from, g) // our heir catching up gets the hand-over (v0.19.3)
 		}
 		return
+	}
+	// Without history sharing: only what was said since they were added,
+	// whatever "since" they ask for (v0.19.3).
+	since := w.TS
+	if t := g.AddAt[from]; !g.Set.Hist && t > since {
+		since = t
 	}
 	hist := a.historyLocked(g.ID)
 	a.store.mu.Unlock()
@@ -413,7 +481,11 @@ func (a *App) onHistReq(from string, w wire, g Group, known bool) {
 	out := hist[:0:0]
 	for _, m := range hist {
 		// Without history sharing, only what was said since they were in the group.
-		if m.From == from || (!g.Set.Hist && m.TS < w.TS) {
+		if m.From == from || (!g.Set.Hist && m.TS < since) {
+			continue
+		}
+		// Never relay what a removed member posted after its removal.
+		if at := goneAt(g, m.From); m.From != a.addr && !hasMember(g, m.From) && at > 0 && m.TS > at+goneSlack {
 			continue
 		}
 		out = append(out, m)
@@ -453,6 +525,7 @@ func (a *App) syncGroup(gid string) {
 		add(g.Members[i])
 	}
 	for _, x := range ask {
+		noteHistAsk(gid, x) // their answer (ghs) is taken for a while
 		a.sendWire(x, wire{T: "ghq", G: gid, TS: since})
 	}
 }
@@ -460,10 +533,19 @@ func (a *App) syncGroup(gid string) {
 func (a *App) syncAllGroups() {
 	a.store.mu.Lock()
 	ids := []string{}
-	for id := range a.store.Groups {
+	var gone []Group
+	for id, g := range a.store.Groups {
 		ids = append(ids, id)
+		if g.Left && g.Quit && g.QuitAt > 0 && time.Now().Unix()-g.QuitAt < leaveRepeat {
+			gone = append(gone, g)
+		}
 	}
 	a.store.mu.Unlock()
+	// Groups we left lately: our gl again (it may all have been lost while
+	// we were cut off; a member that has it ignores it), v0.19.3.
+	for _, g := range gone {
+		go a.repeatLeave(g)
+	}
 	for _, id := range ids {
 		a.syncGroup(id)
 		time.Sleep(200 * time.Millisecond)

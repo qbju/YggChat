@@ -54,6 +54,13 @@ type Group struct {
 	Tomb    bool     `json:"tomb,omitempty"`   // deleted after leaving: hidden, kept so late copies don't bring it back
 	Gone    []string `json:"gone,omitempty"`   // host only: members recently removed or left (merge guard)
 	GoneAt  map[string]int64 `json:"gat,omitempty"` // every node, local: when members dropped out (late posts from before are kept)
+	AddAt   map[string]int64 `json:"gaa,omitempty"` // every node, local: when members were added after we knew the group (v0.19.3)
+	VAt     int64    `json:"vat,omitempty"`  // when the current member-list version was made (from gi/gd "ts", v0.19.3)
+	By      string   `json:"by,omitempty"`   // local: who sent us the invitation (caps invitation spam)
+	Ban     []string `json:"ban,omitempty"`  // host/admin, local: removed by a manager; their link joins are refused
+	Hand    bool     `json:"hand,omitempty"` // we left as host and handed the group to Owner (re-sent if they missed it)
+	Keys    map[string]string `json:"keys,omitempty"` // local: members whose last post was signed -> their key (groupssig.go)
+	QuitAt  int64    `json:"qat,omitempty"`  // when we left (our gl is repeated for a while, v0.19.3)
 }
 
 // GroupSet are the host's group settings (v0.18), sent in gi as "gs".
@@ -221,7 +228,7 @@ func (a *App) groupSys(g Group, text string) {
 }
 
 func (a *App) infoWire(g Group) wire {
-	w := wire{T: "gi", G: g.ID, GN: g.Name, GM: g.Members, GO: g.Owner, GV: g.V, GSV: g.SV, GAD: g.Admins}
+	w := wire{T: "gi", G: g.ID, GN: g.Name, GM: g.Members, GO: g.Owner, GV: g.V, GSV: g.SV, GAD: g.Admins, TS: g.VAt}
 	if g.Owner != "" {
 		set := g.Set
 		w.GS = &set
@@ -240,7 +247,7 @@ func (a *App) createGroup(name string, members []string) (Group, error) {
 	}
 	b := make([]byte, 8)
 	_, _ = rand.Read(b)
-	g := Group{ID: hex.EncodeToString(b), Name: name, Members: ms, Owner: a.addr, V: 1}
+	g := Group{ID: hex.EncodeToString(b), Name: name, Members: ms, Owner: a.addr, V: 1, VAt: time.Now().Unix()}
 	g.Set.Hist = true // new members and members who were away catch up (v0.19.1)
 	for _, c := range groupMaxChoices {
 		if c >= len(ms) {
@@ -301,6 +308,9 @@ func (a *App) sendGroup(gid, text, img string) (Message, error) {
 		exp = now.Unix() + int64(ttl)
 	}
 	vis := Message{ID: id, Peer: gKey(gid), From: a.addr, Nick: nick, Text: text, TS: now.Unix(), Out: true, Status: "sending", Img: img, TTL: ttl, Exp: exp}
+	if img == "" {
+		vis.Sg = a.signPost(gid, id, vis.TS, text) // relays can then prove it is ours (v0.19.3)
+	}
 	var copies []Message
 	for i, mem := range g.Members {
 		if mem == a.addr {
@@ -308,7 +318,7 @@ func (a *App) sendGroup(gid, text, img string) (Message, error) {
 		}
 		// The photo itself stays on the visible message only (GImg), so a
 		// group of 20 doesn't store it 20 times.
-		copies = append(copies, Message{ID: fmt.Sprintf("%sg%d", id, i), Peer: mem, From: a.addr, Nick: nick, Text: text, TS: vis.TS, Out: true, Status: "sending", Grp: gid, Of: id, Hid: true, GImg: img != "", TTL: ttl, Exp: exp})
+		copies = append(copies, Message{ID: fmt.Sprintf("%sg%d", id, i), Peer: mem, From: a.addr, Nick: nick, Text: text, TS: vis.TS, Out: true, Status: "sending", Grp: gid, Of: id, Hid: true, GImg: img != "", TTL: ttl, Exp: exp, Sg: vis.Sg})
 	}
 	vis.Tot = len(copies)
 	if len(copies) == 0 {
@@ -472,7 +482,7 @@ func (a *App) onGroupMsg(from string, w wire, img string) bool {
 		return false
 	}
 	g, known := a.store.Groups[w.G]
-	ask := false
+	ask, late := false, false
 	if !known {
 		// A group we've never heard of is a message request: it needs the
 		// request proof of work (and PowStrict) before anything is stored,
@@ -506,9 +516,7 @@ func (a *App) onGroupMsg(from string, w wire, img string) bool {
 		// We're out: ack and drop so the sender stops retrying; if we left
 		// ourselves and they missed it, tell them again (v0.19.2).
 		a.store.mu.Unlock()
-		if g.Quit {
-			a.leaveNotice(from, w.G)
-		}
+		a.leftNotice(from, g)
 		return true
 	} else if !hasMember(g, from) {
 		at := goneAt(g, from)
@@ -523,19 +531,28 @@ func (a *App) onGroupMsg(from string, w wire, img string) bool {
 		// A member who left or was removed. A post made before that (a late
 		// copy) is still theirs to make; a later one is acked and dropped so
 		// they stop retrying, and the host tells them they are out (v0.19.2).
-		if at < 0 || w.TS <= 0 || w.TS > at {
+		// Late copies are taken only for a while and only so many, so a
+		// removed member can't go on posting by backdating (v0.19.3).
+		if !lateOK(g, from, w.TS) {
 			a.store.mu.Unlock()
 			a.goneNotice(from, g)
 			return true
 		}
+		late = true
 	} else if w.GH != "" && w.GH != groupHash(g.Name, g.Members) {
 		ask = true
 	}
 	key := gKey(w.G)
-	dup := false
+	dup, relayed := false, false
 	for i := len(a.store.Messages) - 1; i >= 0 && !dup; i-- {
 		m := a.store.Messages[i]
 		dup = m.Peer == key && m.From == from && samePost(m.ID, w.ID)
+		// We hold it as someone's relay: the sender's own copy is the real one (v0.19.3).
+		relayed = dup && !m.Out && (m.Via != "" || m.Hist) && (m.Text != w.Text || m.Via != "")
+	}
+	if late && !dup && !lateTake(w.G, from) {
+		a.store.mu.Unlock()
+		return true // too many late posts from a former member
 	}
 	// Photos are dropped (but acked, so the sender stops) when the host turned them off.
 	drop := img != "" && g.Set.NoFiles && w.Text == ""
@@ -560,6 +577,16 @@ func (a *App) onGroupMsg(from string, w wire, img string) bool {
 			a.askInfo(g.Owner, w.G)
 		}
 	}
+	if relayed && img == "" && !drop {
+		if !a.powCheck(from, w) {
+			return false
+		}
+		a.replaceRelayed(key, from, w)
+		if w.Sg != "" && verifyPost(from, w.PK, w.Sg, w.G, postID(w.ID), w.TS, w.Text) {
+			a.noteSigner(w.G, from, w.PK)
+		}
+		return true
+	}
 	if dup || drop {
 		return true
 	}
@@ -568,6 +595,15 @@ func (a *App) onGroupMsg(from string, w wire, img string) bool {
 	}
 	// Stored under the post id (copies are "<post>g<i>"), so relays dedupe on it.
 	m := Message{ID: postID(w.ID), Peer: key, From: from, Nick: cleanNick(w.Nick), Text: w.Text, TS: w.TS, Img: img, TTL: ttl}
+	if img == "" {
+		// A signed text post: keep the signature to pass on with relays; the
+		// sender is known to sign while its posts are signed (v0.19.3).
+		pk := ""
+		if w.Sg != "" && verifyPost(from, w.PK, w.Sg, w.G, postID(w.ID), w.TS, w.Text) {
+			m.Sg, pk = w.Sg, w.PK
+		}
+		a.noteSigner(w.G, from, pk)
+	}
 	if ttl > 0 {
 		m.Exp = time.Now().Unix() + int64(ttl)
 	}
@@ -672,6 +708,8 @@ func (a *App) onGroupCtl(from string, w wire) {
 			a.answerInfo(from, g)
 		} else if known && !g.Left && !hasMember(g, from) {
 			a.goneNotice(from, g) // removed while away: the host's list tells it (v0.19.2)
+		} else if known && g.Left {
+			a.leftNotice(from, g) // they missed our leave (or, as our heir, the hand-over)
 		}
 		return
 	case "gl":
@@ -693,7 +731,7 @@ func (a *App) onGroupCtl(from string, w wire) {
 		if host {
 			// The host makes the leave a new version, so members who missed
 			// the gl (or got a re-add that crossed it) follow (v0.19.2).
-			g.V++
+			bumpV(&g)
 			trackGone(&g, before)
 		}
 		a.store.Groups[w.G] = g
@@ -702,7 +740,7 @@ func (a *App) onGroupCtl(from string, w wire) {
 		a.broadcast("contact", groupView(g))
 		a.groupSys(g, a.gNameOf(g, from)+" が退出しました")
 		if host {
-			a.sendMembers(g, nil, []string{from})
+			a.sendMembers(g, nil, []string{from}, false)
 		}
 		return
 	case "gi":
@@ -715,6 +753,15 @@ func (a *App) onGroupCtl(from string, w wire) {
 		stubReq := g.Req
 		if known && g.Stub && !g.Left {
 			known = false // a placeholder from a message: take this info as the first one
+		}
+		if known && g.Req && !g.Left {
+			// An unanswered invitation while we wait for the host whose link we
+			// opened: another member (or anyone who saw the group id) may have
+			// sent it first, maybe without the host in it; the host's own info
+			// starts the group afresh (v0.19.3).
+			if jh, ok := a.joinHostLocked(w.G); ok && jh == from {
+				known = false
+			}
 		}
 		if len(w.GM) == 0 || (known && !g.Left && !hasMember(g, from)) {
 			a.store.mu.Unlock()
@@ -734,7 +781,7 @@ func (a *App) onGroupCtl(from string, w wire) {
 				// missed our gl, not an invitation (v0.19.2). Join by link to come back.
 				a.store.mu.Unlock()
 				if in {
-					a.leaveNotice(from, w.G)
+					a.leftNotice(from, g)
 				}
 				return
 			}
@@ -747,11 +794,15 @@ func (a *App) onGroupCtl(from string, w wire) {
 		}
 		name := cleanNickOr(w.GN)
 		byHost := known && g.Owner != "" && from == g.Owner
-		collide, hint, stale, resync := false, false, false, false
-		var merged []string
+		collide, hint, stale, resync, askHost := false, false, false, false, false
+		var merged, unmerged []string
+		adopted := !known // the list came from the host/an admin and replaces ours
 		if known && g.Owner != "" {
 			switch {
-			case w.GV != 0 && w.GV == g.V && g.Owner != a.addr && !sameMembers(ms, g.Members):
+			case w.GV != 0 && w.GV == g.V && g.Owner != a.addr && !sameMembers(ms, g.Members) && !(byHost && !in && hasMember(Group{Members: unpackAddrs(w.GR)}, a.addr)):
+				// (Unless the host's list says it removed us ("gr"): its merge
+				// keeps that, so it is taken even at the same version, v0.19.3.
+				// Without gr a list lacking us may just predate an admin adding us.)
 				// Same version, different list: two changes were made from the
 				// same base (the host missed an admin's, or an admin worked from
 				// an old list). Keep ours; the host merges them into a new
@@ -759,7 +810,13 @@ func (a *App) onGroupCtl(from string, w wire) {
 				ms, in, collide = g.Members, true, true
 			case byHost && (w.GV == 0 || w.GV >= g.V):
 				// the host's list (a pre-v0.19 host sends no version)
-			case !byHost && isAdmin(g, from) && w.GV > g.V:
+				adopted = !sameMembers(ms, g.Members)
+			case !byHost && isAdmin(g, from) && w.GV > g.V && (w.GV > g.V+maxVJump || len(ms) > groupMax(g)) && g.Owner != a.addr:
+				// An admin's list far ahead of ours or over the limit: an
+				// admin can't brick the versions or overfill the group; the
+				// host's list decides (v0.19.3).
+				ms, in, askHost = g.Members, true, true
+			case !byHost && isAdmin(g, from) && w.GV > g.V && w.GV <= g.V+maxVJump && len(ms) <= groupMax(g):
 				// an admin's newer list; the host and admins stay in it
 				for _, x := range append([]string{g.Owner}, g.Admins...) {
 					if hasMember(g, x) && !hasMember(Group{Members: ms}, x) {
@@ -768,13 +825,23 @@ func (a *App) onGroupCtl(from string, w wire) {
 				}
 				sort.Strings(ms)
 				in = hasMember(Group{Members: ms}, a.addr)
+				adopted = true
 			default:
 				// Not the host (or an older list): members stay as they are.
 				if g.Owner == a.addr && w.GV != 0 && !sameMembers(ms, g.Members) {
 					switch {
 					case isAdmin(g, from):
 						merged = mergeAdds(g, ms) // an admin's change we missed
-						if len(merged) == 0 {
+						if w.GV == g.V {
+							// Its removals too, when it worked from the same base
+							// (two admins removing at once, v0.19.3).
+							for _, x := range unpackAddrs(w.GR) {
+								if hasMember(g, x) && x != g.Owner && !isAdmin(g, x) && x != a.addr && !hasMember(Group{Members: ms}, x) {
+									unmerged = append(unmerged, x)
+								}
+							}
+						}
+						if len(merged) == 0 && len(unmerged) == 0 {
 							// nothing to add (e.g. the admin removed someone at our
 							// version): re-issue ours as a new version so all agree
 							resync, stale = w.GV == g.V, w.GV < g.V
@@ -786,8 +853,14 @@ func (a *App) onGroupCtl(from string, w wire) {
 					}
 				}
 				ms, in = g.Members, true
-				if len(merged) > 0 {
-					ms = cleanMembers(append(append([]string{}, g.Members...), merged...), a.addr)
+				if len(merged) > 0 || len(unmerged) > 0 {
+					var keep []string
+					for _, m := range g.Members {
+						if !hasMember(Group{Members: unmerged}, m) {
+							keep = append(keep, m)
+						}
+					}
+					ms = cleanMembers(append(keep, merged...), a.addr)
 				}
 			}
 		}
@@ -798,8 +871,14 @@ func (a *App) onGroupCtl(from string, w wire) {
 				return
 			}
 			c, ok := a.store.Contacts[from]
+			jh, joining := a.joinHostLocked(w.G)
+			joining = joining && jh == from
+			if accepted := ok && c.Shared && !c.Req; !accepted && !joining && !g.Stub && !a.inviteRoomLocked(from) {
+				a.store.mu.Unlock() // a stranger flooding us with invitations (v0.19.3)
+				return
+			}
 			wasStub := g.Stub
-			g = Group{ID: w.G, Req: !(ok && c.Shared && !c.Req)}
+			g = Group{ID: w.G, Req: !(ok && c.Shared && !c.Req), By: from}
 			if wasStub {
 				g.Req = stubReq
 			}
@@ -818,15 +897,38 @@ func (a *App) onGroupCtl(from string, w wire) {
 		}
 		old := g
 		g.Members = ms
-		noteGone(&g, old.Members, 0)
+		// The manager who made this list says when; a member removed then
+		// can't have posted after it (v0.19.3).
+		at := int64(0)
+		if adopted && known {
+			at = changeTime(w.TS)
+		}
+		noteGone(&g, old.Members, at)
+		if adopted && known {
+			noteGoneEach(&g, old.Members, w.GT)
+		}
+		dels := a.purgeGoneLocked(g, old.Members)
 		if !staleSet {
 			g.Name = name
 		}
-		if w.GV > g.V && (byHost || isAdmin(old, from) || !known) {
+		if w.GV > g.V && (byHost || isAdmin(old, from) || !known) && !askHost {
 			g.V = w.GV
+			g.VAt = changeTime(w.TS) // 0 = unknown (an older sender): never pass on a stale time
+
 		}
-		if len(merged) > 0 || resync {
-			g.V = old.V + 1 // the host re-issues the merged list as a new version
+		if len(merged) > 0 || len(unmerged) > 0 || resync {
+			g.V = old.V // the host re-issues the merged list as a new version
+			bumpV(&g)
+		}
+		if w.K == "kick" && canManage(old, from) && canManage(g, a.addr) {
+			for _, x := range unpackAddrs(w.GR) {
+				if !hasMember(g, x) {
+					addBan(&g, []string{x}) // removed by a manager: no coming back by link
+				}
+			}
+		}
+		if len(unmerged) > 0 {
+			addBan(&g, unmerged)
 		}
 		if g.Owner == a.addr {
 			trackGone(&g, old.Members)
@@ -834,7 +936,15 @@ func (a *App) onGroupCtl(from string, w wire) {
 		if !in {
 			g.Left = true
 		}
-		setChanged, handed := false, ""
+		setChanged, handed, claimed := false, "", false
+		if known && g.Owner != "" && from != g.Owner && !hasMember(g, g.Owner) && isAdmin(old, from) && hasMember(g, from) && w.GSV > g.SV {
+			// The host left (it is no longer a member) and we missed its
+			// hand-over: the admin it named says so itself (v0.19.3). While
+			// the host is still in the group nobody else can claim it.
+			if o, ok := yggAddr(w.GO); ok && o == from {
+				g.Owner, claimed = from, true
+			}
+		}
 		if g.Owner != "" && from == g.Owner && !staleSet {
 			if w.GSV > g.SV {
 				g.SV = w.GSV
@@ -867,6 +977,10 @@ func (a *App) onGroupCtl(from string, w wire) {
 		a.store.save()
 		a.store.mu.Unlock()
 		a.broadcast("contact", groupView(g))
+		a.broadcastDels(dels)
+		if askHost {
+			a.askInfo(g.Owner, g.ID)
+		}
 		if needKey {
 			a.sendWire(g.Owner, wire{T: "gkq", G: g.ID})
 		}
@@ -883,8 +997,8 @@ func (a *App) onGroupCtl(from string, w wire) {
 			a.answerInfo(from, g)
 		case resync:
 			a.sendInfo(g, from)
-		case len(merged) > 0:
-			a.sendMembers(g, merged, nil)
+		case len(merged) > 0 || len(unmerged) > 0:
+			a.sendMembers(g, merged, unmerged, len(unmerged) > 0)
 			if g.Set.Hist {
 				a.store.mu.Lock()
 				hist := a.historyLocked(g.ID)
@@ -916,6 +1030,9 @@ func (a *App) onGroupCtl(from string, w wire) {
 		}
 		if handed != "" {
 			a.groupSys(g, a.gNameOf(g, from)+" が "+a.gNameOf(g, handed)+" をホストにしました")
+		}
+		if claimed {
+			a.groupSys(g, a.gNameOf(g, from)+" がホストになりました")
 		}
 		if known && in {
 			var added, removed []string
@@ -1112,11 +1229,15 @@ func (a *App) groupHandlers(mux *http.ServeMux) {
 		}
 		g.Admins = cleanAdmins(g.Admins, g)
 		if len(added) > 0 || len(removed) > 0 {
-			g.V++
+			bumpV(&g)
 			if host {
 				trackGone(&g, old.Members)
 			}
 			noteGone(&g, old.Members, 0)
+			addBan(&g, removed) // removed by us: their link joins are refused (v0.19.3)
+			for _, m := range added {
+				unban(&g, m)
+			}
 		}
 		if host && (req.Set != nil || req.Pass != nil || req.Admins != nil || g.Name != old.Name) {
 			g.SV++ // a late repeat of the old info can't undo this
@@ -1141,7 +1262,7 @@ func (a *App) groupHandlers(mux *http.ServeMux) {
 		a.memberSys(g, a.addr, added, removed)
 		a.adminSys(g, a.addr, old.Admins, g.Admins)
 		if len(added) > 0 || len(removed) > 0 {
-			a.sendMembers(g, added, removed) // the removed hear it too, so they know they're out
+			a.sendMembers(g, added, removed, len(removed) > 0) // the removed hear it too, so they know they're out
 		}
 		if len(added) > 0 && g.Set.Hist {
 			a.store.mu.Lock()
@@ -1182,14 +1303,32 @@ func (a *App) groupHandlers(mux *http.ServeMux) {
 			return
 		}
 		was := g.Left
-		// A leaving host hands the group to the first co-admin, so it can still be run.
+		// A leaving host hands the group to a co-admin (the one most likely
+		// online), so it can still be run.
 		heir := ""
 		if !was && g.Owner == a.addr && len(g.Admins) > 0 {
-			heir = g.Admins[0]
+			heir = a.pickHeirLocked(g)
 			g.Owner = heir
 			g.Admins = cleanAdmins(g.Admins, g)
-			g.V++
+			bumpV(&g)
 			g.SV++
+			g.Hand = true // re-sent to the heir if it missed it (v0.19.3)
+		}
+		full := g // the list as it was, for the hand-over and our gl
+		if !was {
+			// We are out: our own list no longer shows us (it stays as the
+			// group was when we left), v0.19.3.
+			var ms []string
+			for _, m := range g.Members {
+				if m != a.addr {
+					ms = append(ms, m)
+				}
+			}
+			g.Members = ms
+			g.Admins = cleanAdmins(g.Admins, g)
+		}
+		if !was {
+			g.QuitAt = time.Now().Unix()
 		}
 		g.Left, g.Req, g.Quit = true, false, true
 		a.store.Groups[g.ID] = g
@@ -1199,7 +1338,7 @@ func (a *App) groupHandlers(mux *http.ServeMux) {
 		leftAt := time.Now().Unix()
 		a.broadcast("contact", groupView(g))
 		if heir != "" {
-			a.sendInfo(g) // carries the new host ("go") from us, the old host
+			a.sendInfo(full) // carries the new host ("go") from us, the old host
 			a.groupSys(g, a.gNameOf(g, heir)+" をホストにしました")
 		}
 		if !was {
@@ -1214,7 +1353,7 @@ func (a *App) groupHandlers(mux *http.ServeMux) {
 					time.Sleep(5 * time.Second) // let the hand-over land first
 				}
 				for i := 0; i < 3; i++ {
-					for _, m := range g.Members {
+					for _, m := range full.Members {
 						if m != a.addr {
 							a.sendWire(m, lw)
 						}
@@ -1226,6 +1365,12 @@ func (a *App) groupHandlers(mux *http.ServeMux) {
 		}
 		json.NewEncoder(w).Encode(groupView(g))
 	})
+}
+
+// bumpV makes a new member-list version (host/admin side).
+func bumpV(g *Group) {
+	g.V++
+	g.VAt = time.Now().Unix()
 }
 
 // deleteGroupLocked removes a group and its messages (visible and hidden). Caller holds a.store.mu.
@@ -1259,6 +1404,9 @@ func (a *App) msgWireBare(m Message) wire {
 	w := wire{T: "msg", ID: m.ID, Nick: m.Nick, Text: m.Text, TS: m.TS, TTL: m.TTL}
 	if m.Grp != "" {
 		w.G = m.Grp
+		if m.Sg != "" {
+			w.Sg, w.PK = m.Sg, a.myPK()
+		}
 		a.store.mu.Lock()
 		if g, ok := a.store.Groups[m.Grp]; ok {
 			w.GH = groupHash(g.Name, g.Members)

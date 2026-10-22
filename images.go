@@ -129,6 +129,9 @@ func (a *App) deliverFile(m Message, mime string, raw []byte, tries int) bool {
 			hdr.GH = groupHash(g.Name, g.Members)
 		}
 		a.store.mu.Unlock()
+		if m.Sg != "" {
+			hdr.Sg, hdr.PK = m.Sg, a.myPK() // signed group post (groupssig.go)
+		}
 	}
 	a.withPow(m, &hdr, hdr.Sha)
 	asked := powAsked(m.Peer, m.ID)

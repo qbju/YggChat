@@ -140,6 +140,12 @@ func (a *App) onJoin(from string, w wire, g Group, known bool) {
 		no("この招待リンクは使えません")
 		return
 	}
+	if banned(g, from) {
+		// removed by the host or an admin: only a direct add (or approval
+		// of a request made before) brings them back (v0.19.3)
+		no("このグループからは外されているため、リンクからは参加できません")
+		return
+	}
 	nick := cleanNick(w.Nick)
 	if (w.PN != "" || a.store.PowStrict) && !joinPowOK(from, w.G, w.Tok, w.PN) {
 		no("参加にはYggChat v0.19.0以上が必要です（PoW）")
@@ -196,6 +202,17 @@ func (a *App) onJoin(from string, w wire, g Group, known bool) {
 			fresh = fresh && p.Addr != from
 		}
 		if fresh {
+			if len(g.Pend) >= maxPending {
+				// Requests nobody answered for days make room (else a burst of
+				// throwaway addresses keeps the list full for good), v0.19.3.
+				var keep []Pend
+				for _, p := range g.Pend {
+					if time.Now().Unix()-p.TS < pendKeep {
+						keep = append(keep, p)
+					}
+				}
+				g.Pend = keep
+			}
 			if len(g.Pend) >= maxPending {
 				no("参加申請がいっぱいです。しばらくしてからもう一度開いてね")
 				return
@@ -291,8 +308,11 @@ func (a *App) inviteHandlers(mux *http.ServeMux) {
 			json.NewEncoder(w).Encode(map[string]any{"already": true, "addr": gKey(gid)})
 			return
 		}
-		if g, ok := a.store.Groups[gid]; ok && g.Left {
-			delete(a.store.Groups, gid) // joining again starts fresh
+		if g, ok := a.store.Groups[gid]; ok && (g.Left || g.Req) {
+			// Joining again starts fresh; so does an unanswered invitation
+			// (anyone who knows the group id can make one, and its list
+			// could leave out the host so the host's answer is refused), v0.19.3.
+			delete(a.store.Groups, gid)
 		}
 		a.setJoinLocked(gid, host, joinWaitTTL)
 		a.store.save()

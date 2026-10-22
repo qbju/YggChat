@@ -38,6 +38,7 @@ import (
 	"encoding/json"
 	"net"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -51,6 +52,8 @@ const (
 	nostrGroupMax   = 64   // bigger groups don't park copies on Nostr
 	maxStubs        = 50   // placeholder groups made from strangers' messages
 	copyTries       = 3    // direct tries per member copy before it waits in the queue
+	maxPartBufs     = 64   // split group infos being assembled at once
+	maxPartBufsPer  = 4    // ... from one sender
 )
 
 // groupSem limits how many member copies are being delivered at once.
@@ -162,12 +165,30 @@ func chunkAddrs(as []string) [][]string {
 // else a header (first) plus parts.
 func (a *App) infoPackets(g Group) []wire {
 	w := a.infoWire(g)
+	// The host/an admin says when the members it lists as gone dropped out
+	// ("gt", v0.19.3), when it still fits.
+	var gt map[string]int64
+	if canManage(g, a.addr) {
+		gt = goneTimes(g)
+	}
 	if b, _ := json.Marshal(w); len(b) <= giMaxBytes {
+		if x := w; gt != nil {
+			x.GT = gt
+			if b, _ := json.Marshal(x); len(b) <= giMaxBytes {
+				return []wire{x}
+			}
+		}
 		return []wire{w}
 	}
 	w.GM = nil
 	w.GC = len(g.Members)
 	w.GH = groupHash(g.Name, g.Members)
+	if x := w; gt != nil {
+		x.GT = gt
+		if wireLen(x) <= dgramMax {
+			w = x
+		}
+	}
 	out := []wire{w}
 	parts := chunkAddrs(g.Members)
 	for i, p := range parts {
@@ -215,10 +236,24 @@ func (a *App) sendInfo(g Group, extra ...string) {
 	a.sendPackets(extra, ps)
 }
 
-// sendMembers tells everyone about a membership change made by us.
-func (a *App) sendMembers(g Group, added, removed []string) {
+// sendMembers tells everyone about a membership change made by us. kick:
+// the removed were removed by a manager (not a leave), so the other managers
+// refuse their link joins too. The classic gi also carries what was removed
+// (gr), so a host merging two admins' changes made from the same version
+// keeps both removals (v0.19.3).
+func (a *App) sendMembers(g Group, added, removed []string, kick bool) {
 	ps := a.infoPackets(g)
 	if classicFits(ps) {
+		if len(removed) > 0 {
+			x := ps[0]
+			x.GR = packAddrs(removed)
+			if kick {
+				x.K = "kick"
+			}
+			if wireLen(x) <= dgramMax {
+				ps = []wire{x}
+			}
+		}
 		a.sendPackets(append(append([]string{}, g.Members...), removed...), ps)
 		return
 	}
@@ -236,12 +271,16 @@ func (a *App) sendMembers(g Group, added, removed []string) {
 	var ds []wire
 	for _, c := range chunkAddrs(added) {
 		if len(c) > 0 {
-			ds = append(ds, wire{T: "gd", G: g.ID, GV: g.V, GA: packAddrs(c), GH: gh})
+			ds = append(ds, wire{T: "gd", G: g.ID, GV: g.V, GA: packAddrs(c), GH: gh, TS: g.VAt})
 		}
 	}
 	for _, c := range chunkAddrs(removed) {
 		if len(c) > 0 {
-			ds = append(ds, wire{T: "gd", G: g.ID, GV: g.V, GR: packAddrs(c), GH: gh})
+			d := wire{T: "gd", G: g.ID, GV: g.V, GR: packAddrs(c), GH: gh, TS: g.VAt}
+			if kick {
+				d.K = "kick"
+			}
+			ds = append(ds, d)
 		}
 	}
 	a.sendPackets(append(old, removed...), ds)
@@ -271,10 +310,16 @@ var gps = &gpState{bufs: map[string]*partBuf{}, qAt: map[string]time.Time{}, rAt
 
 // leaveNotice re-sends gl to a peer that still treats us as a member of a
 // group we left (it missed our gl), at most every 5 minutes (v0.19.2).
-func (a *App) leaveNotice(peer, gid string) {
+func (a *App) leaveNotice(peer, gid string) { a.leaveNoticeAt(peer, gid, 0) }
+
+// leaveNoticeAt is leaveNotice with when we left. The gl goes twice a few
+// seconds apart and at most once a minute: the first packets after a peer
+// comes back often go nowhere while the route is looked up, and a lost one
+// left the member thinking we were still in for 5 minutes (chaos 6b, v0.19.3).
+func (a *App) leaveNoticeAt(peer, gid string, ts int64) {
 	gps.mu.Lock()
 	k := gid + "|" + peer
-	if time.Since(gps.lAt[k]) < 5*time.Minute {
+	if time.Since(gps.lAt[k]) < time.Minute {
 		gps.mu.Unlock()
 		return
 	}
@@ -283,7 +328,9 @@ func (a *App) leaveNotice(peer, gid string) {
 	}
 	gps.lAt[k] = time.Now()
 	gps.mu.Unlock()
-	a.sendWire(peer, wire{T: "gl", G: gid})
+	w := wire{T: "gl", G: gid, TS: ts}
+	a.sendWire(peer, w)
+	time.AfterFunc(3*time.Second, func() { a.sendWire(peer, w) })
 }
 
 // askInfo sends gq to peer, at most every 15 s per group.
@@ -293,6 +340,9 @@ func (a *App) askInfo(peer, gid string) {
 	if time.Since(gps.qAt[k]) < 15*time.Second {
 		gps.mu.Unlock()
 		return
+	}
+	if len(gps.qAt) > 4096 {
+		gps.qAt = map[string]time.Time{} // strangers can make keys up (v0.19.3)
 	}
 	gps.qAt[k] = time.Now()
 	gps.mu.Unlock()
@@ -307,6 +357,9 @@ func (a *App) answerInfo(peer string, g Group) {
 		gps.mu.Unlock()
 		return
 	}
+	if len(gps.rAt) > 4096 {
+		gps.rAt = map[string]time.Time{}
+	}
 	gps.rAt[k] = time.Now()
 	gps.mu.Unlock()
 	for _, p := range a.infoPackets(g) {
@@ -319,12 +372,31 @@ func (a *App) partBufFor(from string, gid string, v int, gh string) *partBuf {
 	b := gps.bufs[k]
 	if b == nil || b.v != v || b.gh != gh || time.Since(b.at) > time.Minute {
 		b = &partBuf{v: v, gh: gh, parts: map[int][]string{}, at: time.Now()}
-		gps.bufs[k] = b
-		for kk, x := range gps.bufs { // drop stale buffers
+		// Drop stale buffers, and keep their number bounded: anyone can send
+		// parts for made-up group ids (v0.19.3).
+		mine, oldK, oldMine := 0, "", ""
+		var oldAt, oldMineAt time.Time
+		for kk, x := range gps.bufs {
 			if time.Since(x.at) > 2*time.Minute {
 				delete(gps.bufs, kk)
+				continue
+			}
+			if oldK == "" || x.at.Before(oldAt) {
+				oldK, oldAt = kk, x.at
+			}
+			if strings.HasSuffix(kk, "|"+from) {
+				mine++
+				if oldMine == "" || x.at.Before(oldMineAt) {
+					oldMine, oldMineAt = kk, x.at
+				}
 			}
 		}
+		if mine >= maxPartBufsPer && oldMine != "" {
+			delete(gps.bufs, oldMine)
+		} else if len(gps.bufs) >= maxPartBufs && oldK != "" {
+			delete(gps.bufs, oldK)
+		}
+		gps.bufs[k] = b
 	}
 	return b
 }
@@ -345,6 +417,7 @@ func (a *App) onInfoHeader(from string, w wire) {
 	}
 	gps.mu.Lock()
 	b := a.partBufFor(from, w.G, w.GV, w.GH)
+	first := b.hdr == nil
 	hw := w
 	b.hdr = &hw
 	full := a.partsDoneLocked(b)
@@ -352,6 +425,9 @@ func (a *App) onInfoHeader(from string, w wire) {
 	if full != nil {
 		a.onGroupCtl(from, *full)
 		return
+	}
+	if !first {
+		return // a repeat: the check below is already scheduled
 	}
 	// Parts usually follow right away; if not, ask for them.
 	time.AfterFunc(5*time.Second, func() {
@@ -424,11 +500,19 @@ func cleanNickOr(n string) string {
 // onDelta applies a membership change from the host or an admin.
 // Caller holds a.store.mu; released here.
 func (a *App) onDelta(from string, w wire, g Group, known bool) {
-	if !known || g.Left || !canManage(g, from) || !hasMember(g, a.addr) {
+	// A host that left (no heir) is still the Owner on file but no longer runs the group (v0.19.3).
+	if !known || g.Left || !canManage(g, from) || !hasMember(g, from) || !hasMember(g, a.addr) {
 		a.store.mu.Unlock()
 		return
 	}
 	host := g.Owner == a.addr
+	if !host && from != g.Owner && w.GV > g.V+maxVJump {
+		// An admin far ahead of us: the host's list decides, so an admin
+		// can't push the version out of reach (v0.19.3).
+		a.store.mu.Unlock()
+		a.askInfo(g.Owner, g.ID)
+		return
+	}
 	// An admin's delta the host gets late or from an old base (v <= ours) is
 	// merged into a new version: its additions (not the ones the host removed
 	// since), and its removals only when it is the same version (v0.19.2).
@@ -474,8 +558,17 @@ func (a *App) onDelta(from string, w wire, g Group, known bool) {
 		a.store.mu.Unlock() // a repeat of what we have
 		return
 	}
-	if !host && w.GV == g.V {
+	if !byHost && len(kept) > groupMax(g) {
+		// An admin can't take the group over its limit; the host decides (v0.19.3).
+		a.store.mu.Unlock()
+		if !host {
+			a.askInfo(g.Owner, g.ID)
+		}
+		return
+	}
+	if !host && w.GV == g.V && !(byHost && out) {
 		// Same version, different change: keep ours, let the host merge.
+		// (The host removing us is final even then, v0.19.3.)
 		a.store.mu.Unlock()
 		if from == g.Owner {
 			a.answerInfo(g.Owner, g)
@@ -487,15 +580,23 @@ func (a *App) onDelta(from string, w wire, g Group, known bool) {
 	sort.Strings(kept)
 	g.Members = kept
 	g.Admins = cleanAdmins(g.Admins, g)
+	at := int64(0)
 	if merge {
-		g.V++
+		bumpV(&g)
 	} else {
 		g.V = w.GV
+		at = changeTime(w.TS)
+		g.VAt = at // 0 = unknown (an older sender): never pass on a stale time
 	}
 	if host {
 		trackGone(&g, old.Members)
 	}
-	noteGone(&g, old.Members, 0)
+	noteGone(&g, old.Members, at)
+	dels := a.purgeGoneLocked(g, old.Members) // what they posted after the removal reached us late
+	kick := w.K == "kick" || (merge && len(removed) > 0)
+	if kick && canManage(g, a.addr) {
+		addBan(&g, removed)
+	}
 	for _, x := range added {
 		g.Pend = dropPend(g.Pend, x)
 	}
@@ -506,6 +607,7 @@ func (a *App) onDelta(from string, w wire, g Group, known bool) {
 	a.store.save()
 	a.store.mu.Unlock()
 	a.broadcast("contact", groupView(g))
+	a.broadcastDels(dels)
 	if out {
 		a.groupSys(g, "グループから外されました")
 		go a.failLeftCopies(g.ID)
@@ -513,7 +615,7 @@ func (a *App) onDelta(from string, w wire, g Group, known bool) {
 	}
 	a.memberSys(g, from, added, removed)
 	if merge {
-		a.sendMembers(g, added, removed) // everyone (the admin too) gets the merged version
+		a.sendMembers(g, added, removed, kick) // everyone (the admin too) gets the merged version
 		return
 	}
 	// The host re-sends the classic list so pre-v0.19 members learn an admin's change.

@@ -66,6 +66,16 @@ func noteGone(g *Group, before []string, at int64) {
 	if len(g.GoneAt) == 0 {
 		g.GoneAt = nil
 	}
+	noteAdded(g, before, 0) // and when the new ones came (history without sharing, v0.19.3)
+	if len(g.Ban) > 0 {
+		var keep []string // someone added back (by any manager) is no longer barred
+		for _, m := range g.Ban {
+			if !hasMember(*g, m) {
+				keep = append(keep, m)
+			}
+		}
+		g.Ban = keep
+	}
 }
 
 // goneAt returns when addr dropped out of g (0 = not known as a former member).
@@ -100,7 +110,16 @@ func (a *App) goneNotice(peer string, g Group) {
 	}
 	goneNoticeAt[k] = time.Now()
 	goneNoticeMu.Unlock()
-	for _, p := range a.infoPackets(g) {
+	for i, p := range a.infoPackets(g) {
+		if i == 0 {
+			// say it is them who are out ("gr"): a list at the version they
+			// hold from an admin is then not taken as a collision (v0.19.3)
+			x := p
+			x.GR = packAddrs([]string{peer})
+			if wireLen(x) <= dgramMax {
+				p = x
+			}
+		}
 		a.sendWire(peer, p)
 	}
 }
