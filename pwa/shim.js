@@ -300,7 +300,7 @@
   const inflight = new Set();
   const gOut = gid => { const g = st.groups[gid]; return !!(g && g.left); };
   const queuedFor = p => st.messages.filter(m => m.out && m.peer === p && (m.status === 'queued' || m.status === 'stored') && !(m.hid && gOut(m.grp)));
-  async function flush(p) { for (const m of queuedFor(p)) { if (!(await deliver(m, 4))) return; } await flushCtl(p); }
+  async function flush(p) { pushInvites(p); for (const m of queuedFor(p)) { if (!(await deliver(m, 4))) return; } await flushCtl(p); }
 
   // ---- edit / unsend (only our own messages; receiver checks the sender address) ----
   const ctlID = () => 'c' + Date.now().toString(16) + Math.random().toString(16).slice(2, 6);
@@ -478,6 +478,9 @@
     // Their answer (ghs) is taken for a while. Asked twice a few seconds apart: members that aren't contacts get no
     // hello first, so the first packet to one often goes nowhere while its route is looked up (answers are rate-limited).
     for (const x of ask) { noteHistAsk(gid, x); send(x, { t: 'ghq', g: gid, ts: since }); setTimeout(() => { if (st.groups[gid] && !st.groups[gid].left) { noteHistAsk(gid, x); send(x, { t: 'ghq', g: gid, ts: since }); } }, 4000); }
+    // History doesn't tell us about membership changes made while we were away: ask the host and admins for the info too (as Go).
+    const mgr = [g.owner].concat(g.admins || []).filter(x => x && x !== addr && g.members.includes(x)).slice(0, 4);
+    for (const x of mgr) { askInfo(x, gid); setTimeout(() => { if (st.groups[gid] && !st.groups[gid].left) send(x, { t: 'gq', g: gid }); }, 4000); }
   }
   function syncAllGroups() {
     let d = 0; for (const id of Object.keys(st.groups)) { setTimeout(() => syncGroup(id), d); d += 200; }
@@ -711,6 +714,30 @@
     to = to.filter(m => m !== addr); if (!to.length || !ps.length) return;
     for (let r = 0; r < 3; r++) setTimeout(async () => { let n = 0; for (const m of to) for (const p of ps) { send(m, p); if (++n % 64 === 0) await sleep(20); } }, r * 2000);
   }
+  // Group info that may not have arrived (as groupinv.go): the info sent on create/add is plain datagrams, and a
+  // member that just came online often misses all three rounds. Sent again at 10/30/90 s and on its hello until
+  // any packet about the group comes from it. In memory, at most a week.
+  const invAt = {}, invSent = {};
+  function noteInvited(gid, ms) {
+    if (Object.keys(invAt).length > 4096) for (const x in invAt) { delete invAt[x]; delete invSent[x]; }
+    ms = (ms || []).filter(m => m && m !== addr); if (!ms.length) return;
+    for (const m of ms) { const k = gid + '|' + m; if (!invAt[k]) invAt[k] = Date.now(); invSent[k] = Date.now(); }
+    let i = 0; const step = () => { if (i >= 3) return; setTimeout(() => { let left = 0; for (const m of ms) if (pushInvite(gid, m)) left++; i++; if (left) step(); }, [10000, 30000, 90000][i]); };
+    step();
+  }
+  function invHeard(gid, peer) { const k = gid + '|' + peer; if (invAt[k]) { delete invAt[k]; delete invSent[k]; } }
+  function pushInvite(gid, peer) {
+    const k = gid + '|' + peer, at = invAt[k];
+    if (at && Date.now() - at > 7 * 86400000) { invHeard(gid, peer); return false; }
+    if (!at) return false;
+    if (Date.now() - (invSent[k] || 0) < 10000) return true;
+    invSent[k] = Date.now();
+    const g = st.groups[gid];
+    if (!g || g.left || locked || !canMng(g, addr) || !g.members.includes(peer)) { invHeard(gid, peer); return false; }
+    for (const p of infoPackets(g)) send(peer, p);
+    return true;
+  }
+  function pushInvites(peer) { for (const k of Object.keys(invAt)) if (k.endsWith('|' + peer)) pushInvite(k.slice(0, k.length - peer.length - 1), peer); }
   function gInfo(g, extra) {
     const ps = infoPackets(g);
     if (ps.length === 1) { sendPackets(g.members.concat(extra || []), ps); return; }
@@ -722,12 +749,12 @@
     let ps = infoPackets(g);
     if (ps.length === 1) {
       if (removed.length) { const x = Object.assign({}, ps[0], { gr: packAddrs(removed) }); if (kick) x.k = 'kick'; if (goLen(x) <= DGRAM) ps = [x]; }
-      sendPackets(g.members.concat(removed), ps); return;
+      sendPackets(g.members.concat(removed), ps); noteInvited(g.id, added); return;
     }
     const old = g.members.filter(m => !added.includes(m)), gh = gHashS(g.name, g.members), ds = [];
     for (const c of chunkAddrs(added)) if (c.length) ds.push({ t: 'gd', g: g.id, gv: g.v, ga: packAddrs(c), gh, ts: g.vat || undefined });
     for (const c of chunkAddrs(removed)) if (c.length) ds.push({ t: 'gd', g: g.id, gv: g.v, gr: packAddrs(c), gh, ts: g.vat || undefined, k: kick ? 'kick' : undefined });
-    sendPackets(old.concat(removed), ds); sendPackets(added, ps);
+    sendPackets(old.concat(removed), ds); sendPackets(added, ps); noteInvited(g.id, added);
   }
   const qAt = {}, rAt = {}, pbufs = {};
   const capMap = o => { if (Object.keys(o).length > 4096) for (const x in o) delete o[x]; }; // strangers can make keys up (v0.19.3)
@@ -1232,6 +1259,7 @@
     if (w.t === 'pow') { onPowNeed(src, w); return; }
     if (locked || st.blocked[src]) return; // stay silent: the sender keeps it queued
     if (w.pk) learnPK(src, String(w.pk));
+    if (w.g) invHeard(String(w.g), src); // it has the group
     if (w.t === 'hi' || w.t === 'hiack') { if (w.t === 'hi') send(src, { t: 'hiack', pk: myPK() }); maybeProf(src); flush(src); return; }
     if (w.t === 'prof') {
       const c = st.contacts[src]; if (!c) return;
@@ -1816,7 +1844,7 @@
         const id = hexOf(crypto.getRandomValues(new Uint8Array(8)));
         const g = st.groups[id] = { id, name: cleanNick(body.Name) || 'グループ', members: ms, owner: addr, v: 1, vat: now(), set: { hi: true } };
         { const mx = GMAXES.find(c => c >= ms.length); if (mx && mx > GDEF) g.set.mx = mx; }
-        save(); emit('contact', gView(g)); gSys(g, 'グループ「' + g.name + '」を作りました'); gInfo(g); return ok(gView(g));
+        save(); emit('contact', gView(g)); gSys(g, 'グループ「' + g.name + '」を作りました'); gInfo(g); noteInvited(id, ms); return ok(gView(g));
       }
       case 'group/update': {
         const g = st.groups[body.ID]; if (!g || g.left) return bad('no such group');

@@ -554,6 +554,9 @@ func (a *App) handlePacket(rip net.IP, pkt []byte) {
 	if w.PK != "" {
 		a.learnPK(from, w.PK)
 	}
+	if w.G != "" {
+		invHeard(w.G, from) // it has the group (groupinv.go)
+	}
 	if isGroupCtl(w.T) {
 		a.onGroupCtl(from, w)
 		return
@@ -1049,6 +1052,7 @@ func (a *App) queued(peer string) []Message {
 
 // flush re-sends everything queued for peer, oldest first; stops at the first miss.
 func (a *App) flush(peer string) {
+	a.pushInvites(peer) // group info it may have missed (groupinv.go)
 	for _, m := range a.queued(peer) {
 		if !a.deliverN(m, 4) {
 			return

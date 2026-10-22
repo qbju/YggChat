@@ -528,6 +528,17 @@ func (a *App) syncGroup(gid string) {
 		noteHistAsk(gid, x) // their answer (ghs) is taken for a while
 		a.sendWire(x, wire{T: "ghq", G: gid, TS: since})
 	}
+	// History alone doesn't tell us about membership changes made while we
+	// were away (a removal we missed lets the removed member's later posts
+	// in and keeps them): ask the host and the admins for the info too
+	// (r2-matrix G5).
+	mgr := []string{}
+	for _, x := range append([]string{g.Owner}, g.Admins...) {
+		if x != "" && x != a.addr && hasMember(g, x) && len(mgr) < 4 {
+			mgr = append(mgr, x)
+			a.askInfo(x, gid)
+		}
+	}
 	// Asked twice a few seconds apart (as the PWA does): members that aren't
 	// contacts get no hello first, so the first packet to one often goes
 	// nowhere while its route is looked up (answers are rate-limited), v0.19.3.
@@ -543,6 +554,9 @@ func (a *App) syncGroup(gid string) {
 			for _, x := range ask {
 				noteHistAsk(gid, x)
 				a.sendWire(x, wire{T: "ghq", G: gid, TS: since})
+			}
+			for _, x := range mgr {
+				a.sendWire(x, wire{T: "gq", G: gid}) // (askInfo would hold it back for 15 s)
 			}
 		})
 	}

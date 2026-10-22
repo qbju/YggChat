@@ -255,6 +255,7 @@ func (a *App) sendMembers(g Group, added, removed []string, kick bool) {
 			}
 		}
 		a.sendPackets(append(append([]string{}, g.Members...), removed...), ps)
+		a.noteInvited(g.ID, added)
 		return
 	}
 	var old []string
@@ -285,6 +286,7 @@ func (a *App) sendMembers(g Group, added, removed []string, kick bool) {
 	}
 	a.sendPackets(append(old, removed...), ds)
 	a.sendPackets(added, ps)
+	a.noteInvited(g.ID, added)
 }
 
 // ---- receiving the split info ----

@@ -3,6 +3,7 @@ package main
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 // A catch-up relay (ghs) carries a photo only as a "📷" line and a long text
@@ -54,3 +55,55 @@ func TestRelayedPhotoAndLongTextReplaced(t *testing.T) {
 	}
 }
 
+// The info sent when a group is made can be lost (a member's route isn't
+// there yet): the host sends it again on the member's hello until it hears
+// from it about the group (r2-matrix G5/G3n "group reached all").
+func TestGroupInfoResentUntilHeard(t *testing.T) {
+	h, pc := tAppPC(t, tHost)
+	g, err := h.createGroup("G", []string{tMem, tAdm})
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(4500 * time.Millisecond) // the three quick rounds
+	n0 := len(pc.sent(tMem, "gi"))
+	if n0 == 0 {
+		t.Fatal("no info sent")
+	}
+	inv.mu.Lock()
+	inv.sent[g.ID+"|"+tMem] = time.Time{} // as if 10 s had passed
+	inv.sent[g.ID+"|"+tAdm] = time.Time{}
+	inv.mu.Unlock()
+	invHeard(g.ID, tAdm) // tAdm asked something about the group: it has it
+	h.pushInvites(tMem)
+	h.pushInvites(tAdm)
+	if n := len(pc.sent(tMem, "gi")); n != n0+1 {
+		t.Fatalf("not re-sent on hello: %d -> %d", n0, n)
+	}
+	if n := len(pc.sent(tAdm, "gi")); n != n0 {
+		t.Fatalf("re-sent to a member we heard from: %d", n)
+	}
+	h.pushInvites(tMem) // within 10 s: held back
+	if n := len(pc.sent(tMem, "gi")); n != n0+1 {
+		t.Fatalf("re-sent too often: %d", n)
+	}
+	invHeard(g.ID, tMem)
+	if h.pushInvite(g.ID, tMem) {
+		t.Fatal("still pending after hearing from it")
+	}
+}
+
+// Catch-up also asks the host for the info: a removal made while we were
+// away must reach us even if nobody posts (r2-matrix G5).
+func TestSyncGroupAsksInfo(t *testing.T) {
+	gid := "abab6666abab6666"
+	b, pc := tAppPC(t, tMem)
+	b.store.Groups[gid] = Group{ID: gid, Name: "G", Members: cleanMembers([]string{tHost, tMem, tAdm}, ""), Owner: tHost, Admins: []string{tAdm}}
+	b.syncGroup(gid)
+	if len(pc.sent(tHost, "gq")) != 1 || len(pc.sent(tAdm, "gq")) != 1 {
+		t.Fatalf("gq: host %d admin %d", len(pc.sent(tHost, "gq")), len(pc.sent(tAdm, "gq")))
+	}
+	time.Sleep(4500 * time.Millisecond)
+	if len(pc.sent(tHost, "gq")) != 2 {
+		t.Fatalf("second gq: %d", len(pc.sent(tHost, "gq")))
+	}
+}

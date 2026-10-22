@@ -267,6 +267,7 @@ func (a *App) createGroup(name string, members []string) (Group, error) {
 	a.broadcast("contact", groupView(g))
 	a.groupSys(g, "グループ「"+g.Name+"」を作りました")
 	a.sendPackets(g.Members, a.infoPackets(g))
+	a.noteInvited(g.ID, g.Members) // sent again while we don't hear from them (groupinv.go)
 	return g, nil
 }
 
