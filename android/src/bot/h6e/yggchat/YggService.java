@@ -148,6 +148,10 @@ public class YggService extends Service {
     // HMAC-SHA256(key, "yggchat-ui-proof\n" + nonce) at GET /api/proof.
     static boolean nodeOK(String key) {
         if (key == null || key.isEmpty()) return false;
+        // The proof is a separate connection: it only means something for the
+        // next request if nobody else can take the port in between, i.e.
+        // while this app holds it (holdUiPort).
+        if (!uiHeld()) { ensureUiPort(); return false; }
         HttpURLConnection c = null;
         try {
             byte[] nb = new byte[16];
@@ -216,6 +220,81 @@ public class YggService extends Service {
         }}).start();
     }
 
+    // ---------- the UI port, held by the app (v0.19.4) ----------
+    // The node used to bind 127.0.0.1:7780 itself, so the port was free
+    // whenever it was down (first start, restartSelf, crash) and any app could
+    // take it. A proof check before each request still left a window: the port
+    // could change hands between the check and the request (the WebView
+    // re-checked at most every 300 ms). Now this process binds the port once
+    // and keeps it for its whole life, and hands the listening socket to each
+    // node it starts over a same-uid unix socket. Connections made while the
+    // node restarts wait in the backlog instead of reaching another app, and
+    // nobody else can bind the port while the WebView (same process) runs.
+    private static volatile java.io.FileDescriptor uiFd;
+    private static String uiFdName;
+    private static Thread uiPortThread, uiFdServer;
+
+    static boolean uiHeld() { return uiFd != null; }
+
+    private static synchronized boolean holdUiPort() {
+        if (uiFd != null) return true;
+        java.io.FileDescriptor fd = null;
+        try {
+            fd = android.system.Os.socket(android.system.OsConstants.AF_INET, android.system.OsConstants.SOCK_STREAM, 0);
+            android.system.Os.setsockoptInt(fd, android.system.OsConstants.SOL_SOCKET, android.system.OsConstants.SO_REUSEADDR, 1);
+            android.system.Os.bind(fd, java.net.InetAddress.getByAddress(new byte[]{127, 0, 0, 1}), 7780);
+            android.system.Os.listen(fd, 128);
+            uiFd = fd;
+            return true;
+        } catch (Exception e) {
+            if (fd != null) { try { android.system.Os.close(fd); } catch (Exception x) { } }
+            return false;
+        }
+    }
+
+    // Keeps trying to bind the port (someone else may hold it right now).
+    static synchronized void ensureUiPort() {
+        if (uiFd != null || (uiPortThread != null && uiPortThread.isAlive())) return;
+        uiPortThread = new Thread(new Runnable() { public void run() {
+            while (!holdUiPort()) { try { Thread.sleep(300); } catch (InterruptedException e) { return; } }
+        }});
+        uiPortThread.setDaemon(true);
+        uiPortThread.start();
+    }
+
+    // Serves the held socket to our node (YGGCHAT_UIFD=<name>, an abstract
+    // unix socket with a random name; both ends check the peer's uid).
+    private static synchronized String uiFdServer() {
+        if (uiFdName != null && uiFdServer != null && uiFdServer.isAlive()) return uiFdName;
+        byte[] nb = new byte[12];
+        new java.security.SecureRandom().nextBytes(nb);
+        final String name = "yggchat-ui-" + hex(nb);
+        final android.net.LocalServerSocket srv;
+        try { srv = new android.net.LocalServerSocket(name); } catch (java.io.IOException e) { return null; }
+        uiFdName = name;
+        uiFdServer = new Thread(new Runnable() { public void run() {
+            while (true) {
+                android.net.LocalSocket s = null;
+                try {
+                    s = srv.accept();
+                    if (s.getPeerCredentials().getUid() != android.os.Process.myUid()) continue;
+                    for (int i = 0; i < 10 && !holdUiPort(); i++) Thread.sleep(200);
+                    java.io.FileDescriptor fd = uiFd;
+                    if (fd == null) continue; // the node asks again
+                    s.setFileDescriptorsForSend(new java.io.FileDescriptor[]{ fd });
+                    s.getOutputStream().write(1);
+                    s.setFileDescriptorsForSend(null);
+                    s.setSoTimeout(5000);
+                    s.getInputStream().read();
+                } catch (Exception e) {
+                } finally { if (s != null) { try { s.close(); } catch (Exception e) { } } }
+            }
+        }});
+        uiFdServer.setDaemon(true);
+        uiFdServer.start();
+        return name;
+    }
+
     private synchronized void startNode() {
         if (proc != null && proc.isAlive()) return;
         try {
@@ -225,6 +304,9 @@ public class YggService extends Service {
             ProcessBuilder pb = new ProcessBuilder(bin, "-data", data.getAbsolutePath(), "-ui", "127.0.0.1:7780");
             pb.environment().put("HOME", getFilesDir().getAbsolutePath());
             pb.environment().put("YGGCHAT_SUPERVISED", "1");
+            ensureUiPort();
+            String fdName = uiFdServer();
+            if (fdName != null) pb.environment().put("YGGCHAT_UIFD", fdName);
             pb.redirectErrorStream(true);
             pb.redirectOutput(new File(data, "node.log"));
             final Process p = pb.start();

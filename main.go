@@ -1791,7 +1791,15 @@ func main() {
 	if !*cliMode {
 		fmt.Printf("YggChat\n  your address: %s\n  open UI:      %s\n", a.addr, shownUIURL(*uiAddr, *dataDir, isCharDev(os.Stdout)))
 	}
-	ln, err := listenRetry(*uiAddr)
+	var ln net.Listener
+	var err error
+	if name := os.Getenv("YGGCHAT_UIFD"); name != "" {
+		// Android: the app holds the UI port for us (uifd_linux.go), so it is
+		// never free for another app while this node restarts (v0.19.4).
+		ln, err = uiListenerFromApp(name, *uiAddr)
+	} else {
+		ln, err = listenRetry(*uiAddr)
+	}
 	if err != nil {
 		log.Fatal(err)
 	}
