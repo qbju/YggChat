@@ -9,15 +9,14 @@ package main
 
 import (
 	"encoding/json"
+	"log"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
-	"sync"
+	"sync/atomic"
 	"time"
 )
-
-var sysMu sync.RWMutex
 
 func sysModeFile(dataDir string) string { return filepath.Join(dataDir, "system-ygg") }
 
@@ -44,29 +43,41 @@ func detectSysAddr() string {
 	return ""
 }
 
-func (a *App) myAddr() string {
-	sysMu.RLock()
-	defer sysMu.RUnlock()
-	return a.addr
-}
+func (a *App) myAddr() string { return a.addr }
 
-// watchSys keeps a.addr in step with the system node (VPN may start later).
+// sysUp: the device's Yggdrasil currently routes 200::/7 (system mode).
+var sysUp atomic.Bool
+
+// watchSys follows the system node (its VPN may start later or stop).
+// a.addr is read everywhere without a lock, so it is never rewritten while
+// the node runs: when the system node comes up with an address other than
+// the one we started with (it wasn't up yet, or its key changed), we restart
+// and start again with that one (v0.19.3; it was a data race before).
 func (a *App) watchSys() {
+	sysUp.Store(a.addr != "")
+	pending := ""
 	for {
+		time.Sleep(5 * time.Second)
 		ad := detectSysAddr()
-		sysMu.Lock()
-		changed := ad != a.addr
-		a.addr = ad
-		sysMu.Unlock()
-		if changed {
-			up := 0
-			if ad != "" {
-				up = 1
+		up := ad != "" && ad == a.addr
+		if up != sysUp.Load() {
+			sysUp.Store(up)
+			n := 0
+			if up {
+				n = 1
 				go a.helloAll()
 			}
-			a.broadcast("peers", map[string]any{"up": up, "total": 1})
+			a.broadcast("peers", map[string]any{"up": n, "total": 1})
 		}
-		time.Sleep(5 * time.Second)
+		switch {
+		case ad == "" || ad == a.addr:
+			pending = ""
+		case ad != pending:
+			pending = ad // seen once: restart only if it holds on the next look
+		default:
+			log.Printf("system Yggdrasil address is now %s (was %q): restarting", ad, a.addr)
+			restartSelf()
+		}
 	}
 }
 

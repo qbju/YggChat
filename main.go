@@ -1048,8 +1048,8 @@ type peerView struct {
 
 func (a *App) peerList() []peerView {
 	if a.sys {
-		v := peerView{URI: "system://（端末のYggdrasilアプリ）", Up: a.addr != ""}
-		if a.addr == "" {
+		v := peerView{URI: "system://（端末のYggdrasilアプリ）", Up: sysUp.Load()}
+		if !v.Up {
 			v.Error = "端末のYggdrasilが見つかりません（VPNがオフ?）"
 		}
 		return []peerView{v}
@@ -1078,7 +1078,7 @@ func (a *App) peerList() []peerView {
 
 func (a *App) upPeers() int {
 	if a.sys {
-		if a.addr != "" {
+		if sysUp.Load() {
 			return 1
 		}
 		return 0
@@ -1609,6 +1609,12 @@ func main() {
 	}
 
 	a := &App{core: c, ns: ns, sys: sys, vpn: vpn, store: st, subs: map[chan []byte]struct{}{}, acks: map[string]chan struct{}{}, inflight: map[string]bool{}, seen: map[string]bool{}, profAt: map[string]time.Time{}, cfg: cfg, cfgPath: filepath.Join(*dataDir, "node.json"), dataDir: *dataDir}
+	// Our address is set once, before anything runs that reads it.
+	if sys {
+		a.addr = detectSysAddr()
+	} else {
+		a.addr = c.Address().String()
+	}
 	// Messages left "sending" by a previous run never got an ack.
 	st.requeueAfterRestart()
 	go func() {
@@ -1625,10 +1631,8 @@ func main() {
 		}
 	}()
 	if sys {
-		a.addr = detectSysAddr()
 		go a.watchSys()
 	} else {
-		a.addr = c.Address().String()
 		if vpn {
 			a.vpnFW(*dataDir)
 			a.startVPN()
