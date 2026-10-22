@@ -466,10 +466,10 @@ func (a *App) onHistReq(from string, w wire, g Group, known bool) {
 	}
 	hist := a.historyLocked(g.ID)
 	a.store.mu.Unlock()
-	now := time.Now().Unix()
+	now := monoMs() // monotonic: a clock set back must not silence us (clock.go)
 	histReqMu.Lock()
 	k := from + "/" + g.ID
-	if t := histReqSeen[k]; now-t < 20 {
+	if t, ok := histReqSeen[k]; ok && now >= t && now-t < 20000 {
 		histReqMu.Unlock()
 		return
 	}

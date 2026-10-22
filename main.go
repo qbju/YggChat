@@ -699,11 +699,11 @@ var (
 )
 
 func strangerOK(from string) bool {
-	now := time.Now().UnixMilli()
+	now := monoMs() // not wall time: a clock set back must not freeze the limiter (clock.go)
 	cut := now - 60000
 	trim := func(ts []int64) []int64 {
 		i := 0
-		for i < len(ts) && ts[i] <= cut {
+		for i < len(ts) && (ts[i] <= cut || ts[i] > now) {
 			i++
 		}
 		return ts[i:]
