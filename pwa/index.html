@@ -1480,7 +1480,7 @@ img.emoji { height:1.2em; width:1.2em; margin:0 .05em 0 .1em; vertical-align:-0.
       <a class="dl-btn" href="https://yggchat.surge.sh/dl/yggchat-darwin-arm64" download>🍎 macOS (Apple Silicon・署名なし)</a>
       <a class="dl-btn" href="https://yggchat.surge.sh/dl/yggchat-android-arm64" download>⌨️ Termux (arm64)</a>
       <a class="dl-btn" href="https://yggchat.pages.dev/download" target="_blank" rel="noopener">その他（Linux arm64/armv7・Windows arm64・Intel Mac・FreeBSD）</a>
-      <div class="row-sub" id="dl-ver">最新: v0.19.2 ・ SHA256SUMS で検証できます</div>
+      <div class="row-sub" id="dl-ver">最新: v0.19.3 ・ SHA256SUMS で検証できます</div>
     </div>
     <div class="section">
       <div class="section-title">About</div>
@@ -1699,13 +1699,21 @@ function hashColor(addr){
 
 // One timer for the one toast: an earlier toast's timer hid a newer one early;
 // long messages stay up longer.
-let toastT = null;
-function toast(msg){
+let toastT = null, toastTag = '';
+function toast(msg, tag){
   const el = $('toast');
   el.textContent = msg;
   el.classList.add('show');
+  toastTag = tag || '';
   clearTimeout(toastT);
-  toastT = setTimeout(() => el.classList.remove('show'), Math.min(8000, 2500 + String(msg || '').length * 40));
+  toastT = setTimeout(() => { el.classList.remove('show'); toastTag = ''; }, Math.min(8000, 2500 + String(msg || '').length * 40));
+}
+// Hide the toast only if it is still the one with this tag (e.g. 「承認待ち」 once the group arrives).
+function hideToast(tag){
+  if(!tag || toastTag !== tag) return;
+  clearTimeout(toastT);
+  $('toast').classList.remove('show');
+  toastTag = '';
 }
 
 async function api(path, body){
@@ -3180,6 +3188,7 @@ function connectEvents(){
         renderList();
       }else if(d.type === 'joins'){
         state.joins = Array.isArray(d.data) ? d.data : [];
+        if(toastTag.startsWith('wait:') && !state.joins.some(j => 'wait:' + j.addr === toastTag)) hideToast(toastTag); // approved, refused or cancelled
         renderList();
       }else if(d.type === 'status'){
         const st = d.data;
@@ -3203,7 +3212,7 @@ function connectEvents(){
           renderList();
           if(pendingJoin === c.addr && !c.left){ pendingJoin = null; toast('グループに参加しました'); openChat(c.addr); }
           else if(c.group && !c.req && !c.left && (state.joins || []).some(j => j.addr === c.addr)){ toast('「' + (c.nick || 'グループ') + '」に参加しました'); }
-          if(c.group && !c.req && !c.left) state.joins = (state.joins || []).filter(j => j.addr !== c.addr);
+          if(c.group && !c.req && !c.left){ state.joins = (state.joins || []).filter(j => j.addr !== c.addr); hideToast('wait:' + c.addr); }
           if(curAddr === c.addr){ updateChatHeader(); if(c.group) renderMessages(); }
         }
       }else if(d.type === 'contact_del'){
@@ -3240,7 +3249,11 @@ function connectEvents(){
         if(d.data && d.data.k === 'pw' && pendingJoin && pendingCode){
           pendingJoin = null;
           uiPrompt(d.data.text + '\nパスワードを入力', '').then(v => { if(v) joinByCode(pendingCode, v); });
-        }else if(d.data && d.data.k === 'wait'){ pendingJoin = null; toast('承認待ちです。チャット一覧に表示しています'); }
+        }else if(d.data && d.data.k === 'wait'){
+          pendingJoin = null;
+          const ga = d.data.g ? 'g:' + d.data.g : '', gc = ga && state.contacts[ga];
+          if(!(gc && gc.group && !gc.req && !gc.left)) toast('承認待ちです。チャット一覧に表示しています', 'wait:' + ga); // already a member: no stale "waiting" toast
+        }
         else if(d.data && d.data.k === 'store'){ uiAlert(String(d.data.text || '')); }
         else if(d.data && d.data.text){ pendingJoin = null; toast(d.data.text); }
       }else if(d.type === 'move'){

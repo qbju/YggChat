@@ -528,6 +528,24 @@ func (a *App) syncGroup(gid string) {
 		noteHistAsk(gid, x) // their answer (ghs) is taken for a while
 		a.sendWire(x, wire{T: "ghq", G: gid, TS: since})
 	}
+	// Asked twice a few seconds apart (as the PWA does): members that aren't
+	// contacts get no hello first, so the first packet to one often goes
+	// nowhere while its route is looked up (answers are rate-limited), v0.19.3.
+	if len(ask) > 0 {
+		time.AfterFunc(4*time.Second, func() {
+			a.store.mu.Lock()
+			g, ok := a.store.Groups[gid]
+			still := ok && !g.Left && !g.Req && !a.store.locked
+			a.store.mu.Unlock()
+			if !still {
+				return
+			}
+			for _, x := range ask {
+				noteHistAsk(gid, x)
+				a.sendWire(x, wire{T: "ghq", G: gid, TS: since})
+			}
+		})
+	}
 }
 
 func (a *App) syncAllGroups() {

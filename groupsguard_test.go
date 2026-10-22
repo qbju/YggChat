@@ -681,3 +681,18 @@ func TestRemovalDeltaAtCollidingVersion(t *testing.T) {
 		t.Fatalf("host's removal delta ignored: %+v", g)
 	}
 }
+
+// The catch-up ask (ghq) goes twice, 4 s apart, as in the PWA (v0.19.3).
+func TestSyncGroupAsksTwice(t *testing.T) {
+	gid := "abab5555abab5555"
+	b, pc := tAppPC(t, tMem)
+	b.store.Groups[gid] = Group{ID: gid, Name: "G", Members: cleanMembers([]string{tHost, tMem}, ""), Owner: tHost}
+	b.syncGroup(gid)
+	if n := len(pc.sent(tHost, "ghq")); n != 1 {
+		t.Fatalf("first ask: %d", n)
+	}
+	time.Sleep(4500 * time.Millisecond)
+	if n := len(pc.sent(tHost, "ghq")); n != 2 {
+		t.Fatalf("second ask: %d", n)
+	}
+}

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 h6e and YggChat contributors
-const CACHE = 'yggchat-pwa-v45';
+const CACHE = 'yggchat-pwa-v46';
 const INDEX = './index.html';
 const ASSETS = [INDEX, './manifest.webmanifest', './wasm_exec.js', './shim.js', './qrcode.js', './jsqr.min.js', './twemoji.min.js', './ygg.wasm', './THIRD_PARTY_NOTICES.txt', './LICENSE.txt'];
 
