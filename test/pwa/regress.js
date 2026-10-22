@@ -115,6 +115,50 @@ const postSig = (kp, gid, pid, ts, text) => Buffer.from(Y.signHex(kp, 'ygg-gpost
     ok(!n.st.messages.some(m => m.text === 'no id' || m.text === 'empty id'), 'msg without id dropped');
     ok(!n.sent.some(x => x.w.t === 'ack' && !x.w.id), 'no ack without id');
   }
+  { // 10. device move: a squatter took/hogged the receive slot (v0.19.3); now a sender holding the code takes it
+    const mvKey = rpk => crypto.createHash('sha256').update(Buffer.concat([Buffer.from('yggchat-move-auth1\n'), rpk])).digest();
+    const mac = (key, ...p) => crypto.createHmac('sha256', key).update(p.join('\n')).digest('hex').slice(0, 32);
+    const hmac = (key, w) => mac(key, 'mh', w.id, String(w.size), String(w.n), w.sha);
+    ok(hmac(mvKey(Buffer.alloc(32)), { id: '0011223344556677', size: 5000, n: 6, sha: 'ab' }) === '38e9ffe08232a450924c18c323bbb8b0', 'proof matches the Go vector (move.HeaderMAC)');
+    const n = await node();
+    const rpk = crypto.randomBytes(32), b64u = b => b.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    n.ctx.yggMoveNew = a => 'ygm1:' + a + ':' + b64u(rpk);
+    n.ctx.yggMoveOpen = () => ({ error: '復号できませんでした' });
+    const r = await n.api('move/recv', {}); ok(r.status === 200 && /^ygm1:/.test(r.json.code), 'receive screen opened');
+    const key = mvKey(rpk), CH = 864;
+    const hdr = (blob, k) => { const w = { t: 'mh', id: crypto.randomBytes(8).toString('hex'), size: blob.length, n: Math.ceil(blob.length / CH), sha: sha(blob) }; if (k) w.ma = hmac(k, w); return w; };
+    const chunks = (src, w, blob) => { for (let i = 0; i < w.n; i++) n.pkt(src, { t: 'mc', id: w.id, i, d: blob.subarray(i * CH, (i + 1) * CH).toString('base64') }); };
+    const junk = crypto.randomBytes(5000), blob = crypto.randomBytes(3000);
+    const evil = hdr(junk); n.pkt(S, evil); await wait(60); await n.settle(20);
+    ok(n.sent.filter(x => x.peer === S && x.w.t === 'mha').length === 1, 'squatter gets a free slot (old-sender path)');
+    const forged = hdr(junk, mvKey(Buffer.alloc(32))); n.pkt(S, forged); await wait(60); await n.settle(20);
+    ok(n.sent.filter(x => x.peer === S && x.w.t === 'mha').length === 1, 'forged proof dropped');
+    const real = hdr(blob, key); n.pkt(A, real); await wait(60); await n.settle(20);
+    const ha = n.sent.filter(x => x.peer === A && x.w.t === 'mha');
+    ok(ha.length === 1 && ha[0].w.ma === mac(key, 'mha', real.id), 'proven sender takes the slot, answer carries proof');
+    ok(n.sent.some(x => x.peer === S && x.w.t === 'mng' && x.w.id === evil.id), 'squatter told it lost the slot');
+    n.pkt(S, hdr(junk)); n.pkt(S, evil); chunks(S, real, junk.subarray(0, blob.length)); await wait(60); await n.settle(20);
+    ok(!n.sent.some(x => x.peer === S && x.w.t === 'mca'), 'squatter chunks not taken');
+    chunks(A, real, blob); await wait(30); await n.settle(30);
+    ok(n.sent.some(x => x.peer === A && x.w.t === 'mng' && x.w.text === '復号できませんでした'), 'real sender completes the transfer');
+    // sender side: header carries the proof; answers only from the code's receiver
+    const n2 = await node();
+    n2.ctx.yggMoveSeal = () => ({ addr: B, blob: Buffer.from(blob).toString('base64') });
+    const code = 'ygm1:' + B + ':' + b64u(rpk);
+    const s2 = await n2.api('move/send', { Code: code }); ok(s2.status === 200, 'send started');
+    await wait(80); await wait(60); await n2.settle(10);
+    const h2 = n2.sent.find(x => x.peer === B && x.w.t === 'mh');
+    ok(h2 && h2.w.ma === hmac(key, h2.w), 'PWA sender header carries the proof');
+    n2.pkt(S, { t: 'mok', id: h2.w.id }); await wait(60); await n2.settle(10);
+    ok(!n2.events.some(e => e.type === 'move' && e.data && e.data.phase === 'done'), 'mok from another node ignored');
+    await n2.api('move/send', { Cancel: true });
+  }
+  { // 11. wireOf dropped "dby" (group unsend by a manager, r2) and would drop the move proof "ma"
+    const n = await node();
+    const w = n.T.wireOf(JSON.stringify({ t: 'del', g: G1, ref: 'p1', by: A, dby: B, sg: 'x', pk: 'y' }));
+    ok(w && w.dby === B, 'dby kept by wireOf');
+    ok(n.T.wireOf('{"t":"mh","ma":"ab"}').ma === 'ab' && n.T.wireOf('{"t":"mh","ma":1}') === null, 'ma kept as a string field');
+  }
   clearInterval(keep);
   console.log(passes + ' passed, ' + fails + ' failed');
   process.exit(fails ? 1 : 0);

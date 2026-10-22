@@ -49,7 +49,7 @@ POST /api/move/recv {} -> {code:"ygm1:<addr>:<x25519 pub b64url>"} (start receiv
 POST /api/move/send {Code, History} -> {size}; progress/result as event "move" {role:"send"|"recv", phase:"send"|"recv"|"import"|"done"|"error", got, n, err}. {Cancel:true} stops.
 POST /api/move/export {Pass, History} -> {data: base64 of "YGB1"||salt||nonce||AES-GCM(gzip(bundle))} (scrypt N=2^15).
 POST /api/move/import {Pass, Data} -> {} then restart. Bundle: {v:1, key:<ed25519 priv hex>, store:<chat.json shape>}.
-Wire: {t:"mh",id,size,n,sha} + {t:"mc",id,i,d} (864-byte chunks) acked {t:"mca",id,i}; receiver answers {t:"mok",id} or {t:"mng",id,text}.
+Wire: {t:"mh",id,size,n,sha,ma} + {t:"mc",id,i,d} (864-byte chunks) acked {t:"mca",id,i}; receiver answers the header with {t:"mha",id,ma} and the end with {t:"mok",id} or {t:"mng",id,text}. ma (v0.19.4) = first 16 bytes, hex, of HMAC-SHA256(SHA256("yggchat-move-auth1\n"+code pubkey), "mh\n"+id+"\n"+size+"\n"+n+"\n"+sha) (mha: "mha\n"+id). The code's pubkey never goes over the mesh, so only a sender holding the code can make it; a proven header takes the single receive slot from an unproven one, a wrong ma is dropped, no ma = pre-0.19.4 sender (first come, first served). Senders count mha/mca/mok/mng only from the code's address.
 Events add: msg_del {peer,id}, locked.
 Wire adds: msg.ttl; {t:"prof",nick,bio,av,pk}; {t:"ttl",ttl}; hi/hiack carry pk. Receivers verify pk against the source address.
 Mailbox: removed in v0.7 (no server-side store-and-forward; offline messages stay queued on the sender).

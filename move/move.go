@@ -20,12 +20,15 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/ecdh"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"io"
 	"net"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -68,6 +71,42 @@ func ParseCode(s string) (string, []byte, error) {
 		return "", nil, errors.New("移行コードが壊れています")
 	}
 	return ip.String(), pub, nil
+}
+
+// Transfer authentication (v0.19.4). The receiver's X25519 public key only
+// ever travels inside the code (QR or typed); it is never sent over the mesh.
+// So it doubles as a shared secret between the code's holder and the
+// receiver: the sender adds MAC(AuthKey(rpk), "mh", id, size, n, sha) to its
+// header ("ma"), and the receiver gives its single transfer slot to an
+// authenticated header even if another node holds it. Without this any mesh
+// node could take or hog the slot while the receive screen was open.
+// Codes and the bundle format are unchanged, so old peers still interoperate
+// (an old sender sends no "ma" and gets the old first-come slot).
+func AuthKey(rpk []byte) []byte {
+	h := sha256.New()
+	h.Write([]byte("yggchat-move-auth1\n"))
+	h.Write(rpk)
+	return h.Sum(nil)
+}
+
+// MAC is HMAC-SHA256 over the newline-joined parts, 16 bytes, hex.
+func MAC(key []byte, parts ...string) string {
+	m := hmac.New(sha256.New, key)
+	m.Write([]byte(strings.Join(parts, "\n")))
+	return hex.EncodeToString(m.Sum(nil)[:16])
+}
+
+// HeaderMAC authenticates a header {id,size,n,sha}.
+func HeaderMAC(key []byte, id string, size, n int, sha string) string {
+	return MAC(key, "mh", id, strconv.Itoa(size), strconv.Itoa(n), sha)
+}
+
+// ReplyMAC authenticates the receiver's answer to a header.
+func ReplyMAC(key []byte, id string) string { return MAC(key, "mha", id) }
+
+// MACOK compares in constant time.
+func MACOK(want, got string) bool {
+	return len(got) == 32 && hmac.Equal([]byte(want), []byte(got))
 }
 
 func gz(b []byte) []byte {

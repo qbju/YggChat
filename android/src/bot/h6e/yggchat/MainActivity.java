@@ -43,7 +43,7 @@ public class MainActivity extends Activity {
         }}).start();
     }
 
-    private volatile long verifiedAt = -100000;
+    private volatile boolean proven;
     static WebResourceResponse blocked(int code) {
         java.util.Map<String, String> hd = new java.util.HashMap<String, String>();
         hd.put("Cache-Control", "no-store");
@@ -95,6 +95,7 @@ public class MainActivity extends Activity {
 
     @Override protected void onCreate(Bundle s) {
         super.onCreate(s);
+        YggService.ensureUiPort(); // before anything talks to 127.0.0.1:7780
         pendingLink = linkOf(getIntent());
         Intent svc = new Intent(this, YggService.class);
         if (Build.VERSION.SDK_INT >= 26) startForegroundService(svc); else startService(svc);
@@ -178,8 +179,10 @@ public class MainActivity extends Activity {
             }
             // Every request the WebView makes to 127.0.0.1 carries the key
             // cookie (cookies ignore ports). Only our node's port is allowed,
-            // and only after it has recently proved it is ours: during a node
-            // restart another app could grab 7780 and collect the cookie.
+            // and only while this process holds that port (YggService.holdUiPort):
+            // then nobody else can listen on it, even while the node restarts,
+            // so there is no window between a proof check and the request (the
+            // old 300 ms re-check left one). The node proves the key once.
             @Override public WebResourceResponse shouldInterceptRequest(WebView v, WebResourceRequest r) {
                 Uri u = r.getUrl();
                 String h = u.getHost();
@@ -187,9 +190,9 @@ public class MainActivity extends Activity {
                 h = h.toLowerCase(java.util.Locale.ROOT);
                 if (!h.equals("127.0.0.1") && !h.equals("localhost") && !h.equals("[::1]") && !h.equals("::1") && !h.startsWith("127.")) return null;
                 if (!"http".equals(u.getScheme()) || !h.equals("127.0.0.1") || u.getPort() != 7780) return blocked(403);
-                long now = android.os.SystemClock.elapsedRealtime();
-                if (now - verifiedAt < 300) return null;
-                if (YggService.nodeOK(YggService.uiKey(MainActivity.this))) { verifiedAt = now; return null; }
+                if (!YggService.uiHeld()) { YggService.ensureUiPort(); return blocked(503); }
+                if (proven) return null;
+                if (YggService.nodeOK(YggService.uiKey(MainActivity.this))) { proven = true; return null; }
                 return blocked(503);
             }
             @Override public void onPageStarted(WebView v, String url, android.graphics.Bitmap f) {

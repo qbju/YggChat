@@ -1337,7 +1337,7 @@
   // A datagram as the native node decodes it (main.go type wire): only the known fields, each of its
   // Go type, or the whole packet is dropped like a failed json.Unmarshal. Before this, a wrong type
   // ("ts":"x", "gm":{...}) or a key like "__proto__" / "_checked" reached the handlers as is (r2).
-  const WSTR = ['t', 'id', 'nick', 'text', 'bio', 'av', 'dom', 'pk', 'mime', 'sha', 'd', 'ref', 'g', 'gn', 'go', 'gh', 'tok', 'pw', 'k', 'by', 'gmb', 'ga', 'gr', 'pn', 'sg'];
+  const WSTR = ['t', 'id', 'nick', 'text', 'bio', 'av', 'dom', 'pk', 'mime', 'sha', 'd', 'ref', 'g', 'gn', 'go', 'gh', 'tok', 'pw', 'k', 'by', 'gmb', 'ga', 'gr', 'pn', 'sg', 'dby', 'ma'];
   const WINT = ['ts', 'ttl', 'size', 'n', 'i', 'gv', 'gsv', 'gc'];
   const wellFormed = s => typeof s.toWellFormed === 'function' ? s.toWellFormed() : s; // lone surrogates as Go reads them (U+FFFD)
   const isInt = v => typeof v === 'number' && Number.isInteger(v) && Math.abs(v) < 2 ** 63; // Go int64 (big ones lose precision here, but aren't dropped)
@@ -1471,8 +1471,20 @@
   const MV_MAX = 64 * 1024 * 1024;
   const sleep = ms => new Promise(r => setTimeout(r, ms));
   const b64big = u8 => { let s = ''; for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000)); return btoa(s); };
-  const mvIn = { on: false, id: '', from: '', hdr: null, chunks: null, got: 0, at: 0, done: false, busy: false };
-  const mvOut = { id: '', acks: null, res: null };
+  const mvIn = { on: false, id: '', from: '', hdr: null, chunks: null, got: 0, at: 0, done: false, busy: false, key: null, auth: false };
+  const mvOut = { id: '', acks: null, res: null, peer: '', key: null };
+  // Transfer proof (v0.19.4, same as move.AuthKey/HeaderMAC/ReplyMAC): the code's X25519 public key never
+  // travels over the mesh, so HMAC keyed by SHA-256("yggchat-move-auth1\n"+rpk) proves a header comes from
+  // whoever holds the code. A proven header takes the receive slot from an unproven one (a squatter).
+  function mvCodeKey(code) {
+    let c = String(code || '').trim(); const i = c.indexOf('ygm1:'); if (i >= 0) c = c.slice(i);
+    const j = c.lastIndexOf(':'); if (!c.startsWith('ygm1:') || j < 5) return null;
+    try { const b = atob(c.slice(j + 1).trim().replace(/-/g, '+').replace(/_/g, '/')); if (b.length !== 32) return null; return Uint8Array.from(b, x => x.charCodeAt(0)); } catch { return null; }
+  }
+  async function mvAuthKey(rpk) { const pre = new TextEncoder().encode('yggchat-move-auth1\n'), u = new Uint8Array(pre.length + rpk.length); u.set(pre); u.set(rpk, pre.length); return crypto.subtle.importKey('raw', await crypto.subtle.digest('SHA-256', u), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']); }
+  async function mvMAC(key, ...parts) { return hexOf(await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(parts.join('\n')))).slice(0, 32); }
+  const mvHdrMAC = (key, w) => mvMAC(key, 'mh', String(w.id), String(w.size), String(w.n), String(w.sha));
+  const mvMACOK = (want, got) => { got = String(got || ''); if (got.length !== 32 || want.length !== 32) return false; let d = 0; for (let i = 0; i < 32; i++) d |= want.charCodeAt(i) ^ got.charCodeAt(i); return d === 0; };
   function moveBundle(history) {
     const s = { nick: st.nick, bio: st.bio || undefined, avatar: st.avatar || undefined, domain: st.domain || undefined, contacts: st.contacts, blocked: st.blocked, groups: st.groups, nostr_on: !!st.nostrOn, nostr_relays: st.nostrRelays && st.nostrRelays.length ? st.nostrRelays : undefined, nostr_legacy: !!st.nostrLegacy, pow_strict: !!st.powStrict || undefined };
     if (history) { s.messages = st.messages; s.ctl = st.ctl; }
@@ -1491,12 +1503,23 @@
     if (!mvIn.on) return;
     if (mvIn.done) { if (w.id === mvIn.id) send(src, { t: 'mok', id: w.id }); return; }
     if (w.t === 'mh') {
-      if (w.id === mvIn.id && src === mvIn.from) { send(src, { t: 'mha', id: w.id }); return; }
-      const size = w.size | 0, n = w.n | 0;
-      if (w.id === mvIn.id || !/^[0-9a-f]{8,40}$/.test(String(w.id)) || !/^[0-9a-f]{64}$/.test(String(w.sha)) || size < 33 || size > MV_MAX || n !== Math.ceil(size / CHUNK)) return;
-      if (mvIn.id && mvIn.from !== src && Date.now() - mvIn.at < 60000) return; // another transfer is running
-      Object.assign(mvIn, { id: w.id, from: src, hdr: w, chunks: new Array(n), got: 0, at: Date.now(), busy: false });
-      send(src, { t: 'mha', id: w.id });
+      const size = w.size, n = w.n;
+      if (!/^[0-9a-f]{8,40}$/.test(String(w.id)) || !/^[0-9a-f]{64}$/.test(String(w.sha)) || !Number.isInteger(size) || !Number.isInteger(n) || size < 33 || size > MV_MAX || n !== Math.ceil(size / CHUNK)) return;
+      // A proven header (v0.19.4 sender holding the code); a wrong proof is dropped, none = older sender.
+      const key = mvIn.key, auth = w.ma !== undefined && w.ma !== '';
+      if (auth && (!key || !mvMACOK(await mvHdrMAC(key, w), w.ma))) return;
+      if (!mvIn.on || mvIn.done || key !== mvIn.key) return; // the screen changed while hashing
+      const reply = { t: 'mha', id: w.id }; if (auth) reply.ma = await mvMAC(key, 'mha', w.id);
+      if (w.id === mvIn.id && src === mvIn.from) { if (auth === mvIn.auth) send(src, reply); return; }
+      if (w.id === mvIn.id) return;
+      if (mvIn.id && Date.now() - mvIn.at < 60000) {
+        // Taken: only a proven sender displaces an unproven one; the same sender may restart (not downgrade).
+        const takeover = auth && !mvIn.auth, restart = src === mvIn.from && (auth || !mvIn.auth);
+        if (!takeover && !restart) return; // another transfer is running
+        if (takeover && src !== mvIn.from) send(mvIn.from, { t: 'mng', id: mvIn.id, text: '別の送信元が受け取り側を使っています' });
+      }
+      Object.assign(mvIn, { id: w.id, from: src, hdr: w, chunks: new Array(n), got: 0, at: Date.now(), busy: false, auth });
+      send(src, reply);
       emit('move', { role: 'recv', phase: 'recv', got: 0, n, from: src });
       return;
     }
@@ -1512,7 +1535,7 @@
     if (mvIn.got < mvIn.chunks.length || mvIn.busy) return;
     mvIn.busy = true;
     const id = w.id, n = mvIn.chunks.length;
-    const fail = msg => { send(src, { t: 'mng', id, text: msg }); emit('move', { role: 'recv', phase: 'error', err: msg }); Object.assign(mvIn, { id: '', chunks: null, busy: false }); };
+    const fail = msg => { send(src, { t: 'mng', id, text: msg }); emit('move', { role: 'recv', phase: 'error', err: msg }); if (mvIn.id === id) Object.assign(mvIn, { id: '', chunks: null, busy: false, auth: false }); };
     const all = new Uint8Array(mvIn.hdr.size); let off = 0;
     for (const c of mvIn.chunks) { if (off + c.length > all.length) return fail('データが壊れていました'); all.set(c, off); off += c.length; }
     if (off !== all.length || await sha(all) !== mvIn.hdr.sha) return fail('データが壊れていました');
@@ -1522,17 +1545,19 @@
     mvIn.done = true; mvIn.chunks = null;
     for (let k = 0; k < 3; k++) send(src, { t: 'mok', id });
   }
-  function onMoveAck(src, w) {
-    if (!w.id || w.id !== mvOut.id) return;
-    if (w.t === 'mha') mvOut.hello = true;
+  async function onMoveAck(src, w) {
+    if (!w.id || w.id !== mvOut.id || src !== mvOut.peer) return; // only the receiver in the code
+    if (w.t === 'mha') { if (w.ma !== undefined && w.ma !== '' && !mvMACOK(await mvMAC(mvOut.key, 'mha', String(w.id)), w.ma)) return; if (w.id === mvOut.id) mvOut.hello = true; }
     else if (w.t === 'mca') { mvOut.hello = true; mvOut.acks.add(w.i | 0); }
     else if (mvOut.res) mvOut.res(w.t === 'mok' ? '' : '受け取り側: ' + (cleanText(w.text, 200) || '失敗しました'));
   }
-  async function moveSend(peer, blob) {
+  async function moveSend(peer, rpk, blob) {
     const id = hexOf(crypto.getRandomValues(new Uint8Array(8))), n = Math.ceil(blob.length / CHUNK);
+    const key = await mvAuthKey(rpk);
     const hdr = { t: 'mh', id, size: blob.length, n, sha: await sha(blob) };
+    hdr.ma = await mvHdrMAC(key, hdr); // older receivers ignore it
     let resolve; const res = new Promise(r => resolve = r);
-    Object.assign(mvOut, { id, acks: new Set(), res: resolve, hello: false });
+    Object.assign(mvOut, { id, acks: new Set(), res: resolve, hello: false, peer, key });
     const finish = err => { if (mvOut.id === id) Object.assign(mvOut, { id: '', acks: null, res: null }); emit('move', err ? { role: 'send', phase: 'error', err } : { role: 'send', phase: 'done', got: n, n }); };
     // Header only until the receiver answers it (mha; v0.15.0 never does, so
     // chunks start after 4 s anyway), then a window that grows from 32.
@@ -2129,9 +2154,10 @@
         save(); for (const p in st.contacts) if (st.contacts[p].shared) sendProf(p); return ok({});
       }
       case 'move/recv': {
-        if (body.Stop) { if (!mvIn.done) Object.assign(mvIn, { on: false, id: '', chunks: null }); return ok({}); }
+        if (body.Stop) { if (!mvIn.done) Object.assign(mvIn, { on: false, id: '', chunks: null, key: null, auth: false }); return ok({}); }
         const code = yggMoveNew(addr); if (!code) return bad('failed', 500);
-        Object.assign(mvIn, { on: true, id: '', chunks: null, done: false, busy: false });
+        const rpk = mvCodeKey(code); if (!rpk) return bad('failed', 500);
+        Object.assign(mvIn, { on: true, id: '', chunks: null, done: false, busy: false, key: await mvAuthKey(rpk), auth: false });
         return ok({ code });
       }
       case 'move/send': {
@@ -2141,7 +2167,8 @@
         const r = yggMoveSeal(String(body.Code || ''), moveBundle(!!body.History));
         if (r.error) return bad(r.error);
         if (r.addr === addr) return bad('これはこの端末自身のコードです。新しい端末に出ているコードを入れてください');
-        const blob = unb64(r.blob); moveSend(r.addr, blob);
+        const rpk = mvCodeKey(body.Code); if (!rpk) return bad('移行コードが壊れています');
+        const blob = unb64(r.blob); moveSend(r.addr, rpk, blob);
         return ok({ size: blob.length });
       }
       case 'move/export': {
@@ -2263,5 +2290,5 @@
     return es;
   };
   // Test hook (test/pwa/harness.js defines __yggTest before loading; never set in a page).
-  if (typeof __yggTest === 'object' && __yggTest) Object.assign(__yggTest, { st: () => st, ready, onPacket, nostrFetch });
+  if (typeof __yggTest === 'object' && __yggTest) Object.assign(__yggTest, { st: () => st, ready, onPacket, nostrFetch, wireOf });
 })();
