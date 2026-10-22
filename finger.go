@@ -34,14 +34,15 @@ type fingerCfg struct {
 }
 
 type fingerState struct {
-	mu     sync.Mutex
-	path   string
-	cfg    fingerCfg
-	tcp    string // "" (off: no listener at all) | "listening" | error text
-	ln     net.Listener
-	waitMu sync.Mutex
-	wait   map[string]chan wire
-	sem    chan struct{}
+	applyMu sync.Mutex // serializes fingerApply (open/close of the listener)
+	mu      sync.Mutex
+	path    string
+	cfg     fingerCfg
+	tcp     string // "" (off: no listener at all) | "listening" | error text
+	ln      net.Listener
+	waitMu  sync.Mutex
+	wait    map[string]chan wire
+	sem     chan struct{}
 }
 
 func cleanPlan(s string, max int) string {
@@ -73,6 +74,10 @@ func (a *App) fingerInit(dataDir string) {
 // 79 is simply closed (same RST as any unused port), so nothing reveals that
 // this address runs YggChat; UDP fq is ignored too.
 func (a *App) fingerApply() {
+	// Without this, an "off" racing a slow "on" could leave a listener open
+	// while finger is off (the off saw no listener yet).
+	a.fing.applyMu.Lock()
+	defer a.fing.applyMu.Unlock()
 	a.fing.mu.Lock()
 	on, ln := a.fing.cfg.On, a.fing.ln
 	if !on && ln != nil {
@@ -88,6 +93,17 @@ func (a *App) fingerApply() {
 	if ln == nil {
 		a.fingerListen()
 	}
+}
+
+// fingerListening reports whether finger is on and its TCP listener is up
+// (the VPN firewall and port mapping only let TCP 79 in then).
+func (a *App) fingerListening() bool {
+	if a.fing == nil {
+		return false
+	}
+	a.fing.mu.Lock()
+	defer a.fing.mu.Unlock()
+	return a.fing.cfg.On && a.fing.ln != nil
 }
 
 func (a *App) fingerConf() fingerCfg {
@@ -107,6 +123,9 @@ func (a *App) fingerListen() {
 		ln, err = net.Listen("tcp6", net.JoinHostPort("::", "79"))
 	default:
 		ln, err = a.ns.ListenTCP(&net.TCPAddr{IP: net.ParseIP(a.addr), Port: fingerPort})
+	}
+	if err == nil && (a.vpn || a.sys) {
+		ln = yggOnlyListener{ln} // the OS listener also sees LAN/Internet clients
 	}
 	a.fing.mu.Lock()
 	if err != nil {
@@ -161,13 +180,28 @@ func (a *App) fingerServe(c net.Conn) {
 	if blocked {
 		return
 	}
-	line, _ := bufio.NewReader(io.LimitReader(c, 256)).ReadString('\n')
-	q := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "/W"))
-	if strings.Contains(q, "@") {
+	line, _ := bufio.NewReader(io.LimitReader(c, fingerMaxLine)).ReadString('\n')
+	if _, fwd := fingerQuery(line); fwd {
 		io.WriteString(c, "finger: forwarding refused\r\n")
 		return
 	}
 	io.WriteString(c, strings.ReplaceAll(a.fingerText(cf), "\n", "\r\n"))
+}
+
+const fingerMaxLine = 256
+
+// fingerQuery parses an RFC 1288 query line ({Q1} "[/W] [user]" or {Q2}
+// "[/W] [user]@host..."). Every user gets the same card, so only whether it
+// asks us to forward (contains "@", refused per RFC 1288 2.5.5) matters.
+func fingerQuery(line string) (user string, forward bool) {
+	q := strings.TrimSpace(line)
+	if strings.HasPrefix(q, "/W") || strings.HasPrefix(q, "/w") {
+		q = strings.TrimSpace(q[2:])
+	}
+	if strings.Contains(q, "@") {
+		return "", true
+	}
+	return q, false
 }
 
 func (a *App) fingerNick() string {

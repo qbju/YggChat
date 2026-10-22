@@ -26,20 +26,26 @@ func (v *vpnState) accept(c *net.UnixConn) {
 	}
 	_ = c.SetReadDeadline(time.Now().Add(5 * time.Second))
 	buf, oob := make([]byte, 16), make([]byte, syscall.CmsgSpace(4*4))
-	_, oobn, _, _, err := c.ReadMsgUnix(buf, oob)
+	_, oobn, flags, _, err := c.ReadMsgUnix(buf, oob)
 	if err != nil {
 		return
 	}
 	msgs, err := syscall.ParseSocketControlMessage(oob[:oobn])
-	if err != nil || len(msgs) == 0 {
+	if err != nil {
 		return
 	}
-	fds, err := syscall.ParseUnixRights(&msgs[0])
-	if err != nil || len(fds) == 0 {
-		return
+	// Collect every passed fd so none leaks; use exactly one.
+	var fds []int
+	for i := range msgs {
+		if got, err := syscall.ParseUnixRights(&msgs[i]); err == nil {
+			fds = append(fds, got...)
+		}
 	}
-	for _, extra := range fds[1:] {
-		syscall.Close(extra)
+	if len(fds) != 1 || flags&syscall.MSG_CTRUNC != 0 {
+		for _, fd := range fds {
+			syscall.Close(fd)
+		}
+		return
 	}
 	f := os.NewFile(uintptr(fds[0]), "tun")
 	v.mu.Lock()

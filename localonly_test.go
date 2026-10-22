@@ -4,8 +4,12 @@
 package main
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -77,5 +81,42 @@ func TestKeyGuard(t *testing.T) {
 	}
 	if w := do("/api/state", nil, ck[0]); w.Code != 204 {
 		t.Fatal("cookie auth:", w.Code)
+	}
+}
+
+// /api/proof lets the Android side check the node knows the key before it
+// sends the key (port squatting); it must answer without the key and never
+// echo the key itself.
+func TestUIProof(t *testing.T) {
+	uiKey = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	defer func() { uiKey = "" }()
+	h := keyGuard("127.0.0.1:7780", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(204) }))
+	n := "00112233445566778899aabbccddeeff"
+	r := httptest.NewRequest("GET", "/api/proof?n="+n, nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	m := hmac.New(sha256.New, []byte(uiKey))
+	m.Write([]byte("yggchat-ui-proof\n" + n))
+	want := `{"mac":"` + hex.EncodeToString(m.Sum(nil)) + `"}`
+	if w.Code != 200 || w.Body.String() != want {
+		t.Fatalf("got %d %s", w.Code, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), uiKey) {
+		t.Fatal("key leaked")
+	}
+	for _, bad := range []string{"", "xyz", "0011", strings.Repeat("a", 130)} {
+		r := httptest.NewRequest("GET", "/api/proof?n="+bad, nil)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		if w.Code != 400 {
+			t.Errorf("nonce %q: %d", bad, w.Code)
+		}
+	}
+	// POST and other paths still need the key.
+	r = httptest.NewRequest("POST", "/api/proof?n="+n, nil)
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != 401 {
+		t.Fatalf("POST proof without key: %d", w.Code)
 	}
 }

@@ -27,6 +27,7 @@ import (
 	"io"
 	"net"
 	"strings"
+	"unicode/utf8"
 
 	"golang.org/x/crypto/scrypt"
 )
@@ -36,6 +37,7 @@ const (
 	MaxSize = 64 * 1024 * 1024 // sealed bundle
 	MaxN    = (MaxSize + Chunk - 1) / Chunk
 	maxGz   = 256 * 1024 * 1024 // decompressed bundle
+	MinPass = 8                 // backup passphrase, in characters
 )
 
 var b64u = base64.RawURLEncoding
@@ -160,8 +162,10 @@ func Open(k *ecdh.PrivateKey, blob []byte) ([]byte, error) {
 
 // Backup file: "YGB1" || salt(16) || nonce(12) || ciphertext.
 func SealPass(pass string, plain []byte) ([]byte, error) {
-	if len(pass) < 4 {
-		return nil, errors.New("パスフレーズは4文字以上にしてください")
+	// The file holds the identity key and history and can be attacked offline,
+	// so a 4-byte minimum (two Japanese characters) was far too weak.
+	if utf8.RuneCountInString(strings.TrimSpace(pass)) < MinPass {
+		return nil, errors.New("パスフレーズは8文字以上にしてください")
 	}
 	salt := make([]byte, 16)
 	rand.Read(salt)

@@ -3,6 +3,7 @@ package move
 
 import (
 	"bytes"
+	"net"
 	"testing"
 )
 
@@ -46,4 +47,46 @@ func TestRoundTrip(t *testing.T) {
 	if _, _, err := ParseCode("ygm1:1.2.3.4:xx"); err == nil {
 		t.Fatal("bad code accepted")
 	}
+}
+
+// Regression: SealPass accepted 4 bytes, i.e. "あい", for a file that holds
+// the identity key and can be brute-forced offline.
+func TestSealPassMinLength(t *testing.T) {
+	for _, p := range []string{"あい", "abcd", "1234567", "  abcdefg  "} {
+		if _, err := SealPass(p, []byte("x")); err == nil {
+			t.Errorf("weak passphrase %q accepted", p)
+		}
+	}
+	for _, p := range []string{"abcdefgh", "あいうえおかきく"} {
+		if _, err := SealPass(p, []byte("x")); err != nil {
+			t.Errorf("%q refused: %v", p, err)
+		}
+	}
+}
+
+func FuzzParseCode(f *testing.F) {
+	f.Add("ygm1:200:1234::1:" + b64u.EncodeToString(make([]byte, 32)))
+	f.Add("ygm1:1.2.3.4:xx")
+	f.Add("ygm1::")
+	f.Add("xx ygm1:[200::1]:AAAA")
+	f.Fuzz(func(t *testing.T, s string) {
+		addr, pub, err := ParseCode(s)
+		if err != nil {
+			return
+		}
+		ip := net.ParseIP(addr)
+		if ip == nil || ip.To4() != nil || ip[0]&0xfe != 0x02 || len(pub) != 32 {
+			t.Fatalf("accepted bad code %q -> %q %d", s, addr, len(pub))
+		}
+	})
+}
+
+func FuzzOpen(f *testing.F) {
+	k, _, _ := NewReceiver("200::1")
+	good, _ := Seal(k.PublicKey().Bytes(), []byte("hello"))
+	f.Add(good)
+	f.Add(make([]byte, 80))
+	f.Fuzz(func(t *testing.T, b []byte) {
+		_, _ = Open(k, b)
+	})
 }

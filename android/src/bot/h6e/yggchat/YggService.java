@@ -141,10 +141,79 @@ public class YggService extends Service {
         } catch (Exception e) { return ""; }
     }
 
+    // Checks that 127.0.0.1:7780 is really our node before the key is sent:
+    // while the node is down (first start, restarts) any other app can bind
+    // the port and would otherwise collect the key from our requests or the
+    // WebView launch URL. The node proves it knows the key with
+    // HMAC-SHA256(key, "yggchat-ui-proof\n" + nonce) at GET /api/proof.
+    static boolean nodeOK(String key) {
+        if (key == null || key.isEmpty()) return false;
+        HttpURLConnection c = null;
+        try {
+            byte[] nb = new byte[16];
+            new java.security.SecureRandom().nextBytes(nb);
+            String n = hex(nb);
+            c = (HttpURLConnection) new URL("http://127.0.0.1:7780/api/proof?n=" + n).openConnection();
+            c.setConnectTimeout(2000); c.setReadTimeout(3000);
+            c.setInstanceFollowRedirects(false);
+            if (c.getResponseCode() != 200) return false;
+            java.io.InputStream in = c.getInputStream();
+            byte[] buf = new byte[256]; int len = 0, r;
+            while (len < buf.length && (r = in.read(buf, len, buf.length - len)) > 0) len += r;
+            String mac = new JSONObject(new String(buf, 0, len, "UTF-8")).optString("mac");
+            javax.crypto.Mac m = javax.crypto.Mac.getInstance("HmacSHA256");
+            m.init(new javax.crypto.spec.SecretKeySpec(key.getBytes("UTF-8"), "HmacSHA256"));
+            String want = hex(m.doFinal(("yggchat-ui-proof\n" + n).getBytes("UTF-8")));
+            return java.security.MessageDigest.isEqual(want.getBytes("UTF-8"), mac.getBytes("UTF-8"));
+        } catch (Exception e) {
+            return false;
+        } finally { if (c != null) c.disconnect(); }
+    }
+
+    static String hex(byte[] b) {
+        StringBuilder sb = new StringBuilder();
+        for (byte x : b) sb.append(String.format("%02x", x & 0xff));
+        return sb.toString();
+    }
+
     static HttpURLConnection api(android.content.Context ctx, String path) throws java.io.IOException {
+        String k = uiKey(ctx);
+        if (!nodeOK(k)) throw new java.io.IOException("node not ready or not ours");
         HttpURLConnection c = (HttpURLConnection) new URL("http://127.0.0.1:7780" + path).openConnection();
-        c.setRequestProperty("X-YggChat-Key", uiKey(ctx));
+        c.setInstanceFollowRedirects(false);
+        c.setRequestProperty("X-YggChat-Key", k);
         return c;
+    }
+
+    // The VPN was revoked (another VPN app took over, or the permission is
+    // gone): the node must leave VPN mode, or it keeps using the OS stack
+    // with no TUN behind it and chat stops working until the user toggles
+    // the setting by hand. Retries in the background until the node answers.
+    static void leaveVpnMode(final android.content.Context ctx) {
+        final android.content.Context app = ctx.getApplicationContext();
+        new Thread(new Runnable() { public void run() {
+            for (int i = 0; i < 60; i++) {
+                try {
+                    HttpURLConnection g = api(app, "/api/vpn");
+                    g.setConnectTimeout(2000); g.setReadTimeout(3000);
+                    java.util.Scanner sc = new java.util.Scanner(g.getInputStream(), "UTF-8").useDelimiter("\\A");
+                    JSONObject st = new JSONObject(sc.hasNext() ? sc.next() : "{}");
+                    g.disconnect();
+                    if (!st.optBoolean("on")) return;
+                    if (app.getSharedPreferences("ygg", 0).getBoolean("vpn", false)) return; // turned back on meanwhile
+                    HttpURLConnection c = api(app, "/api/vpn");
+                    c.setConnectTimeout(2000); c.setReadTimeout(3000);
+                    c.setRequestMethod("POST");
+                    c.setDoOutput(true);
+                    c.setRequestProperty("Content-Type", "application/json");
+                    c.getOutputStream().write("{\"On\":false}".getBytes("UTF-8"));
+                    int code = c.getResponseCode();
+                    c.disconnect();
+                    if (code == 200) return;
+                } catch (Exception e) { }
+                try { Thread.sleep(2000); } catch (InterruptedException e) { return; }
+            }
+        }}).start();
     }
 
     private synchronized void startNode() {

@@ -5,8 +5,9 @@
 // Yggdrasil, anything listening on the phone (Termux sshd, a dev server...)
 // would be reachable from the whole mesh. The user picks:
 //
-//	closed (default) - nothing from outside, except YggChat chat (UDP 7777)
-//	                   and finger while finger is on
+//	closed (default) - nothing from outside, except YggChat chat (UDP 7777),
+//	                   finger (TCP 79) and the profile site (TCP 80) while
+//	                   their listeners are up
 //	list             - those plus the listed TCP/UDP ports
 //	all              - everything (like the official app)
 //
@@ -41,8 +42,8 @@ type vpnFW struct {
 	cfg    vpnFWCfg
 	open   map[uint16]bool
 	flows  map[flowKey]time.Time
-	finger func() bool
-	site   func() bool
+	finger func() bool // our finger listener is up (TCP 79, mapped to 7979)
+	site   func() bool // our profile site listener is up (TCP 80, mapped to 8080)
 }
 
 func loadVPNFW(dataDir string, finger func() bool) *vpnFW {
@@ -109,7 +110,12 @@ func (f *vpnFW) outbound(p []byte) {
 	f.mu.Unlock()
 }
 
-// inbound reports whether a packet from the mesh may reach the phone.
+// inbound reports whether a packet from the mesh may reach the phone. It sees
+// the packet as it arrived, before the 79->7979 / 80->8080 port mapping, so
+// only finger/site traffic sent to the real ports gets the finger/site
+// exception; a packet aimed straight at 7979 or 8080 is treated like any other
+// port (otherwise another app on 8080, say a dev server, would be exposed
+// whenever the profile site is on, or when our own listener failed to bind).
 func (f *vpnFW) inbound(p []byte) bool {
 	f.mu.Lock()
 	mode := f.cfg.Mode
@@ -121,10 +127,15 @@ func (f *vpnFW) inbound(p []byte) bool {
 		return false
 	}
 	switch p[6] {
-	case 58: // ICMPv6: errors and echo replies pass, echo requests (ping) don't
-		return len(p) > 40 && p[40] != 128
+	case 58:
+		// ICMPv6: errors (types 0-127, so PMTU/unreachable work) and echo
+		// replies pass; echo requests (ping) and other informational messages
+		// (node information queries, MLD, ...) don't.
+		return len(p) > 40 && (p[40] < 128 || p[40] == 129)
 	case 6, 17:
 	default:
+		// Extension headers (fragments included) are dropped: chat datagrams
+		// always fit one unfragmented packet.
 		return false
 	}
 	proto, sp, dp, ok := pktPorts(p)
@@ -134,10 +145,10 @@ func (f *vpnFW) inbound(p []byte) bool {
 	if proto == 17 && dp == chatPort {
 		return true
 	}
-	if proto == 6 && dp == fingerAltPort && f.finger != nil && f.finger() {
+	if proto == 6 && dp == fingerPort && f.finger != nil && f.finger() {
 		return true
 	}
-	if proto == 6 && dp == siteAltPort && f.site != nil && f.site() {
+	if proto == 6 && dp == sitePort && f.site != nil && f.site() {
 		return true
 	}
 	var k flowKey
@@ -145,9 +156,8 @@ func (f *vpnFW) inbound(p []byte) bool {
 	copy(k.remote[:], p[8:24])
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if t, ok := f.flows[k]; ok {
+	if _, ok := f.flows[k]; ok {
 		f.flows[k] = time.Now()
-		_ = t
 		return true
 	}
 	if mode == "list" && f.open[dp] {
@@ -193,8 +203,8 @@ var fwInst *vpnFW
 
 func (a *App) vpnFW(dataDir string) *vpnFW {
 	fwOnce.Do(func() {
-		fwInst = loadVPNFW(dataDir, func() bool { return a.fing != nil && a.fingerConf().On })
-		fwInst.site = a.siteOn
+		fwInst = loadVPNFW(dataDir, a.fingerListening)
+		fwInst.site = a.siteListening
 	})
 	return fwInst
 }

@@ -97,6 +97,7 @@ public class YggVpn extends VpnService {
     @Override public void onRevoke() {
         getSharedPreferences("ygg", 0).edit().putBoolean("vpn", false).apply();
         shutdown();
+        YggService.leaveVpnMode(this);
         stopSelf();
     }
 
