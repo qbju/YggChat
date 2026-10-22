@@ -5,9 +5,13 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 )
@@ -95,5 +99,82 @@ func TestHistoryClampedTimeDropsSig(t *testing.T) {
 	z.onGroupCtl(tHost, wire{T: "ghs", G: gid, ID: "now1", By: y.addr, Text: "fine", TS: time.Now().Unix() - 5, Sg: ok, PK: y.myPK()})
 	if got := groupMsgsOf(z, gid); len(got) != 2 || got[1].Sg != ok {
 		t.Fatalf("in-window signed relay lost its signature: %+v", got)
+	}
+}
+
+// TestShimAPIDiff answers the requests written by test/pwa/apidiff.js with the
+// native /api handlers (status + body), for comparison with the shim's /api
+// emulation. Skipped unless SHIMAPI_IN/SHIMAPI_OUT are set.
+func TestShimAPIDiff(t *testing.T) {
+	in, outPath := os.Getenv("SHIMAPI_IN"), os.Getenv("SHIMAPI_OUT")
+	if in == "" || outPath == "" {
+		t.Skip("SHIMAPI_IN / SHIMAPI_OUT not set")
+	}
+	b, err := os.ReadFile(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var scs []struct {
+		Name  string          `json:"name"`
+		Me    string          `json:"me"`
+		Store json.RawMessage `json:"store"`
+		Reqs  []struct {
+			Ep   string          `json:"ep"`
+			Body json.RawMessage `json:"body"`
+		} `json:"reqs"`
+	}
+	if err := json.Unmarshal(b, &scs); err != nil {
+		t.Fatal(err)
+	}
+	type resp struct {
+		Status int    `json:"status"`
+		Body   string `json:"body"`
+	}
+	var out [][]resp
+	for _, sc := range scs {
+		a, _ := tKeyApp(t)
+		a.addr = sc.Me
+		a.sys = true
+		a.cfg = nil // our key is not sc.Me's: don't sign
+		if err := json.Unmarshal(sc.Store, a.store); err != nil {
+			t.Fatal(sc.Name, err)
+		}
+		a.store.fix()
+		mux := http.NewServeMux()
+		a.httpHandlers(mux)
+		a.featureHandlers(mux)
+		a.groupHandlers(mux)
+		a.inviteHandlers(mux)
+		a.groupSetHandlers(mux)
+		a.powHandlers(mux)
+		a.msgEditHandlers(mux)
+		a.nostrHandlers(mux)
+		a.fingerHandlers(mux)
+		var rs []resp
+		for _, q := range sc.Reqs {
+			method, body := "GET", ""
+			if len(q.Body) > 0 && string(q.Body) != "null" {
+				method, body = "POST", string(q.Body)
+			}
+			r := httptest.NewRequest(method, "/api/"+q.Ep, strings.NewReader(body))
+			w := httptest.NewRecorder()
+			func() {
+				defer func() {
+					if p := recover(); p != nil {
+						w.Code = 599
+						w.Body.Reset()
+						fmt.Fprint(w.Body, "panic: ", p)
+					}
+				}()
+				mux.ServeHTTP(w, r)
+			}()
+			rs = append(rs, resp{w.Code, w.Body.String()})
+			time.Sleep(5 * time.Millisecond)
+		}
+		out = append(out, rs)
+	}
+	ob, _ := json.Marshal(out)
+	if err := os.WriteFile(outPath, ob, 0o644); err != nil {
+		t.Fatal(err)
 	}
 }

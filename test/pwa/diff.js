@@ -156,5 +156,7 @@ async function cmp(scFile, goFile) {
   console.log('\nscenarios', scs.length, 'differing', bad, 'kinds', kinds.size);
   process.exit(bad ? 1 : 0);
 }
-if (process.argv[2] === 'gen') process.stdout.write(JSON.stringify(gen(+process.argv[3] || 50, +process.argv[4] || 1)));
+module.exports = { K, store, G1, G2, G3 };
+if (require.main !== module) { /* used as a library */ }
+else if (process.argv[2] === 'gen') process.stdout.write(JSON.stringify(gen(+process.argv[3] || 50, +process.argv[4] || 1)));
 else if (process.argv[2] === 'cmp') cmp(process.argv[3], process.argv[4]);
