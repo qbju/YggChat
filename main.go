@@ -506,6 +506,7 @@ type wire struct {
 	GT  map[string]int64 `json:"gt,omitempty"`  // gi: when recently removed members dropped out (v0.19.3)
 	Sg  string           `json:"sg,omitempty"`  // group post signature (msg, fh, ghs; v0.19.3); group unsend signature (del, v0.19.4)
 	Dby string           `json:"dby,omitempty"` // group unsend by a manager: who deleted it (del, v0.19.4)
+	MA  string           `json:"ma,omitempty"`  // device move: mh/mha authenticated with the code's secret (move.MAC, v0.19.4)
 
 	checked bool // local only: proof of work already verified (file header)
 }

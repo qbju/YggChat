@@ -90,3 +90,24 @@ func FuzzOpen(f *testing.F) {
 		_, _ = Open(k, b)
 	})
 }
+
+func TestAuthMAC(t *testing.T) {
+	k, code, _ := NewReceiver("200:1234::1")
+	_, pub, _ := ParseCode(code)
+	key := AuthKey(pub)
+	if string(key) != string(AuthKey(k.PublicKey().Bytes())) {
+		t.Fatal("receiver and sender derive different keys")
+	}
+	m := HeaderMAC(key, "abcdef0123456789", 100, 1, "aa")
+	if len(m) != 32 || !MACOK(m, HeaderMAC(key, "abcdef0123456789", 100, 1, "aa")) {
+		t.Fatal(m)
+	}
+	if MACOK(m, HeaderMAC(key, "abcdef0123456789", 101, 1, "aa")) || MACOK(m, "") || MACOK(m, ReplyMAC(key, "abcdef0123456789")) {
+		t.Fatal("mac accepted for other data")
+	}
+	// Fixed vector, shared with the PWA shim (test/pwa/moveauth.js).
+	z := AuthKey(make([]byte, 32))
+	if got := HeaderMAC(z, "0011223344556677", 5000, 6, "ab"); got != "38e9ffe08232a450924c18c323bbb8b0" {
+		t.Fatalf("vector changed: %s", got)
+	}
+}

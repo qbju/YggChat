@@ -2,7 +2,8 @@
 // Copyright (C) 2026 h6e and YggChat contributors
 
 // Moving the account to another device (v0.15). See move/move.go for the
-// crypto. Wire: {t:"mh",id,size,n,sha} header, {t:"mc",id,i,d} chunks acked
+// crypto. Wire: {t:"mh",id,size,n,sha,ma} header (ma: proof of the code,
+// v0.19.4, answered by {t:"mha",id,ma}), {t:"mc",id,i,d} chunks acked
 // with {t:"mca",id,i}; when the receiver has opened and checked the bundle it
 // answers {t:"mok",id} (or {t:"mng",id,text}) and switches to the moved key.
 package main
@@ -40,8 +41,11 @@ var mv struct {
 	got    int
 	at     time.Time
 	done   bool
+	auth   bool // the running transfer's header carried a valid code proof (v0.19.4)
 	// sending
 	sendID    string
+	sendPeer  string // acks count only from the receiver in the code
+	sendKey   []byte // move.AuthKey of the code
 	sendAcks  map[int]bool
 	sendHello bool        // the receiver answered our header
 	sendRes   chan string // "" = ok, else error text
@@ -120,18 +124,46 @@ func (a *App) onMoveIn(from string, w wire) {
 	}
 	switch w.T {
 	case "mh":
+		if len(w.ID) < 8 || len(w.ID) > 40 || !shaRe.MatchString(w.Sha) || w.Size < 33 || w.Size > move.MaxSize || w.N != (w.Size+move.Chunk-1)/move.Chunk {
+			return
+		}
+		// v0.19.4 senders prove they hold the code (see move.AuthKey). A
+		// header with a wrong proof is dropped; one without is an older
+		// sender and only gets a free slot.
+		key := move.AuthKey(mv.priv.PublicKey().Bytes())
+		auth := w.MA != ""
+		if auth && !move.MACOK(move.HeaderMAC(key, w.ID, w.Size, w.N, w.Sha), w.MA) {
+			return
+		}
+		reply := wire{T: "mha", ID: w.ID}
+		if auth {
+			reply.MA = move.ReplyMAC(key, w.ID)
+		}
 		if w.ID == mv.id && from == mv.from {
-			a.sendWire(from, wire{T: "mha", ID: w.ID})
+			if auth == mv.auth {
+				a.sendWire(from, reply)
+			}
 			return
 		}
-		if w.ID == mv.id || len(w.ID) < 8 || len(w.ID) > 40 || !shaRe.MatchString(w.Sha) || w.Size < 33 || w.Size > move.MaxSize || w.N != (w.Size+move.Chunk-1)/move.Chunk {
+		if w.ID == mv.id {
 			return
 		}
-		if mv.id != "" && mv.from != from && time.Since(mv.at) < time.Minute {
-			return // another transfer is running
+		if mv.id != "" && time.Since(mv.at) < time.Minute {
+			// The slot is taken. Only a proven sender may take it from an
+			// unproven one (someone squatting it without the code); the same
+			// sender may restart with a new id (unless that would drop a
+			// proof it already gave).
+			takeover := auth && !mv.auth
+			restart := from == mv.from && (auth || !mv.auth)
+			if !takeover && !restart {
+				return // another transfer is running
+			}
+			if takeover && from != mv.from {
+				a.sendWire(mv.from, wire{T: "mng", ID: mv.id, Text: "別の送信元が受け取り側を使っています"})
+			}
 		}
-		mv.id, mv.from, mv.hdr, mv.chunks, mv.got, mv.at = w.ID, from, w, make([][]byte, w.N), 0, time.Now()
-		a.sendWire(from, wire{T: "mha", ID: w.ID})
+		mv.id, mv.from, mv.hdr, mv.chunks, mv.got, mv.at, mv.auth = w.ID, from, w, make([][]byte, w.N), 0, time.Now(), auth
+		a.sendWire(from, reply)
 		a.broadcast("move", map[string]any{"role": "recv", "phase": "recv", "got": 0, "n": w.N, "from": from})
 	case "mc":
 		if w.ID != mv.id || from != mv.from || w.I < 0 || w.I >= len(mv.chunks) {
@@ -161,7 +193,7 @@ func (a *App) onMoveIn(from string, w wire) {
 		fail := func(msg string) {
 			a.sendWire(from, wire{T: "mng", ID: w.ID, Text: msg})
 			a.broadcast("move", map[string]any{"role": "recv", "phase": "error", "err": msg})
-			mv.id, mv.chunks = "", nil
+			mv.id, mv.chunks, mv.auth = "", nil, false
 		}
 		if len(blob) != mv.hdr.Size || hex.EncodeToString(sum[:]) != mv.hdr.Sha {
 			fail("データが壊れていました")
@@ -189,11 +221,14 @@ func (a *App) onMoveIn(from string, w wire) {
 func (a *App) onMoveAck(from string, w wire) {
 	mv.mu.Lock()
 	defer mv.mu.Unlock()
-	if w.ID == "" || w.ID != mv.sendID {
+	if w.ID == "" || w.ID != mv.sendID || from != mv.sendPeer {
 		return
 	}
 	switch w.T {
 	case "mha":
+		if w.MA != "" && !move.MACOK(move.ReplyMAC(mv.sendKey, w.ID), w.MA) {
+			return
+		}
 		mv.sendHello = true
 	case "mca":
 		mv.sendHello = true
@@ -215,7 +250,7 @@ func (a *App) onMoveAck(from string, w wire) {
 	}
 }
 
-func (a *App) moveSend(peer string, blob []byte) {
+func (a *App) moveSend(peer string, rpk, blob []byte) {
 	idb := make([]byte, 8)
 	rand.Read(idb)
 	id := hex.EncodeToString(idb)
@@ -223,7 +258,8 @@ func (a *App) moveSend(peer string, blob []byte) {
 	n := (len(blob) + move.Chunk - 1) / move.Chunk
 	res := make(chan string, 1)
 	mv.mu.Lock()
-	mv.sendID, mv.sendAcks, mv.sendRes, mv.sendHello = id, map[int]bool{}, res, false
+	key := move.AuthKey(rpk)
+	mv.sendID, mv.sendAcks, mv.sendRes, mv.sendHello, mv.sendPeer, mv.sendKey = id, map[int]bool{}, res, false, peer, key
 	mv.mu.Unlock()
 	finish := func(err string) {
 		mv.mu.Lock()
@@ -241,6 +277,7 @@ func (a *App) moveSend(peer string, blob []byte) {
 		time.Sleep(200 * time.Millisecond)
 	}
 	hdr := wire{T: "mh", ID: id, Size: len(blob), N: n, Sha: hex.EncodeToString(sum[:])}
+	hdr.MA = move.HeaderMAC(key, hdr.ID, hdr.Size, hdr.N, hdr.Sha) // older receivers ignore it
 	lastProgress, last := time.Now(), -1
 	// Until the receiver answers the header (mha), send only the header so
 	// the first packets to a new address don't flood the key lookup; v0.15.0
@@ -305,7 +342,7 @@ func (a *App) moveHandlers(mux *http.ServeMux) {
 		defer mv.mu.Unlock()
 		if req.Stop {
 			if !mv.done {
-				mv.priv, mv.id, mv.chunks = nil, "", nil
+				mv.priv, mv.id, mv.chunks, mv.auth = nil, "", nil, false
 			}
 			w.Write([]byte("{}"))
 			return
@@ -319,7 +356,7 @@ func (a *App) moveHandlers(mux *http.ServeMux) {
 			http.Error(w, err.Error(), 500)
 			return
 		}
-		mv.priv, mv.id, mv.chunks, mv.done = k, "", nil, false
+		mv.priv, mv.id, mv.chunks, mv.done, mv.auth = k, "", nil, false, false
 		jsonOut(w, map[string]any{"code": code})
 	})
 	mux.HandleFunc("/api/move/send", func(w http.ResponseWriter, r *http.Request) {
@@ -358,7 +395,7 @@ func (a *App) moveHandlers(mux *http.ServeMux) {
 			http.Error(w, err.Error(), 400)
 			return
 		}
-		go a.moveSend(peer, blob)
+		go a.moveSend(peer, rpk, blob)
 		jsonOut(w, map[string]any{"size": len(blob)})
 	})
 	mux.HandleFunc("/api/move/export", func(w http.ResponseWriter, r *http.Request) {
