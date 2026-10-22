@@ -106,6 +106,9 @@ type Store struct {
 	env      *envelope
 	dirty    bool
 	saveT    *time.Timer
+	jn       int                // journal entries since the last full save (journal.go)
+	jbytes   int64              // ... and their size
+	jT       *time.Timer        // full save after journalEvery
 	Nick     string             `json:"nick"`
 	Bio      string             `json:"bio,omitempty"`
 	Avatar   string             `json:"avatar,omitempty"`
@@ -132,6 +135,8 @@ type Store struct {
 	Gone map[string]int64 `json:"gone,omitempty"`
 	// Edits that arrived before the message they change ("peer/id").
 	Early map[string]earlyEdit `json:"early,omitempty"`
+	// Generation of this file; journal lines of another one are stale (journal.go).
+	JGen string `json:"jgen,omitempty"`
 }
 
 func (s *Store) save() { _ = s.saveErr() }
@@ -143,10 +148,7 @@ func (s *Store) saveErr() error {
 	if s.locked {
 		return nil
 	}
-	b, err := s.encode()
-	if err == nil {
-		err = writeAtomic(s.path, b)
-	}
+	_, err := s.writeSnapshotLocked()
 	if err != nil {
 		s.dirty = true
 		log.Printf("store: save failed: %v", err)
@@ -374,7 +376,13 @@ func (a *App) addMessageErr(m Message) error {
 		a.store.Contacts[m.Peer] = c
 		cb = &c
 	}
-	if err := a.store.saveErr(); err != nil && !m.Out && m.Sys == "" {
+	var err error
+	if !m.Out && m.Sys == "" {
+		err = a.store.journalLocked(m, cb) // durable without rewriting the whole history (journal.go)
+	} else {
+		err = a.store.saveErr()
+	}
+	if err != nil && !m.Out && m.Sys == "" {
 		for i := len(a.store.Messages) - 1; i >= 0; i-- {
 			if x := a.store.Messages[i]; x.Peer == m.Peer && x.ID == m.ID && x.From == m.From && !x.Out {
 				a.store.Messages = append(a.store.Messages[:i], a.store.Messages[i+1:]...)
@@ -1644,6 +1652,7 @@ func main() {
 	}
 	if !st.locked {
 		st.fix()
+		st.replayJournalLocked()
 	} else {
 		st.Contacts, st.Blocked, st.Groups = map[string]Contact{}, map[string]bool{}, map[string]Group{}
 	}
@@ -1657,6 +1666,9 @@ func main() {
 	}
 	// Messages left "sending" by a previous run never got an ack.
 	st.requeueAfterRestart()
+	if !*cliMode {
+		flushOnSignal(st)
+	}
 	go func() {
 		last := -1
 		for range time.Tick(3 * time.Second) {
