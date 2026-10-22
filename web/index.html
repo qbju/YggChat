@@ -923,7 +923,15 @@ body.screen-open .fab { display:none; }
     max-width:380px;
     border-right:1px solid var(--divider);
   }
+  /* wide window: list and chat side by side (the column layout stacked the chat under a 380px-tall list) */
+  body.two-pane .container { flex-direction:row; }
+  body.two-pane #chat-pane { border-left:none; position:relative; }
+  body.two-pane #back-to-list { display:none; }
+  /* no chat chosen: a hint instead of an empty header/composer (or a stale chat after delete/block) */
+  body.two-pane:not(.chat-open) #chat-pane > * { display:none !important; }
+  body.two-pane:not(.chat-open) #chat-pane > #chat-none { display:flex !important; }
 }
+#chat-none { display:none !important; flex:1; align-items:center; justify-content:center; color:var(--dim); font-size:14px; padding:24px; text-align:center; }
 /* iOS zooms into inputs under 16px, which shifts the layout */
 input, textarea { font-size:16px !important; }
 .bubble { -webkit-touch-callout:none; -webkit-user-select:none; user-select:none; }
@@ -1036,6 +1044,7 @@ img.emoji { height:1.2em; width:1.2em; margin:0 .05em 0 .1em; vertical-align:-0.
   </div>
 
   <div id="chat-pane">
+    <div id="chat-none">左の一覧からチャットを選ぶか、＋で新しいチャットを始めましょう</div>
     <div class="header">
       <button class="icon-btn" id="back-to-list" title="戻る">←</button>
       <div class="avatar small" id="chat-avatar"></div>
