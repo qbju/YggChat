@@ -9,7 +9,9 @@ SF = os.environ.get("STATE_DIR","state")+"/fdroid_mr.json"
 st = load(SF, {})
 try:
     mr = getjson(B)
-    notes = getjson(B + "/notes?sort=desc&per_page=20")
+    # notes API needs auth; the web discussions.json is public
+    notes = [n for t in getjson(URL + "/discussions.json") for n in t["notes"] if str(n["id"]).isdigit()]
+    for n in notes: n["id"] = int(n["id"]); n["body"] = n.get("note") or ""
     pipes = getjson(B + "/pipelines")
 except Exception as e:
     err = getattr(e, "code", None)
@@ -45,6 +47,9 @@ if pipes:
         msgs.append(f"- pipeline {p['id']}: **{p['status']}** {p.get('web_url','')}")
     if p["status"] in ("success", "failed"):
         st["pipeline_id"], st["pipeline_status"] = p["id"], p["status"]
+old_l = st.get("labels")
+if old_l is not None and sorted(old_l) != sorted(mr.get("labels", [])):
+    msgs.append(f"- labels: {', '.join(old_l) or '-'} → **{', '.join(mr.get('labels', [])) or '-'}**")
 st["labels"] = mr.get("labels", [])
 save(SF, st)
 if msgs:
