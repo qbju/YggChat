@@ -317,6 +317,10 @@ func (c *cli) lineLocked(m Message) string {
 		if who == "" {
 			who = c.nameLocked(m.From)
 		}
+		if m.Via != "" && !m.Out {
+			// Relayed by another member without the sender's proof (as the UI shows it).
+			who += "（" + c.nameLocked(m.Via) + "が中継）"
+		}
 	}
 	if m.Out {
 		who = "自分"
@@ -522,12 +526,25 @@ func (c *cli) onEvent(b []byte) {
 		found := false
 		for i := range c.st.Messages {
 			if x := &c.st.Messages[i]; x.ID == m.ID && x.Peer == m.Peer {
-				x.Text, x.Edited, found = m.Text, true, true
+				found = true
+				x.Text = m.Text
+				if m.Edited {
+					x.Edited = true
+				} else {
+					// Not an edit: the sender's own copy replaced a relay of it
+					// (groupsguard.go replaceRelayed), maybe with the photo.
+					x.Via, x.Hist = "", false
+					if m.Img != "" {
+						x.Img = m.Img
+					}
+				}
+				edited := m.Edited
 				m = *x
+				m.Edited = edited
 			}
 		}
 		s := ""
-		if found && m.Peer == c.cur {
+		if found && m.Peer == c.cur && m.Edited {
 			s = "  ✎ 編集されました: " + c.lineLocked(m)
 		}
 		c.mu.Unlock()

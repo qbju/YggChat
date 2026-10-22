@@ -176,3 +176,29 @@ func TestCLIGroupSender(t *testing.T) {
 		t.Errorf("sys = %q", l)
 	}
 }
+
+// A post relayed without the sender's proof shows who relayed it (as in the
+// UI), and the sender's own copy replacing it later is not an edit (r2-matrix).
+func TestCLIRelayedPost(t *testing.T) {
+	c := &cli{st: cliState{Contacts: map[string]cliContact{
+		"g:1":    {Addr: "g:1", Nick: "班", Group: true},
+		"200::3": {Addr: "200::3", Nick: "Carol"},
+	}}, gdone: map[string]bool{}}
+	m := Message{ID: "abc1", Peer: "g:1", From: "200::2", Nick: "Bob", Text: "📷 cap", Via: "200::3", Hist: true}
+	if l := c.line(m); !strings.Contains(l, "Bob（Carolが中継）: 📷 cap") {
+		t.Errorf("relayed line = %q", l)
+	}
+	c.st.Messages = []Message{m}
+	c.onEvent([]byte(`{"type":"msg_upd","data":{"id":"abc1","peer":"g:1","from":"200::2","nick":"Bob","text":"cap","via":"","hist":false,"img":"data:image/png;base64,AA=="}}`))
+	x := c.st.Messages[0]
+	if x.Edited || x.Via != "" || x.Hist || x.Text != "cap" || x.Img == "" {
+		t.Errorf("after the own copy: %+v", x)
+	}
+	if l := c.line(x); strings.Contains(l, "中継") || strings.Contains(l, "編集") {
+		t.Errorf("line = %q", l)
+	}
+	c.onEvent([]byte(`{"type":"msg_upd","data":{"id":"abc1","peer":"g:1","from":"200::2","text":"cap2","edited":true}}`))
+	if x := c.st.Messages[0]; !x.Edited || x.Text != "cap2" {
+		t.Errorf("edit: %+v", x)
+	}
+}
