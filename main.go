@@ -1719,6 +1719,9 @@ func main() {
 		tick := 0
 		for range time.Tick(20 * time.Second) {
 			tick++
+			if tick%180 == 1 {
+				go a.pruneCopies() // stale group copies, hourly (copyprune.go)
+			}
 			if a.upPeers() == 0 {
 				continue
 			}
