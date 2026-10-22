@@ -5,6 +5,8 @@ import (
 	"bytes"
 	"fmt"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
@@ -208,4 +210,35 @@ func TestGroupPostNoRewrite(t *testing.T) {
 	if hasMsg(s, gKey(tgid), "p1") != 1 {
 		t.Fatalf("group post lost/duplicated: %+v", s.Messages)
 	}
+}
+
+type blockWriter struct {
+	h       http.Header
+	writing chan struct{}
+	release chan struct{}
+}
+
+func (b *blockWriter) Header() http.Header { return b.h }
+func (b *blockWriter) WriteHeader(int)     {}
+func (b *blockWriter) Write(p []byte) (int, error) {
+	close(b.writing)
+	<-b.release
+	return len(p), nil
+}
+
+// A client that stopped reading /api/state held the store lock (the reply
+// was encoded straight into the socket), freezing the node.
+func TestStateWriteOutsideLock(t *testing.T) {
+	a, _ := contactApp(t)
+	bw := &blockWriter{h: http.Header{}, writing: make(chan struct{}), release: make(chan struct{})}
+	done := make(chan struct{})
+	go func() { a.serveState(bw, httptest.NewRequest("GET", "/api/state", nil)); close(done) }()
+	<-bw.writing
+	if !a.store.mu.TryLock() {
+		close(bw.release)
+		t.Fatal("store lock held while writing the reply")
+	}
+	a.store.mu.Unlock()
+	close(bw.release)
+	<-done
 }

@@ -325,6 +325,44 @@ type App struct {
 	lan      *lanState
 }
 
+// serveState answers /api/state. The reply is encoded under the store lock
+// and written after it: with a long history it is many MB, and a client that
+// stops reading (a frozen WebView, a stalled socket) used to hold the lock
+// and freeze the whole node, receiving included (r2).
+func (a *App) serveState(w http.ResponseWriter, r *http.Request) {
+	b := a.stateJSON()
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(b)
+}
+
+// stateJSON is the /api/state reply.
+func (a *App) stateJSON() []byte {
+	a.store.mu.Lock()
+	defer a.store.mu.Unlock()
+	peers := a.upPeers()
+	var v any
+	if a.store.locked {
+		v = map[string]any{"locked": true, "addr": a.addr, "peers": peers, "platform": "native"}
+	} else {
+		blocked := []string{}
+		for b := range a.store.Blocked {
+			blocked = append(blocked, b)
+		}
+		sort.Strings(blocked)
+		v = map[string]any{
+			"addr": a.addr, "pubkey": hex.EncodeToString(a.pub()), "system": a.sys, "vpn": a.vpn,
+			"nick": a.store.Nick, "bio": a.store.Bio, "avatar": a.store.Avatar, "domain": a.store.Domain,
+			"contacts": a.contactsViewLocked(), "messages": a.visibleMessagesLocked(), "peers": peers, "platform": "native",
+			"locked": false, "haspass": a.store.key != nil, "blocked": blocked,
+			"nostr": a.nostrStateLocked(), "socks": a.socksState(), "powstrict": a.store.PowStrict,
+			"joins": a.joinsViewLocked(),
+		}
+	}
+	var buf bytes.Buffer
+	json.NewEncoder(&buf).Encode(v) // (Encoder: same output as before, trailing newline)
+	return buf.Bytes()
+}
+
 func (a *App) broadcast(kind string, v any) {
 	b, _ := json.Marshal(map[string]any{"type": kind, "data": v})
 	a.subMu.Lock()
@@ -1272,29 +1310,7 @@ func (a *App) httpHandlers(mux *http.ServeMux) {
 	sub, _ := fs.Sub(webFS, "web")
 	mux.Handle("/", http.FileServer(http.FS(sub)))
 	mux.HandleFunc("/twemoji/", twemojiHandler)
-	mux.HandleFunc("/api/state", func(w http.ResponseWriter, r *http.Request) {
-		a.store.mu.Lock()
-		defer a.store.mu.Unlock()
-		peers := a.upPeers()
-		w.Header().Set("Content-Type", "application/json")
-		if a.store.locked {
-			json.NewEncoder(w).Encode(map[string]any{"locked": true, "addr": a.addr, "peers": peers, "platform": "native"})
-			return
-		}
-		blocked := []string{}
-		for b := range a.store.Blocked {
-			blocked = append(blocked, b)
-		}
-		sort.Strings(blocked)
-		json.NewEncoder(w).Encode(map[string]any{
-			"addr": a.addr, "pubkey": hex.EncodeToString(a.pub()), "system": a.sys, "vpn": a.vpn,
-			"nick": a.store.Nick, "bio": a.store.Bio, "avatar": a.store.Avatar, "domain": a.store.Domain,
-			"contacts": a.contactsViewLocked(), "messages": a.visibleMessagesLocked(), "peers": peers, "platform": "native",
-			"locked": false, "haspass": a.store.key != nil, "blocked": blocked,
-			"nostr": a.nostrStateLocked(), "socks": a.socksState(), "powstrict": a.store.PowStrict,
-			"joins": a.joinsViewLocked(),
-		})
-	})
+	mux.HandleFunc("/api/state", a.serveState)
 	mux.HandleFunc("/api/send", func(w http.ResponseWriter, r *http.Request) {
 		var req struct{ To, Text, Retry, Img string }
 		if r.Method != "POST" || json.NewDecoder(http.MaxBytesReader(w, r.Body, 2<<20)).Decode(&req) != nil {
