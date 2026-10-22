@@ -1793,6 +1793,17 @@ function markRead(addr){
 
 // When we joined a group: our "あなたが参加しました"/"…があなたを追加しました" line (0 if none).
 const JOIN_RE = /^(あなたが参加しました|.+ があなたを追加しました)$/;
+// A group we're out of: removed by a manager (the newest of our join/removal lines says so) or left ourselves.
+function removedFrom(c){
+  if(!c || !c.left) return false;
+  for(let i = state.messages.length - 1; i >= 0; i--){
+    const m = state.messages[i];
+    if(m.peer !== c.addr || !m.sys) continue;
+    if(m.sys === 'グループから外されました') return true;
+    if(JOIN_RE.test(m.sys) || / があなたをグループに戻しました$/.test(m.sys)) return false;
+  }
+  return false;
+}
 function joinTs(addr){
   if(!isGroup(addr)) return 0;
   for(const m of state.messages) if(m.peer === addr && m.sys && m.out && JOIN_RE.test(m.sys)) return m.ts || 0;
@@ -1954,7 +1965,7 @@ function renderMessages(){
     histSep = msgs.findIndex(m => m.hist && !m.sys && (!jt || (m.ts || 0) <= jt));
     if(histSep > 0 && !jt && !msgs.slice(0, histSep).every(m => m.sys)) histSep = -1; // old data: only when history opens the chat
   }
-  const reqUsed = new Set();
+  const reqs = inGroup ? reqMap(gc, msgs) : new Map();
   let html = '';
   for(let i=0; i<grouped.length; i++){
     const g = grouped[i];
@@ -1980,7 +1991,7 @@ function renderMessages(){
       if(inGroup) t = sysNames(gc, t);
       let btns = '';
       if(inGroup && /^.+ が参加を申請しています$/.test(m.sys)){
-        const p = reqFor(gc, m, reqUsed);
+        const p = reqs.get(m);
         if(p) btns = '<div class="sys-btns"><button class="btn-accent sys-ok" data-addr="' + escapeHtml(p.addr) + '">承認</button><button class="sys-no btn-danger" data-addr="' + escapeHtml(p.addr) + '">拒否</button></div>';
         else if(!gc.left && (gc.owner === state.addr || (gc.admins || []).includes(state.addr))) t += '（対応済み）'; // the buttons just vanished before
       }
@@ -2121,6 +2132,7 @@ function memberNick(gaddr, a, bare){
 // know the name yet: show the name we know now instead.
 function sysNames(c, t){
   t = String(t).replace(/(^| )anon(?= )/g, '$1名前未設定のメンバー'); // lines written before nodes stopped using the default name
+  t = t.replace(/(^| )あなた ([がを])/g, '$1あなた$2'); // "あなたが参加しました" style, not "あなた が"
   return t.replace(/([23][0-9a-f]{2}:[0-9a-f:]{0,6})…/gi, (all, pre) => {
     const cand = (c.members || []).concat((c.pend || []).map(p => p.addr)).find(a => a.startsWith(pre));
     let n = cand ? memberNick(c.addr, cand, true) : '';
@@ -2128,20 +2140,26 @@ function sysNames(c, t){
     return n || (/(追加|参加)/.test(t) ? '新しいメンバー' : 'メンバー');
   });
 }
-// The pending request a "〇〇 が参加を申請しています" line is about (managers only).
-function reqFor(c, m, used){
-  if(!c || c.left || !(c.owner === state.addr || (c.admins || []).includes(state.addr))) return null;
-  const who = m.sys.replace(/ が参加を申請しています$/, '');
-  let best = null, bd = 1e12;
+// Which pending request each "… が参加を申請しています" line gets 承認/拒否 for:
+// the line closest in time to the request (the newest on a tie), so a repeat
+// request doesn't put the buttons on an old line further up.
+function reqMap(c, msgs){
+  const out = new Map();
+  if(!c || c.left || !(c.owner === state.addr || (c.admins || []).includes(state.addr))) return out;
+  const lines = msgs.filter(m => m.sys && /^.+ が参加を申請しています$/.test(m.sys));
   for(const p of c.pend || []){
-    if(used.has(p.addr)) continue;
     const nm = p.nick || 'anon';
-    if(nm !== who && !(who.endsWith('…') && p.addr.startsWith(who.slice(0, -1)))) continue;
-    const d = Math.abs((p.ts || m.ts) - m.ts);
-    if(d < bd){ bd = d; best = p; }
+    let best = null, bd = 1e12;
+    for(const m of lines){
+      if(out.has(m)) continue;
+      const who = m.sys.replace(/ が参加を申請しています$/, '');
+      if(nm !== who && !(who.endsWith('…') && p.addr.startsWith(who.slice(0, -1)))) continue;
+      const d = Math.abs((p.ts || m.ts) - m.ts);
+      if(d <= bd){ bd = d; best = m; } // lines are oldest first: <= keeps the newest on a tie
+    }
+    if(best) out.set(best, p);
   }
-  if(best) used.add(best.addr);
-  return best;
+  return out;
 }
 // Group header: the member count and the names we know, never raw addresses.
 function groupSubtitle(c){
@@ -2173,7 +2191,7 @@ function updateChatHeader(){
   $('chat-avatar').style.border = 'none';
   $('chat-avatar').style.color = '#111';
   $('chat-name').textContent = c.group ? (c.nick || 'グループ') : nickOr(c.nick, curAddr);
-  $('chat-addr').textContent = grp ? (c.left ? '退出済みのグループ' : groupSubtitle(c)) : (c.dom && c.domok ? '✓ ' + c.dom + ' ・ ' + curAddr : curAddr);
+  $('chat-addr').textContent = grp ? (c.left ? (removedFrom(c) ? 'グループから外されました' : '退出済みのグループ') : groupSubtitle(c)) : (c.dom && c.domok ? '✓ ' + c.dom + ' ・ ' + curAddr : curAddr);
 }
 
 let forceBottom = false;
@@ -2473,7 +2491,12 @@ $('ci-copy-addr').addEventListener('click', () => copyText(curAddr));
 
 // In-page dialogs: the browser's built-in dialogs are unreliable in iOS home-screen apps and WebViews.
 let modalClose = null;
-function uiDialog(title, {input=null, okText='OK', danger=false, placeholder='', hint='', validate=null, multiline=false, img=''}={}){
+// Open dialogs, top last: closing one on top of another (e.g. a confirm over
+// the photo preview) leaves Escape/back working for the one underneath.
+const modalStack = [];
+function modalOn(fn){ modalStack.push(fn); modalClose = fn; }
+function modalOff(fn){ const i = modalStack.indexOf(fn); if(i >= 0) modalStack.splice(i, 1); modalClose = modalStack[modalStack.length - 1] || null; }
+function uiDialog(title, {input=null, okText='OK', danger=false, placeholder='', hint='', validate=null, multiline=false, img='', secret=false}={}){
   return new Promise(res => {
     const bg = document.createElement('div'); bg.className = 'modal-bg';
     const m = document.createElement('div'); m.className = 'modal';
@@ -2481,7 +2504,7 @@ function uiDialog(title, {input=null, okText='OK', danger=false, placeholder='',
     if(img){ const im = document.createElement('img'); im.src = img; im.alt = ''; im.style.cssText = 'max-width:100%;max-height:40vh;object-fit:contain;border-radius:8px;align-self:center;'; m.appendChild(im); }
     let inp = null;
     // multiline: a textarea, so line breaks survive (an <input> silently drops them); Enter makes a new line there
-    if(input !== null){ inp = document.createElement(multiline ? 'textarea' : 'input'); if(multiline){ inp.rows = Math.min(8, Math.max(3, String(input).split('\n').length + 1)); inp.style.cssText = 'resize:vertical;max-height:50vh;font:inherit;'; } inp.value = input; inp.autocomplete = 'off'; inp.placeholder = placeholder; m.appendChild(inp); }
+    if(input !== null){ inp = document.createElement(multiline ? 'textarea' : 'input'); if(multiline){ inp.rows = Math.min(8, Math.max(3, String(input).split('\n').length + 1)); inp.style.cssText = 'resize:vertical;max-height:50vh;font:inherit;'; } inp.value = input; inp.autocomplete = 'off'; if(secret && !multiline) inp.type = 'password'; inp.placeholder = placeholder; m.appendChild(inp); }
     // hint under the input; validate(v) -> '' when OK, else what is wrong (shown instead of the hint, OK disabled)
     let hn = null;
     if(inp && (hint || validate)){ hn = document.createElement('div'); hn.className = 'mhint'; hn.id = 'mhint-' + Math.random().toString(36).slice(2); hn.setAttribute('aria-live', 'polite'); hn.style.cssText = 'font-size:13px;color:var(--dim);margin:6px 2px 0;line-height:1.4'; hn.textContent = hint; inp.setAttribute('aria-describedby', hn.id); m.appendChild(hn); }
@@ -2491,8 +2514,9 @@ function uiDialog(title, {input=null, okText='OK', danger=false, placeholder='',
     b.append(cancel, ok); m.appendChild(b); bg.appendChild(m); document.body.appendChild(bg);
     const bad = () => (inp && validate) ? (validate(inp.value) || '') : '';
     const check = () => { if(!hn) return; const e = bad(); hn.textContent = e || hint; hn.style.color = e && inp.value ? 'var(--error)' : 'var(--dim)'; ok.disabled = !!e; };
-    const done = v => { if(v !== null && v !== false && inp && bad()){ check(); inp.focus(); return; } bg.remove(); modalClose = null; res(v); };
-    modalClose = () => done(inp ? null : false);
+    const close = () => done(inp ? null : false);
+    const done = v => { if(v !== null && v !== false && inp && bad()){ check(); inp.focus(); return; } bg.remove(); modalOff(close); res(v); };
+    modalOn(close);
     cancel.onclick = () => done(inp ? null : false);
     ok.onclick = () => done(inp ? inp.value : true);
     bg.onclick = e => { if(e.target === bg) done(inp ? null : false); };
@@ -3278,7 +3302,7 @@ function connectEvents(){
       }else if(d.type === 'notice'){
         if(d.data && d.data.k === 'pw' && pendingJoin && pendingCode){
           pendingJoin = null;
-          uiPrompt(d.data.text + '\nパスワードを入力', '').then(v => { if(v) joinByCode(pendingCode, v); });
+          uiDialog(d.data.text + '\nパスワードを入力', {input: '', secret: true}).then(v => { if(v) joinByCode(pendingCode, v); });
         }else if(d.data && d.data.k === 'wait'){
           pendingJoin = null;
           const ga = d.data.g ? 'g:' + d.data.g : '', gc = ga && state.contacts[ga];
@@ -3671,8 +3695,8 @@ async function fingerShow(addr, user){
   const b = document.createElement('div'); b.className = 'mb';
   const ok = document.createElement('button'); ok.className = 'ok'; ok.textContent = '閉じる';
   b.appendChild(ok); m.append(t, pre, b); bg.appendChild(m); document.body.appendChild(bg);
-  const done = () => { bg.remove(); modalClose = null; };
-  modalClose = done; ok.onclick = done; bg.onclick = e => { if(e.target === bg) done(); };
+  const done = () => { bg.remove(); modalOff(done); };
+  modalOn(done); ok.onclick = done; bg.onclick = e => { if(e.target === bg) done(); };
   try{
     const r = await api('/api/finger/query', {Addr: addr, User: user});
     if(r.via === 'yggchat') pre.textContent = 'Login: ' + (r.nick || 'anon') + '\t(YggChat)\nAddress: ' + r.addr + '\n' + (r.plan ? 'Plan:\n' + r.plan : 'No Plan.');
@@ -3690,8 +3714,8 @@ async function showText(title, url){
   const b = document.createElement('div'); b.className = 'mb';
   const ok = document.createElement('button'); ok.className = 'ok'; ok.textContent = '閉じる';
   b.appendChild(ok); m.append(t, pre, b); bg.appendChild(m); document.body.appendChild(bg);
-  const done = () => { bg.remove(); modalClose = null; };
-  modalClose = done; ok.onclick = done; bg.onclick = e => { if(e.target === bg) done(); };
+  const done = () => { bg.remove(); modalOff(done); };
+  modalOn(done); ok.onclick = done; bg.onclick = e => { if(e.target === bg) done(); };
   try{ const r = await fetch(url); if(!r.ok) throw new Error('HTTP ' + r.status); pre.textContent = await r.text(); }catch(e){ pre.textContent = '読み込めませんでした: ' + e.message; }
 }
 $('about-credits').addEventListener('click', () => showText('クレジットと第三者ライセンス', 'THIRD_PARTY_NOTICES.txt'));
@@ -3715,7 +3739,8 @@ function actionSheet(title, items){
     const bg = document.createElement('div'); bg.className = 'modal-bg';
     const m = document.createElement('div'); m.className = 'modal';
     if(title){ const t = document.createElement('div'); t.className = 'mt'; t.textContent = title; t.style.cssText = 'font-weight:400;font-size:13px;color:var(--dim);max-height:4.5em;overflow:hidden;'; m.appendChild(t); }
-    const done = v => { bg.remove(); modalClose = null; res(v); };
+    const close = () => done(null);
+    const done = v => { bg.remove(); modalOff(close); res(v); };
     items.forEach(it => {
       const b = document.createElement('button'); b.textContent = it.label;
       b.style.cssText = 'width:100%;text-align:left;' + (it.danger ? 'color:var(--error);' : '');
@@ -3723,7 +3748,7 @@ function actionSheet(title, items){
     });
     const c = document.createElement('button'); c.textContent = 'キャンセル'; c.style.width = '100%'; c.onclick = () => done(null); m.appendChild(c);
     bg.appendChild(m); document.body.appendChild(bg);
-    modalClose = () => done(null);
+    modalOn(close);
     bg.onclick = e => { if(e.target === bg) done(null); };
   });
 }
@@ -3843,7 +3868,7 @@ function openGroupInfo(){
   const c = state.contacts[curAddr]; if(!c) return;
   $('gi-name').textContent = c.nick || 'グループ';
   $('gi-avatar').style.background = hashColor(curAddr);
-  $('gi-count').textContent = c.left ? '退出済み' : ((c.members||[]).length + '人' + (c.owner ? '（上限' + (c.max || 24) + '人）' : ''));
+  $('gi-count').textContent = c.left ? (removedFrom(c) ? '外されました' : '退出済み') : ((c.members||[]).length + '人' + (c.owner ? '（上限' + (c.max || 24) + '人）' : ''));
   const host = c.owner === state.addr && !c.left;
   const admins = c.admins || [];
   const isAdm = a => admins.includes(a);
