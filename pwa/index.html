@@ -669,6 +669,8 @@ body.screen-open .fab { display:none; }
   min-width:0;
 }
 
+/* 下書き marker in the chat list */
+.draft-tag { color:var(--error); }
 #msg-text {
   flex:1;
   padding:8px 10px;
@@ -1567,6 +1569,22 @@ function $(id){ return document.getElementById(id); }
 
 let state = { addr:'', nick:'', platform:'web', peers:0, contacts:{}, messages:[] };
 let curAddr = null;
+// Unsent text is kept per chat (memory only, never saved to disk): switching
+// chats used to carry the half-typed text into the next chat, where Enter sent
+// it to the wrong person.
+const drafts = {};
+function switchChat(addr){
+  const ta = $('msg-text');
+  if(curAddr && curAddr !== addr && state.contacts[curAddr]){
+    const v = ta.value;
+    if(v.trim()) drafts[curAddr] = v; else delete drafts[curAddr];
+  }
+  if(curAddr !== addr){
+    ta.value = (addr && drafts[addr]) || '';
+    ta.dispatchEvent(new Event('input'));
+  }
+  curAddr = addr;
+}
 let eventSource = null;
 let esRetry = 1000, esLost = false;
 // After the event stream dropped (backgrounded app, node restart) events may
@@ -1874,6 +1892,7 @@ function renderList(){
         lastText = (c.group ? (senderName(last) + ': ') : '') + (last.img ? '📷 ' : '') + (safeText(last.text) || (last.img ? '写真' : ''));
       }
     }
+    const dr = (a !== curAddr && drafts[a]) ? drafts[a].trim().replace(/\s+/g, ' ') : '';
     const uc = unreadCount(a);
     const t = last ? timeStr(last.ts) : '';
     const av = avatarText(c, a);
@@ -1884,7 +1903,7 @@ function renderList(){
       + '<div class="avatar small" style="background:' + avc + '; border:none; color:#111;">' + escapeHtml(av) + '</div>'
       + '<div class="info">'
       + '<div class="name"><span class="nm">' + escapeHtml(nickOr(c.nick, a)) + '</span>' + (c.group ? ' <span class="ttl-badge">' + (c.members||[]).length + '人</span>' : '') + (c.req ? '<span class="req-tag">' + (c.group ? '招待' : 'リクエスト') + '</span>' : '') + (c.ttl ? ' <span class="ttl-badge">⏱' + escapeHtml(ttlLabel(c.ttl)) + '</span>' : '') + '</div>'
-      + '<div class="last">' + escapeHtml(lastText) + '</div>'
+      + (dr ? '<div class="last"><span class="draft-tag">下書き:</span> ' + escapeHtml(dr) + '</div>' : '<div class="last">' + escapeHtml(lastText) + '</div>')
       + '</div>'
       + '<div style="display:flex; flex-direction:column; align-items:flex-end; gap:4px;">'
       + '<div class="time">' + escapeHtml(t) + '</div>'
@@ -2196,7 +2215,7 @@ function updateChatHeader(){
 
 let forceBottom = false;
 function openChat(addr){
-  curAddr = addr;
+  switchChat(addr);
   if(isGroup(addr) && !(state.contacts[addr]||{}).req) api('/api/group/sync', {ID: addr.slice(2)}).catch(()=>{}); // catch up on what we missed
   forceBottom = true;
   document.body.classList.add('chat-open');
@@ -2209,7 +2228,7 @@ function openChat(addr){
 
 $('back-to-list').addEventListener('click', () => {
   document.body.classList.remove('chat-open');
-  curAddr = null;
+  switchChat(null);
   renderList();
 });
 
@@ -2553,7 +2572,7 @@ $('ci-delete').addEventListener('click', async () => {
     state.messages = state.messages.filter(m => m.peer !== curAddr);
     closeContactInfo();
     document.body.classList.remove('chat-open');
-    curAddr = null;
+    switchChat(null);
     renderList();
     toast('削除しました');
   }catch(e){
@@ -3004,6 +3023,7 @@ async function sendMsg(){
   }catch(e){
     toast(e.message);
     if(curAddr === to && ta.value.trim() === ''){ ta.value = text; ta.dispatchEvent(new Event('input')); }
+    else if(curAddr !== to && !(drafts[to] || '').trim() && state.contacts[to]){ drafts[to] = text; renderList(); }
   }finally{
     sendBusy = false;
     $('send-btn').disabled = (ta.value.trim() === '');
@@ -3276,8 +3296,9 @@ function connectEvents(){
           if(curAddr === cd.addr){
             document.body.classList.remove('chat-open');
             ['contact-info-screen', 'group-info-screen', 'group-link-screen', 'group-pick-screen'].forEach(id => $(id).classList.remove('active'));
-            curAddr = null;
+            switchChat(null);
           }
+          delete drafts[cd.addr];
           renderList();
         }
       }else if(d.type === 'msg_upd'){
@@ -3389,6 +3410,7 @@ async function init(){
 // ===== v0.5: lock, privacy, requests, disappearing, theme =====
 function showLock(){
   state.contacts = {}; state.messages = []; curAddr = null;
+  for(const k in drafts) delete drafts[k]; $('msg-text').value = ''; $('msg-text').dispatchEvent(new Event('input'));
   document.body.classList.remove('chat-open');
   ['contact-info-screen','settings-screen','peers-screen','public-peers-screen'].forEach(id => { const e = $(id); if(e) e.classList.remove('active'); });
   renderList();
@@ -4044,7 +4066,7 @@ $('gi-delete').addEventListener('click', async () => {
   try{
     await api('/api/contact/delete', {Addr: curAddr});
     delete state.contacts[curAddr]; state.messages = state.messages.filter(m => m.peer !== curAddr);
-    $('group-info-screen').classList.remove('active'); document.body.classList.remove('chat-open'); curAddr = null; renderList(); toast('削除しました');
+    $('group-info-screen').classList.remove('active'); document.body.classList.remove('chat-open'); switchChat(null); renderList(); toast('削除しました');
   }catch(e){ toast(e.message); }
 });
 
@@ -4064,7 +4086,7 @@ async function blockCur(){
     await api('/api/block', {Addr: a, Block: true});
     delete state.contacts[a]; state.messages = state.messages.filter(m => m.peer !== a);
     state.blocked = (state.blocked || []).concat([a]);
-    closeContactInfo(); document.body.classList.remove('chat-open'); curAddr = null; renderList(); toast('ブロックしました');
+    closeContactInfo(); document.body.classList.remove('chat-open'); switchChat(null); renderList(); toast('ブロックしました');
   }catch(e){ toast(e.message); }
 }
 $('req-block').addEventListener('click', blockCur);
@@ -4167,7 +4189,7 @@ function topLayer(){
   if(isOn('peers-screen')) return closePeers;
   if(isOn('settings-screen')) return closeSettings;
   if(isOn('newchat-sheet')) return closeNewChat;
-  if(document.body.classList.contains('chat-open') && !wideChat()) return () => { document.body.classList.remove('chat-open'); curAddr = null; renderList(); };
+  if(document.body.classList.contains('chat-open') && !wideChat()) return () => { document.body.classList.remove('chat-open'); switchChat(null); renderList(); };
   return null;
 }
 window.ygBack = () => { const f = topLayer(); if(!f) return false; f(); return true; };
