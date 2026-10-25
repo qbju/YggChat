@@ -49,7 +49,7 @@ type router struct {
 	infos      map[publicKey]routerInfo
 	timers     map[publicKey]*time.Timer
 	ancs       map[publicKey][]publicKey // Peer ancestry info
-	cache      map[publicKey][]peerPort  // Cache path slice for each peer
+	cache      map[publicKey]routerPath  // Cache root and path for each node
 	lags       map[*peer]time.Duration   // Latency for a given *peer to respond with a valid sigres, exponentially weighted average
 	requests   map[publicKey]routerSigReq
 	responses  map[publicKey]routerSigRes
@@ -62,6 +62,11 @@ type router struct {
 	mainTimer  *time.Timer
 }
 
+type routerPath struct {
+	root publicKey
+	path []peerPort
+}
+
 func (r *router) init(c *core) {
 	r.core = c
 	r.pathfinder.init(r)
@@ -72,7 +77,7 @@ func (r *router) init(c *core) {
 	r.infos = make(map[publicKey]routerInfo)
 	r.timers = make(map[publicKey]*time.Timer)
 	r.ancs = make(map[publicKey][]publicKey)
-	r.cache = make(map[publicKey][]peerPort)
+	r.cache = make(map[publicKey]routerPath)
 	r.lags = make(map[*peer]time.Duration)
 	r.requests = make(map[publicKey]routerSigReq)
 	r.responses = make(map[publicKey]routerSigRes)
@@ -234,8 +239,9 @@ func (r *router) _fix() {
 	self := r.infos[r.core.crypto.publicKey]
 	// Check if our current parent leads to a better root than ourself
 	if _, isIn := r.peers[self.parent]; isIn {
-		root, dists := r._getRootAndDists(r.core.crypto.publicKey)
-		if root.less(bestRoot) {
+		root, dists, valid := r._getRootAndDists(r.core.crypto.publicKey)
+		// Only retain the current path when it reaches a confirmed root.
+		if valid && root.less(bestRoot) {
 			cost := ^uint64(0)
 			for p := range r.peers[self.parent] {
 				// Use the path to the root as our benchmark for parent selection
@@ -253,7 +259,12 @@ func (r *router) _fix() {
 			// We don't know where this peer is
 			continue
 		}
-		pRoot, pDists := r._getRootAndDists(pk)
+		pRoot, pDists, valid := r._getRootAndDists(pk)
+		if !valid {
+			// The ancestry is incomplete or contains a loop, so it does not
+			// identify a valid root and cannot be used for parent selection.
+			continue
+		}
 		if _, isIn := pDists[r.core.crypto.publicKey]; isIn {
 			// This would loop through us already
 			continue
@@ -261,7 +272,7 @@ func (r *router) _fix() {
 		cost := ^uint64(0)
 		for p := range r.peers[pk] {
 			// Use the path to the root as our benchmark for parent selection
-			c := pDists[pRoot] * r._getCost(p)
+			c := (pDists[pRoot] + 1) * r._getCost(p)
 			if c < cost {
 				cost = c
 			}
@@ -604,30 +615,33 @@ func (r *router) handleTraffic(from phony.Actor, tr *traffic) {
 	})
 }
 
-func (r *router) _getRootAndDists(dest publicKey) (publicKey, map[publicKey]uint64) {
-	// This returns the distances from the destination's root for the destination and each of its ancestors
-	// Note that we skip any expired infos
+func (r *router) _getRootAndDists(dest publicKey) (publicKey, map[publicKey]uint64, bool) {
+	// This returns each known ancestor's distance from the destination. The result
+	// is only valid if the ancestry terminates at a node that identifies itself as root.
 	dists := make(map[publicKey]uint64)
 	next := dest
-	var root publicKey
 	var dist uint64
 	for {
 		if _, isIn := dists[next]; isIn {
-			break
+			return publicKey{}, dists, false
 		}
 		if info, isIn := r.infos[next]; isIn {
-			root = next
 			dists[next] = dist
+			if info.parent == next {
+				return next, dists, true
+			}
 			dist++
 			next = info.parent
 		} else {
-			break
+			return publicKey{}, dists, false
 		}
 	}
-	return root, dists
 }
 
 func (r *router) _getRootAndPath(dest publicKey) (publicKey, []peerPort) {
+	if cached, ok := r.cache[dest]; ok {
+		return cached.root, cached.path
+	}
 	var ports []peerPort
 	visited := make(map[publicKey]struct{})
 	var root publicKey
@@ -655,17 +669,19 @@ func (r *router) _getRootAndPath(dest publicKey) (publicKey, []peerPort) {
 	for left, right := 0, len(ports)-1; left < right; left, right = left+1, right-1 {
 		ports[left], ports[right] = ports[right], ports[left]
 	}
+	r.cache[dest] = routerPath{root: root, path: ports}
 	return root, ports
 }
 
 func (r *router) _getDist(destPath []peerPort, key publicKey) uint64 {
-	// We cache the keyPath to avoid allocating slices for every lookup
-	var keyPath []peerPort
-	if cached, isIn := r.cache[key]; isIn {
-		keyPath = cached
-	} else {
-		_, keyPath = r._getRootAndPath(key)
-		r.cache[key] = keyPath
+	root, keyPath := r._getRootAndPath(key)
+	if info, ok := r.infos[root]; !ok || info.parent != root {
+		// A failed ancestry walk is not the empty path of a real root.
+		return ^uint64(0)
+	}
+	if selfRoot, _ := r._getRootAndPath(r.core.crypto.publicKey); root != selfRoot {
+		// Coordinates from different roots are not comparable.
+		return ^uint64(0)
 	}
 	end := len(destPath)
 	if len(keyPath) < end {
@@ -856,6 +872,9 @@ type routerSigRes struct {
 }
 
 func (res *routerSigRes) check(node, parent publicKey) bool {
+	if res.port == 0 && node != parent {
+		return false
+	}
 	bs := res.bytesForSig(node, parent)
 	return parent.verify(bs, &res.psig)
 }
