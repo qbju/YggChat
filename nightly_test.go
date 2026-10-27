@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/yggdrasil-network/yggdrasil-go/src/config"
 )
@@ -120,4 +121,74 @@ func TestMoveImportRollsBackOnWriteError(t *testing.T) {
 			t.Fatal("old key not written back")
 		}
 	})
+}
+
+// A 1:1 photo/long text whose chunks were all acked but which the receiver
+// didn't store (request limit, failed save) is sent again once, not only its
+// header until the sender gives up.
+func TestFileChunksResentWhenNotStored(t *testing.T) {
+	old := fileRound
+	fileRound = 40 * time.Millisecond
+	t.Cleanup(func() { fileRound = old })
+	a, pc := tAppPC(t, tMe)
+	m := Message{ID: "m1abc", Peer: tHost, Out: true, Text: strings.Repeat("あ", 1000), TS: time.Now().Unix(), Status: "sending"}
+	a.store.Messages = append(a.store.Messages, m)
+	stop := make(chan struct{})
+	go func() { // the receiver acks every chunk, never the message
+		seen := 0
+		for {
+			select {
+			case <-stop:
+				return
+			case <-time.After(2 * time.Millisecond):
+			}
+			fc := pc.sent(tHost, "fc")
+			for _, w := range fc[seen:] {
+				a.onFileAck(tHost, wire{T: "fca", ID: w.ID, I: w.I})
+			}
+			seen = len(fc)
+		}
+	}()
+	raw := []byte(m.Text)
+	ok := a.deliverFile(m, textMime, raw, 3)
+	close(stop)
+	if ok {
+		t.Fatal("delivered without an ack")
+	}
+	n := 0
+	for _, w := range pc.sent(tHost, "fc") {
+		if w.I == 0 {
+			n++
+		}
+	}
+	if n != 2 {
+		t.Fatalf("chunk 0 sent %d times, want 2 (once more after the receiver dropped it)", n)
+	}
+}
+
+// flush doesn't hold back pending edits/unsends behind a message that is
+// already being sent.
+func TestFlushSendsCtlPastInflight(t *testing.T) {
+	a, pc := tAppPC(t, tMe)
+	a.store.Messages = append(a.store.Messages, Message{ID: "m1abc", Peer: tHost, Out: true, Text: "hi", TS: time.Now().Unix(), Status: "queued"})
+	a.store.Ctl = []ctlItem{{Peer: tHost, W: wire{T: "edit", ID: "c1", Ref: "m0old", Text: "x"}}}
+	a.flMu.Lock()
+	a.inflight["m1abc"] = true
+	a.flMu.Unlock()
+	done := make(chan struct{})
+	go func() { a.flush(tHost); close(done) }()
+	deadline := time.Now().Add(2 * time.Second)
+	for len(pc.sent(tHost, "edit")) == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("pending edit not sent")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	a.ackMu.Lock()
+	if ch, ok := a.acks["c1"]; ok {
+		close(ch)
+		delete(a.acks, "c1")
+	}
+	a.ackMu.Unlock()
+	<-done
 }

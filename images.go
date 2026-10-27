@@ -116,6 +116,9 @@ func (a *App) deliverImg(m Message, tries int) bool {
 	return a.deliverFile(m, mime, raw, tries)
 }
 
+// fileRound is how long deliverFile waits for acks before the next round.
+var fileRound = 2500 * time.Millisecond
+
 func (a *App) deliverFile(m Message, mime string, raw []byte, tries int) bool {
 	sum := sha256.Sum256(raw)
 	n := (len(raw) + imgChunk - 1) / imgChunk
@@ -147,7 +150,7 @@ func (a *App) deliverFile(m Message, mime string, raw []byte, tries int) bool {
 	for a.udp == nil {
 		time.Sleep(200 * time.Millisecond)
 	}
-	idle, last := 0, -1
+	idle, last, redo := 0, -1, false
 	for idle < tries {
 		if last >= 0 && !m.Hid && !a.stillOut(m.Peer, m.ID) {
 			return true // deleted meanwhile
@@ -183,7 +186,18 @@ func (a *App) deliverFile(m Message, mime string, raw []byte, tries int) bool {
 		case <-ch:
 			a.setStatus(m.Peer, m.ID, "sent")
 			return true
-		case <-time.After(2500 * time.Millisecond):
+		case <-time.After(fileRound):
+		}
+		if !redo && last == n && idle >= 1 {
+			// Every chunk was acked but the message wasn't: the receiver had
+			// the whole file and couldn't store it (request limit, a failed
+			// save), so it dropped it. The header we keep resending opens a
+			// new download there, but only the header went out until we gave
+			// up. Send the chunks once more.
+			redo = true
+			fs.mu.Lock()
+			fs.acks[m.ID] = map[int]bool{}
+			fs.mu.Unlock()
 		}
 	}
 	a.setStatus(m.Peer, m.ID, "queued") // images don't go through the mailbox

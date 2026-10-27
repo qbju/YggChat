@@ -301,7 +301,9 @@
   const inflight = new Set();
   const gOut = gid => { const g = st.groups[gid]; return !!(g && g.left); };
   const queuedFor = p => st.messages.filter(m => m.out && m.peer === p && (m.status === 'queued' || m.status === 'stored') && !(m.hid && gOut(m.grp)));
-  async function flush(p) { pushInvites(p); for (const m of queuedFor(p)) { if (!(await deliver(m, 4))) return; } await flushCtl(p); }
+  // A message already being sent ends the run but not the pending edits/unsends
+  // (they used to wait for the next hello), like the native flush.
+  async function flush(p) { pushInvites(p); for (const m of queuedFor(p)) { if (inflight.has(m.id)) break; if (!(await deliver(m, 4))) return; } await flushCtl(p); }
 
   // ---- edit / unsend (only our own messages; receiver checks the sender address) ----
   const ctlID = () => 'c' + Date.now().toString(16) + Math.random().toString(16).slice(2, 6);
@@ -1610,7 +1612,7 @@
     const acked = waitAck(m.peer, m.id);
     let done = false; acked.then(() => done = true);
     try {
-      let idle = 0, last = -1;
+      let idle = 0, last = -1, redo = false;
       while (idle < tries) {
         if (last >= 0 && !m.hid && !stillOut(m.peer, m.id)) { acks.delete(m.id); ackFrom.delete(m.id); return true; } // deleted meanwhile
         if ((powNeed[m.peer + '/' + m.id] | 0) > asked) { asked = powNeed[m.peer + '/' + m.id] | 0; mm.pn = ''; withPow(mm, hdr, hdr.sha); }
@@ -1620,6 +1622,10 @@
         for (let i = 0; i < n && !done; i++) if (!got.has(i)) { send(m.peer, { t: 'fc', id: m.id, i, d: b64(p.bytes.subarray(i * CHUNK, (i + 1) * CHUNK)) }); if (i % 8 === 7) await new Promise(r => setTimeout(r, 4)); }
         const ok = await Promise.race([acked.then(() => true), new Promise(r => setTimeout(() => r(false), 2500))]);
         if (ok) { setStatus(m.peer, m.id, 'sent'); return true; }
+        // Every chunk acked but not the message: the receiver couldn't store it
+        // (request limit, failed save) and dropped it. Send the chunks once more
+        // instead of only the header until we give up (native deliverFile).
+        if (!redo && last === n && idle >= 1) { redo = true; got.clear(); }
       }
       acks.delete(m.id); ackFrom.delete(m.id);
       setStatus(m.peer, m.id, 'queued'); // images don't go through the mailbox

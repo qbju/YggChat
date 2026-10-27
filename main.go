@@ -974,10 +974,17 @@ func (a *App) lateAck(from, id string) {
 // deliverN sends m up to tries times; on no ack the message goes back to the
 // offline queue. Returns true when acked.
 func (a *App) deliverN(m Message, tries int) bool {
+	ok, _ := a.deliverTry(m, tries)
+	return ok
+}
+
+// deliverTry is deliverN that also reports busy: another delivery of m was
+// already running, so nothing was tried here.
+func (a *App) deliverTry(m Message, tries int) (ok, busy bool) {
 	a.flMu.Lock()
 	if a.inflight[m.ID] {
 		a.flMu.Unlock()
-		return false
+		return false, true
 	}
 	a.inflight[m.ID] = true
 	a.flMu.Unlock()
@@ -990,7 +997,7 @@ func (a *App) deliverN(m Message, tries int) bool {
 			if !m.Nostr {
 				a.setStatus(m.Peer, m.ID, "failed") // we left (or were removed): not retried
 			}
-			return true
+			return true, false
 		}
 	}
 	if m.Status != "sending" {
@@ -1000,7 +1007,7 @@ func (a *App) deliverN(m Message, tries int) bool {
 		if m.Img = a.groupImg(m.Grp, m.Of); m.Img == "" {
 			// The photo was deleted (or expired) here before this copy went out.
 			a.dropCopy(m.Peer, m.ID)
-			return true
+			return true, false
 		}
 	}
 	if m.Img != "" || a.longText(m) {
@@ -1013,7 +1020,7 @@ func (a *App) deliverN(m Message, tries int) bool {
 		if !ok {
 			go a.probeSoon(m.Peer)
 		}
-		return ok
+		return ok, false
 	}
 	b, _ := json.Marshal(a.msgWire(m))
 	asked := powAsked(m.Peer, m.ID)
@@ -1026,7 +1033,7 @@ func (a *App) deliverN(m Message, tries int) bool {
 	// First packet to a new key triggers a key lookup, so retry a few times.
 	for i := 0; i < tries; i++ {
 		if i > 0 && !m.Hid && !a.stillOut(m.Peer, m.ID) {
-			return true // deleted while we were trying: don't keep sending it
+			return true, false // deleted while we were trying: don't keep sending it
 		}
 		if x := powAsked(m.Peer, m.ID); x > asked {
 			asked = x // the receiver wants more work
@@ -1037,7 +1044,7 @@ func (a *App) deliverN(m Message, tries int) bool {
 		select {
 		case <-ch:
 			a.setStatus(m.Peer, m.ID, "sent")
-			return true
+			return true, false
 		case <-time.After(2500 * time.Millisecond):
 		}
 	}
@@ -1048,7 +1055,7 @@ func (a *App) deliverN(m Message, tries int) bool {
 		go a.nostrPark(m)
 	}
 	go a.probeSoon(m.Peer)
-	return false
+	return false, false
 }
 
 // probeSoon greets a peer we just failed to reach a few times in quick
@@ -1136,10 +1143,19 @@ func (a *App) queued(peer string) []Message {
 }
 
 // flush re-sends everything queued for peer, oldest first; stops at the first miss.
+// A message already being sent ends the run but not the edits/unsends.
 func (a *App) flush(peer string) {
 	a.pushInvites(peer) // group info it may have missed (groupinv.go)
 	for _, m := range a.queued(peer) {
-		if !a.deliverN(m, 4) {
+		ok, busy := a.deliverTry(m, 4)
+		if busy {
+			// Another delivery of it is running (a new send, the probe's
+			// flush): that one carries on with the rest of the queue. The
+			// pending edits/unsends don't have to wait for the next hello
+			// (they already go out on their own, see queueCtl).
+			break
+		}
+		if !ok {
 			return
 		}
 	}
