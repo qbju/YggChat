@@ -15,10 +15,11 @@ function makeNode(opts = {}) {
   const timers = new Set();
   const wrapT = (f, kind) => (fn, ms, ...a) => { const t = f(() => { if (kind === 't') timers.delete(t); try { fn(...a); } catch (e) { errors.push(e); } }, ms); if (t && t.unref) t.unref(); timers.add(t); return t; };
   const kv = new Map();
+  let node; // set below; failPut: make IndexedDB writes fail (storage full)
   const idbReq = (fn) => { const q = {}; setImmediate(() => { try { q.result = fn(); q.onsuccess && q.onsuccess(); } catch (e) { q.error = e; q.onerror && q.onerror(); } }); return q; };
   const db = {
     transaction() {
-      const t = { objectStore: () => ({ get: k => idbReq(() => structuredClone(kv.get(k))), put: (v, k) => { kv.set(k, structuredClone(v)); setImmediate(() => t.oncomplete && t.oncomplete()); } }) };
+      const t = { objectStore: () => ({ get: k => idbReq(() => structuredClone(kv.get(k))), put: (v, k) => { if (node.failPut) { t.error = new DOMException('full', 'QuotaExceededError'); setImmediate(() => t.onerror && t.onerror()); return; } kv.set(k, structuredClone(v)); setImmediate(() => t.oncomplete && t.oncomplete()); } }) };
       return t;
     },
   };
@@ -66,7 +67,8 @@ function makeNode(opts = {}) {
   vm.runInContext(SRC, ctx, { filename: 'shim.js' });
   const T = ctx.__yggTest;
   const settle = async (n = 5) => { const k = setInterval(() => {}, 1000); for (let i = 0; i < n; i++) await new Promise(r => setImmediate(r)); clearInterval(k); };
-  const node = {
+  node = {
+    failPut: false,
     addr, sent, events, errors, logged, kv, ctx, T,
     async ready() { const k = setInterval(() => {}, 1000); try { await T.ready; await settle(); } finally { clearInterval(k); } },
     get st() { return T.st(); },

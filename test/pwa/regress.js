@@ -229,6 +229,16 @@ const postSig = (kp, gid, pid, ts, text) => Buffer.from(Y.signHex(kp, 'ygg-gpost
     n.pkt(B, { t: 'ghs', g: G1, id: pid, by: A, text, ts, sg: postSig(K.A, G1, pid, ts, text), pk: K.A.pk }); await wait(20); await n.settle(10);
     ok(!n.st.messages.some(x => x.text === text), 'pwa: relay after the tombstone expired does not resurrect');
   }
+  { // nightly r2: a device move whose write failed (storage full) was reported as done, and saveOuter put the moved key over our old data
+    const bundle = JSON.stringify({ v: 1, key: 'ab'.repeat(64), store: { nick: 'moved', contacts: {}, messages: [] } });
+    const n = await node(undefined, { wasm: () => ({ yggMoveOpenPass: () => ({ plain: bundle }) }) });
+    const before = JSON.stringify(n.kv.get('state'));
+    n.failPut = true;
+    const r = await n.api('move/import', { Pass: 'x', Data: 'y' }); await n.settle(10);
+    ok(r.status >= 400, 'pwa: failed move import is reported (' + r.status + ')');
+    ok(n.st.nick === 'me' && JSON.stringify(n.kv.get('state')) === before, 'pwa: failed move import keeps our key and data');
+    n.failPut = false;
+  }
   clearInterval(keep);
   console.log(passes + ' passed, ' + fails + ' failed');
   process.exit(fails ? 1 : 0);

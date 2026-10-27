@@ -1519,8 +1519,17 @@
     if (!b || b.v !== 1) throw new Error('対応していない移行データです（アプリを更新してください）');
     if (!/^[0-9a-f]{128}$/.test(String(b.key))) throw new Error('鍵が壊れています');
     const s = b.store || {};
+    if (locked) throw new Error('ロックを解除してください');
+    const oldSt = st, oldKey = outer.key;
     st = Object.assign(blank(), { nick: s.nick || 'anon', bio: s.bio || '', avatar: s.avatar || '', domain: s.domain || undefined, contacts: s.contacts || {}, messages: s.messages || [], blocked: s.blocked || {}, groups: s.groups || {}, ctl: s.ctl || [], nostrOn: !!s.nostr_on, nostrLegacy: !!s.nostr_legacy, nostrRelays: s.nostr_relays || [], powStrict: !!s.pow_strict });
-    migrate(); outer.key = b.key; save(); saveOuter(); await saving;
+    migrate(); outer.key = b.key;
+    // The key and the data are one record: a failed write (storage full) used
+    // to be ignored, and saveOuter then wrote the moved key over our old data.
+    if (!(await save())) {
+      st = oldSt; outer.key = oldKey;
+      throw new Error('データを保存できませんでした');
+    }
+    saveOuter(); await saving;
     setTimeout(() => location.reload(), 700);
   }
   async function onMoveIn(src, w) {
