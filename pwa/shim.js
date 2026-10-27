@@ -1628,11 +1628,24 @@
       return false;
     } finally { chunkAcks.delete(m.id); }
   }
+  // hasGroupFile mirrors the native node: we already hold src's post (member
+  // copies carry "<post>g<i>" ids, the store the bare post id), so the photo or
+  // long text isn't downloaded again; a relay without the photo / full text
+  // still takes the sender's own copy.
+  function hasGroupFile(gid, src, id, mime) {
+    const key = 'g:' + gid;
+    for (let i = st.messages.length - 1; i >= 0; i--) {
+      const m = st.messages[i];
+      if (m.peer !== key || m.from !== src || !samePost(m.id, id)) continue;
+      return !(!m.out && (m.hist || m.via) && (mime === TEXTMIME || !m.img));
+    }
+    return false;
+  }
   function onFileHeader(src, w) {
     const n = w.n | 0, size = w.size | 0;
     const isText = w.mime === TEXTMIME;
     if (!/^[0-9A-Za-z_-]{1,40}$/.test(String(w.id)) || !(MIMES.has(w.mime) || isText) || n < 1 || n > MAXN || size < 1 || size > (isText ? MAXRECV : IMGMAX) || Math.ceil(size / CHUNK) !== n || !/^[0-9a-f]{64}$/.test(String(w.sha)) || u8len(w.text) > CAPMAX || (isText && w.text) || u8len(w.nick) > 120) return;
-    if ((!w.g && isGoneMsg(src, String(w.id))) || st.messages.some(m => (m.peer === src || (w.g && m.peer === 'g:' + w.g && m.from === src)) && m.id === w.id) || (w.g && okGID(w.g) && isGDel(w.g, src, w.id)) || (w.g && !w.text && !isText && st.groups[w.g] && st.groups[w.g].set && st.groups[w.g].set.nf)) { send(src, { t: 'ack', id: w.id }); return; }
+    if ((!w.g && isGoneMsg(src, String(w.id))) || st.messages.some(m => m.peer === src && m.id === w.id) || (w.g && okGID(w.g) && hasGroupFile(w.g, src, w.id, w.mime)) || (w.g && okGID(w.g) && isGDel(w.g, src, w.id)) || (w.g && !w.text && !isText && st.groups[w.g] && st.groups[w.g].set && st.groups[w.g].set.nf)) { send(src, { t: 'ack', id: w.id }); return; }
     if (w.g && st.groups[w.g] && st.groups[w.g].left && !locked && !st.blocked[src]) { send(src, { t: 'ack', id: w.id }); leftNotice(src, st.groups[w.g]); return; } // we're out (v0.19.2)
     if (locked || st.blocked[src] || !powCheck(src, w)) return;
     const t = Date.now();
