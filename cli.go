@@ -1032,6 +1032,9 @@ func runCLI(ui string) {
 func (c *cli) send(text string) {
 	c.mu.Lock()
 	cur := c.cur
+	// Anything typed in between cancels a pending "/block" or "/leave": a
+	// second "/block" later in the chat must ask again, not act at once.
+	c.confirm = ""
 	c.mu.Unlock()
 	if cur == "" {
 		c.printf("相手が選ばれていません。/list と /open で選んでください")
