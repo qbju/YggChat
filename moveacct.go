@@ -17,6 +17,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"sync"
 	"time"
@@ -98,12 +99,37 @@ func (a *App) importBundle(b []byte) error {
 		return errors.New("ロックを解除してください")
 	}
 	s := a.store
-	_ = s.loadData(mb.Store) // includes fix(): no nil maps before the restart
-	s.save()
-	a.store.mu.Unlock()
+	// Both files must change, or neither: a failed write (disk full,
+	// read-only data dir) used to be ignored, the moved history was saved
+	// under our old key and the UI said the move worked. The key goes
+	// first (small file, easy to put back), then the data.
+	old, err := json.Marshal(s)
+	if err != nil {
+		a.store.mu.Unlock()
+		return errors.New("いまのデータを退避できませんでした")
+	}
+	oldKey, oldCert := a.cfg.PrivateKey, a.cfg.Certificate
 	a.cfg.PrivateKey = key
 	a.cfg.Certificate = nil
-	a.saveCfg()
+	if err := a.saveCfgErr(); err != nil {
+		a.cfg.PrivateKey, a.cfg.Certificate = oldKey, oldCert
+		a.store.mu.Unlock()
+		return errors.New("鍵を保存できませんでした: " + err.Error())
+	}
+	_ = s.loadData(mb.Store) // includes fix(): no nil maps before the restart
+	if err := s.saveErr(); err != nil {
+		// The file on disk is still ours (writeAtomic didn't replace it):
+		// take our data and key back.
+		_ = s.loadData(old)
+		s.dirty = false
+		a.store.mu.Unlock()
+		a.cfg.PrivateKey, a.cfg.Certificate = oldKey, oldCert
+		if cerr := a.saveCfgErr(); cerr != nil {
+			log.Printf("move: restoring the old key failed: %v", cerr)
+		}
+		return errors.New("データを保存できませんでした: " + err.Error())
+	}
+	a.store.mu.Unlock()
 	go func() {
 		time.Sleep(700 * time.Millisecond)
 		restartSelf()

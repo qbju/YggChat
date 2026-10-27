@@ -5,9 +5,12 @@ package main
 
 import (
 	"bufio"
+	"encoding/hex"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -61,4 +64,60 @@ func TestCLIConfirmCancelledBySend(t *testing.T) {
 	if c.confirm != "" {
 		t.Fatalf("confirm still %q", c.confirm)
 	}
+}
+
+// A device move whose key or data can't be written leaves this node as it
+// was (the write error was ignored: moved history under the old key).
+func TestMoveImportRollsBackOnWriteError(t *testing.T) {
+	newKey := config.GenerateConfig().PrivateKey
+	bundle := func() []byte {
+		b, _ := json.Marshal(moveBundle{V: 1, Key: hex.EncodeToString(newKey), Store: json.RawMessage(`{"nick":"moved","contacts":{"200:9::9":{"addr":"200:9::9"}}}`)})
+		return b
+	}
+	check := func(t *testing.T, a *App, oldKey string) {
+		if string(a.cfg.PrivateKey) != oldKey {
+			t.Fatal("key changed")
+		}
+		if a.store.Nick != "mine" {
+			t.Fatalf("nick %q", a.store.Nick)
+		}
+		if _, ok := a.store.Contacts[tHost]; !ok {
+			t.Fatal("own contact lost")
+		}
+		if _, ok := a.store.Contacts["200:9::9"]; ok {
+			t.Fatal("moved contact kept")
+		}
+	}
+	setup := func(t *testing.T) (*App, string) {
+		a := tApp(t, tMe)
+		a.cfg = config.GenerateConfig()
+		a.cfgPath = filepath.Join(t.TempDir(), "cfg.json")
+		a.store.Nick = "mine"
+		a.store.Contacts[tHost] = Contact{Addr: tHost}
+		return a, string(a.cfg.PrivateKey)
+	}
+	t.Run("cfg", func(t *testing.T) {
+		a, old := setup(t)
+		a.cfgPath = filepath.Join(t.TempDir(), "missing-dir", "cfg.json")
+		if err := a.importBundle(bundle()); err == nil {
+			t.Fatal("import succeeded without writing the key")
+		}
+		check(t, a, old)
+	})
+	t.Run("store", func(t *testing.T) {
+		a, old := setup(t)
+		a.store.path = filepath.Join(t.TempDir(), "missing-dir", "c.json")
+		if err := a.importBundle(bundle()); err == nil {
+			t.Fatal("import succeeded without writing the data")
+		}
+		check(t, a, old)
+		b, err := os.ReadFile(a.cfgPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var c config.NodeConfig
+		if json.Unmarshal(b, &c) != nil || string(c.PrivateKey) != old {
+			t.Fatal("old key not written back")
+		}
+	})
 }
