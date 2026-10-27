@@ -1575,9 +1575,11 @@ let curAddr = null;
 const drafts = {};
 function switchChat(addr){
   const ta = $('msg-text');
-  if(curAddr && curAddr !== addr && state.contacts[curAddr]){
+  if(curAddr && curAddr !== addr){
+    // a chat that was deleted or blocked keeps no draft (it came back as
+    // 下書き when that address wrote again)
     const v = ta.value;
-    if(v.trim()) drafts[curAddr] = v; else delete drafts[curAddr];
+    if(v.trim() && state.contacts[curAddr]) drafts[curAddr] = v; else delete drafts[curAddr];
   }
   if(curAddr !== addr){
     ta.value = (addr && drafts[addr]) || '';
@@ -2995,7 +2997,7 @@ const lateStatus = {};
 function putSent(m){
   if(!m || !m.id) return;
   if(lateStatus[m.id]){ m.status = lateStatus[m.id]; delete lateStatus[m.id]; }
-  const idx = state.messages.findIndex(x => x.id === m.id);
+  const idx = state.messages.findIndex(x => x.id === m.id && (!m.peer || x.peer === m.peer));
   if(idx < 0){ state.messages.push(m); return; }
   const old = state.messages[idx];
   const st = (m.status === 'sending' && old.status && old.status !== 'sending') ? old.status : m.status;
@@ -3232,7 +3234,9 @@ function connectEvents(){
       if(d.type === 'message'){
         const msg = normMsg(d.data);
         if(msg && msg.id){
-          const ex = state.messages.findIndex(x => x.id === msg.id);
+          // same id AND chat: another peer (a stranger, or a group member who saw a
+          // post id) must not overwrite a message in a different chat
+          const ex = state.messages.findIndex(x => x.id === msg.id && x.peer === msg.peer);
           if(ex >= 0){
             state.messages[ex] = Object.assign(state.messages[ex], msg);
           }else{
