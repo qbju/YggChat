@@ -1216,9 +1216,14 @@ func (a *App) upPeers() int {
 	return a.core.UpPeerCount()
 }
 
-func (a *App) saveCfg() {
-	b, _ := json.MarshalIndent(a.cfg, "", "  ")
-	_ = writeAtomic(a.cfgPath, b)
+func (a *App) saveCfg() { _ = a.saveCfgErr() }
+
+func (a *App) saveCfgErr() error {
+	b, err := json.MarshalIndent(a.cfg, "", "  ")
+	if err != nil {
+		return err
+	}
+	return writeAtomic(a.cfgPath, b)
 }
 
 func (a *App) setPeers(list []string) error {

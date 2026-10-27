@@ -456,9 +456,15 @@ func (a *App) resetIdentity() error {
 		return fmt.Errorf("端末のYggdrasilを使用中はIDを作り直せません（Yggdrasilアプリ側で鍵を再生成してください）")
 	}
 	nc := config.GenerateConfig()
+	oldKey, oldCert := a.cfg.PrivateKey, a.cfg.Certificate
 	a.cfg.PrivateKey = nc.PrivateKey
 	a.cfg.Certificate = nil
-	a.saveCfg()
+	if err := a.saveCfgErr(); err != nil {
+		// The new key isn't on disk: wiping the chats now would restart
+		// with the old address and nothing left.
+		a.cfg.PrivateKey, a.cfg.Certificate = oldKey, oldCert
+		return fmt.Errorf("設定を保存できませんでした: %v", err)
+	}
 	a.store.mu.Lock()
 	// Everything tied to the old address goes: chats, groups (we were host
 	// or member under the old address), pending edits, our verified domain.
@@ -635,10 +641,20 @@ func (a *App) featureHandlers(mux *http.ServeMux) {
 	})
 	mux.HandleFunc("/api/identity/reset", func(w http.ResponseWriter, r *http.Request) {
 		var req struct{ Confirm bool }
-		if !readJSON(w, r, &req) || !req.Confirm {
+		if !readJSON(w, r, &req) {
 			return
 		}
-		_ = a.resetIdentity()
+		if !req.Confirm {
+			http.Error(w, "bad request", 400)
+			return
+		}
+		// The refusal (system Yggdrasil mode) must reach the UI: it used to
+		// answer {} and the UI said 初期化しました / 再起動中 although the ID
+		// (and, after a device move, the moved identity) was still here.
+		if err := a.resetIdentity(); err != nil {
+			http.Error(w, err.Error(), 400)
+			return
+		}
 		w.Write([]byte("{}"))
 	})
 }
