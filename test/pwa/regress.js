@@ -239,6 +239,15 @@ const postSig = (kp, gid, pid, ts, text) => Buffer.from(Y.signHex(kp, 'ygg-gpost
     ok(n.st.nick === 'me' && JSON.stringify(n.kv.get('state')) === before, 'pwa: failed move import keeps our key and data');
     n.failPut = false;
   }
+  { // nightly r2: an identity reset whose write failed kept going (old chats under the new ID after reload)
+    const n = await node();
+    const before = JSON.stringify(n.kv.get('state'));
+    n.failPut = true;
+    const r = await n.api('identity/reset', { Confirm: true }); await n.settle(10);
+    ok(r.status >= 400, 'pwa: failed identity reset is reported (' + r.status + ')');
+    ok(Object.keys(n.st.contacts).length === 1 && JSON.stringify(n.kv.get('state')) === before, 'pwa: failed identity reset keeps the chats and key');
+    n.failPut = false;
+  }
   clearInterval(keep);
   console.log(passes + ' passed, ' + fails + ' failed');
   process.exit(fails ? 1 : 0);

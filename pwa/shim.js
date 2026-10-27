@@ -2325,7 +2325,12 @@
       case 'identity/reset': {
         if (!body.Confirm) return bad('confirm required');
         // Everything tied to the old address goes (chats, groups, pending edits, the verified domain).
-        outer.key = ''; st.contacts = {}; st.messages = []; st.groups = {}; st.ctl = []; st.blocked = {}; st.joins = {}; st.gone = {}; st.early = {}; st.gdel = {}; st.gdelh = {}; delete st.domain; save(); saveOuter(); await saving;
+        const oldSt = Object.assign({}, st), oldKey = outer.key;
+        outer.key = ''; st.contacts = {}; st.messages = []; st.groups = {}; st.ctl = []; st.blocked = {}; st.joins = {}; st.gdel = {}; st.gone = {}; st.early = {}; st.gdelh = {}; delete st.domain;
+        // A failed write (storage full) was ignored: saveOuter then put the
+        // empty key over the old chats, which came back under the new ID.
+        if (!(await save()) && !locked) { st = oldSt; outer.key = oldKey; return bad('設定を保存できませんでした'); }
+        saveOuter(); await saving;
         setTimeout(() => location.reload(), 300);
         return ok({});
       }
