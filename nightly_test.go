@@ -192,3 +192,89 @@ func TestFlushSendsCtlPastInflight(t *testing.T) {
 	a.ackMu.Unlock()
 	<-done
 }
+
+// nightly 10-29: an identity reset while the history is locked used to
+// write the new key and skip the wipe (a locked store isn't saved): after
+// the restart and unlock the old chats were back under the new ID.
+func TestIdentityResetRefusedWhileLocked(t *testing.T) {
+	a := tApp(t, tMe)
+	a.cfg = config.GenerateConfig()
+	a.cfgPath = filepath.Join(t.TempDir(), "cfg.json")
+	old := string(a.cfg.PrivateKey)
+	a.store.Contacts[tHost] = Contact{Addr: tHost}
+	if err := a.store.setPass("", "pass1234"); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.store.lockNow(); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.resetIdentity(); err == nil {
+		t.Fatal("reset went ahead while locked")
+	}
+	if string(a.cfg.PrivateKey) != old {
+		t.Fatal("key changed while the chats stayed")
+	}
+	if _, err := os.Stat(a.cfgPath); err == nil {
+		t.Fatal("new key written")
+	}
+	if err := a.store.unlock("pass1234"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := a.store.Contacts[tHost]; !ok {
+		t.Fatal("chats lost")
+	}
+}
+
+// A reset whose wiped history can't be written puts the old key back
+// (the chats would otherwise come back under the new ID).
+func TestIdentityResetRollsBackWhenStoreUnwritable(t *testing.T) {
+	a := tApp(t, tMe)
+	a.cfg = config.GenerateConfig()
+	a.cfgPath = filepath.Join(t.TempDir(), "cfg.json")
+	if err := a.saveCfgErr(); err != nil {
+		t.Fatal(err)
+	}
+	old := string(a.cfg.PrivateKey)
+	a.store.Contacts[tHost] = Contact{Addr: tHost}
+	a.store.path = filepath.Join(t.TempDir(), "missing-dir", "c.json")
+	if err := a.resetIdentity(); err == nil {
+		t.Fatal("reset reported success without writing the history")
+	}
+	if string(a.cfg.PrivateKey) != old {
+		t.Fatal("key changed in memory")
+	}
+	b, _ := os.ReadFile(a.cfgPath)
+	var c config.NodeConfig
+	if json.Unmarshal(b, &c) != nil || string(c.PrivateKey) != old {
+		t.Fatal("new key left on disk")
+	}
+	if _, ok := a.store.Contacts[tHost]; !ok {
+		t.Fatal("contacts wiped")
+	}
+}
+
+// A passcode-protected (unlocked) reset writes the wiped history.
+func TestIdentityResetWipesEncryptedHistory(t *testing.T) {
+	restarted := make(chan bool, 1)
+	defer func(f func()) { restartAfterReset = f }(restartAfterReset)
+	restartAfterReset = func() { restarted <- true }
+	a := tApp(t, tMe)
+	a.cfg = config.GenerateConfig()
+	a.cfgPath = filepath.Join(t.TempDir(), "cfg.json")
+	a.store.Contacts[tHost] = Contact{Addr: tHost}
+	if err := a.store.setPass("", "pass1234"); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.resetIdentity(); err != nil {
+		t.Fatal(err)
+	}
+	<-restarted
+	s2 := &Store{path: a.store.path}
+	s2.load()
+	if err := s2.unlock("pass1234"); err != nil {
+		t.Fatal(err)
+	}
+	if len(s2.Contacts) != 0 {
+		t.Fatal("old chats still on disk")
+	}
+}

@@ -455,6 +455,15 @@ func (a *App) resetIdentity() error {
 	if a.sys {
 		return fmt.Errorf("端末のYggdrasilを使用中はIDを作り直せません（Yggdrasilアプリ側で鍵を再生成してください）")
 	}
+	// Hold the store for the whole reset: a lock (/api/lock) between the
+	// lock guard and here made the wipe below a no-op save (a locked store
+	// isn't written), the new key went to disk anyway and, after the
+	// restart and unlock, the old encrypted chats came back under the new ID.
+	a.store.mu.Lock()
+	defer a.store.mu.Unlock()
+	if a.store.locked {
+		return fmt.Errorf("ロック中はIDを作り直せません（ロックを解除してからやり直してください）")
+	}
 	nc := config.GenerateConfig()
 	oldKey, oldCert := a.cfg.PrivateKey, a.cfg.Certificate
 	a.cfg.PrivateKey = nc.PrivateKey
@@ -465,25 +474,50 @@ func (a *App) resetIdentity() error {
 		a.cfg.PrivateKey, a.cfg.Certificate = oldKey, oldCert
 		return fmt.Errorf("設定を保存できませんでした: %v", err)
 	}
-	a.store.mu.Lock()
+	s := a.store
+	type kept struct {
+		contacts map[string]Contact
+		msgs     []Message
+		groups   map[string]Group
+		ctl      []ctlItem
+		domain   string
+		blocked  map[string]bool
+	}
+	prev := kept{s.Contacts, s.Messages, s.Groups, s.Ctl, s.Domain, s.Blocked}
+	prevJ, prevG, prevE, prevD, prevDH := s.Joins, s.Gone, s.Early, s.GDel, s.GDelH
 	// Everything tied to the old address goes: chats, groups (we were host
 	// or member under the old address), pending edits, our verified domain.
-	a.store.Contacts = map[string]Contact{}
-	a.store.Messages = nil
-	a.store.Groups = map[string]Group{}
-	a.store.Ctl = nil
-	a.store.Domain = ""
-	a.store.Blocked = map[string]bool{}
-	a.store.Joins, a.store.Gone, a.store.Early, a.store.GDel = nil, nil, nil, nil
-	a.store.GDelH = nil // (pending recalls stay: they only delete boxes we parked)
-	a.store.save()
-	a.store.mu.Unlock()
+	s.Contacts = map[string]Contact{}
+	s.Messages = nil
+	s.Groups = map[string]Group{}
+	s.Ctl = nil
+	s.Domain = ""
+	s.Blocked = map[string]bool{}
+	s.Joins, s.Gone, s.Early, s.GDel = nil, nil, nil, nil
+	s.GDelH = nil // (pending recalls stay: they only delete boxes we parked)
+	if err := s.saveErr(); err != nil {
+		// The wipe isn't on disk (disk full): the old chats would come back
+		// under the new key after the restart. Keep everything as it was.
+		s.Contacts, s.Messages, s.Groups, s.Ctl, s.Domain, s.Blocked = prev.contacts, prev.msgs, prev.groups, prev.ctl, prev.domain, prev.blocked
+		s.Joins, s.Gone, s.Early, s.GDel, s.GDelH = prevJ, prevG, prevE, prevD, prevDH
+		s.dirty = false
+		a.cfg.PrivateKey, a.cfg.Certificate = oldKey, oldCert
+		if cerr := a.saveCfgErr(); cerr != nil {
+			log.Printf("identity reset: could not put the old key back: %v", cerr)
+			return fmt.Errorf("履歴を保存できず、元の鍵も書き戻せませんでした: %v / %v", err, cerr)
+		}
+		return fmt.Errorf("履歴を保存できませんでした: %v", err)
+	}
 	go func() {
 		time.Sleep(300 * time.Millisecond)
-		restartSelf()
+		restartAfterReset()
 	}()
 	return nil
 }
+
+// restartAfterReset is restartSelf (a variable so tests can see a reset
+// finish without the process exiting).
+var restartAfterReset = restartSelf
 
 // restartSelf re-execs the binary. Under the Android service (which restarts
 // the node when it exits) it just exits.
