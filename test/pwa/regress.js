@@ -273,6 +273,25 @@ const postSig = (kp, gid, pid, ts, text) => Buffer.from(Y.signHex(kp, 'ygg-gpost
     const e2 = n.sent.find(x => x.peer === A && x.w.t === 'edit' && x.w.ref === 'o2'); if (e2) n.pkt(A, { t: 'ack', id: e2.w.id });
     await n.settle(10);
   }
+  { // nightly 10-29: a passcode change whose write failed was reported as failed but stayed in memory: the next save encrypted the store with the passcode the user was told wasn't set (or, removing it, wrote it in plain text)
+    const n = await node();
+    n.failPut = true;
+    const r = await n.api('passcode', { Old: '', New: 'pass1234' }); await n.settle(10);
+    n.failPut = false;
+    ok(r.status >= 400, 'pwa: failed passcode change is reported (' + r.status + ')');
+    await n.api('nick', { Nick: 'after' }); await n.settle(10);
+    const s1 = n.kv.get('state');
+    ok(s1 && !s1.enc && s1.nick === 'after', 'pwa: failed passcode set leaves the store unencrypted');
+    ok((await n.api('passcode', { Old: '', New: 'pass1234' })).status === 200, 'pwa: passcode set');
+    await n.settle(10);
+    n.failPut = true;
+    const r2 = await n.api('passcode', { Old: 'pass1234', New: '' }); await n.settle(10);
+    n.failPut = false;
+    ok(r2.status >= 400, 'pwa: failed passcode removal is reported (' + r2.status + ')');
+    await n.api('nick', { Nick: 'after2' }); await n.settle(10);
+    const s2 = n.kv.get('state');
+    ok(s2 && s2.enc && s2.enc.ct && !s2.contacts, 'pwa: failed passcode removal keeps the store encrypted');
+  }
   clearInterval(keep);
   console.log(passes + ' passed, ' + fails + ' failed');
   process.exit(fails ? 1 : 0);

@@ -2086,13 +2086,16 @@
           catch { return bad('現在のパスコードが違います'); }
         }
         const nw = String(body.New || '');
+        const oldKey = aesKey, oldEnc = outer.enc;
         if (!nw) { aesKey = null; outer.enc = null; }
         else {
           if ([...nw].length < 4) return bad('パスコードは4文字以上にしてください');
           const salt = crypto.getRandomValues(new Uint8Array(16));
           aesKey = await kdf(nw, salt); outer.enc = { salt: b64(salt) };
         }
-        if (!(await save())) return bad('パスコードを保存できませんでした（端末の保存領域のエラー）', 500); // the store on disk would not match what the user was told
+        // The store on disk would not match what the user was told: put the old
+        // passcode back (it stayed in memory and the next save used it).
+        if (!(await save())) { aesKey = oldKey; outer.enc = oldEnc; return bad('パスコードを保存できませんでした（端末の保存領域のエラー）', 500); }
         return ok({});
       }
       case 'lock': {
