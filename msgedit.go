@@ -172,10 +172,25 @@ func (a *App) flushCtl(peer string) {
 	a.ctlBusy[peer] = true
 	a.flMu.Unlock()
 	defer func() { a.flMu.Lock(); delete(a.ctlBusy, peer); a.flMu.Unlock() }()
-	for _, c := range a.pendingCtl(peer) {
-		if !a.sendCtl(c, 6) {
-			go a.parkCtl(peer) // the peer may only come back while we're away
+	// An edit/unsend queued while this runs finds the peer busy and returns:
+	// take it here (it used to wait for the next hello, up to 20 s).
+	tried := map[string]bool{}
+	for {
+		var todo []ctlItem
+		for _, c := range a.pendingCtl(peer) {
+			if !tried[c.W.ID] {
+				todo = append(todo, c)
+			}
+		}
+		if len(todo) == 0 {
 			return
+		}
+		for _, c := range todo {
+			tried[c.W.ID] = true
+			if !a.sendCtl(c, 6) {
+				go a.parkCtl(peer) // the peer may only come back while we're away
+				return
+			}
 		}
 	}
 }

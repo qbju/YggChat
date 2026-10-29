@@ -322,7 +322,12 @@
   async function flushCtl(p) {
     if (ctlBusy.has(p)) return; ctlBusy.add(p);
     try {
-      for (const c of (st.ctl || []).filter(x => x.peer === p)) {
+      // An edit/unsend queued while this runs finds the peer busy: take it here
+      // (it used to wait for the next hello).
+      const tried = new Set();
+      for (let todo; (todo = (st.ctl || []).filter(x => x.peer === p && !tried.has(x.w.id))).length;)
+      for (const c of todo) {
+        tried.add(c.w.id);
         const acked = waitAck(p, c.w.id);
         let ok = false;
         for (let i = 0; i < 6 && !ok; i++) { send(p, c.w); ok = await Promise.race([acked.then(() => true), new Promise(r => setTimeout(() => r(false), 2500))]); }

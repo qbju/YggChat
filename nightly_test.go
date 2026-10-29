@@ -309,3 +309,44 @@ func TestCLISentMessageNotDoubled(t *testing.T) {
 		t.Fatalf("message held %d times, want 1", n)
 	}
 }
+
+// nightly 10-29: an edit/unsend queued while flushCtl was already sending an
+// older one to that peer waited for the next hello (up to 20 s, with the
+// peer online): the running flush only sent what it had listed at its start.
+func TestFlushCtlSendsCtlQueuedMeanwhile(t *testing.T) {
+	a, pc := tAppPC(t, tMe)
+	a.store.Ctl = []ctlItem{{Peer: tHost, W: wire{T: "edit", ID: "c1", Ref: "m0old", Text: "x"}}}
+	ack := func(id string) {
+		a.ackMu.Lock()
+		if ch, ok := a.acks[id]; ok {
+			close(ch)
+			delete(a.acks, id)
+		}
+		a.ackMu.Unlock()
+	}
+	waitSent := func(id string) bool {
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			for _, w := range pc.sent(tHost, "edit") {
+				if w.ID == id {
+					return true
+				}
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		return false
+	}
+	done := make(chan struct{})
+	go func() { a.flushCtl(tHost); close(done) }()
+	if !waitSent("c1") {
+		t.Fatal("first edit not sent")
+	}
+	a.queueCtl(tHost, wire{T: "edit", ID: "c2", Ref: "m1new", Text: "y"}, false) // its own flush finds the peer busy
+	time.Sleep(100 * time.Millisecond)
+	ack("c1")
+	if !waitSent("c2") {
+		t.Fatal("edit queued during the flush waited for the next hello")
+	}
+	ack("c2")
+	<-done
+}

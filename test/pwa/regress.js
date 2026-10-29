@@ -260,6 +260,19 @@ const postSig = (kp, gid, pid, ts, text) => Buffer.from(Y.signHex(kp, 'ygg-gpost
     await n2.ready(); await n2.settle(10);
     ok(!n2.st.messages.some(m => m.text === 'from the old ID'), 'pwa: identity reset drops the old ID\'s outbox');
   }
+  { // nightly 10-29: an edit queued while flushCtl was sending an older one to that peer waited for the next hello
+    const t0 = now(), ME = K.ME.addr;
+    const n = await node({ messages: [{ id: 'o1', peer: A, from: ME, text: 'one', ts: t0 - 50, out: true, status: 'sent' }, { id: 'o2', peer: A, from: ME, text: 'two', ts: t0 - 40, out: true, status: 'sent' }] });
+    await n.api('message/edit', { Peer: A, ID: 'o1', Text: 'one!' }); await n.settle(5);
+    const e1 = n.sent.find(x => x.peer === A && x.w.t === 'edit' && x.w.ref === 'o1');
+    await n.api('message/edit', { Peer: A, ID: 'o2', Text: 'two!' }); await wait(30); await n.settle(5);
+    ok(e1, 'pwa: first edit sent');
+    if (e1) n.pkt(A, { t: 'ack', id: e1.w.id });
+    await wait(50); await n.settle(10);
+    ok(n.sent.some(x => x.peer === A && x.w.t === 'edit' && x.w.ref === 'o2'), 'pwa: edit queued during a ctl flush goes out without waiting for a hello');
+    const e2 = n.sent.find(x => x.peer === A && x.w.t === 'edit' && x.w.ref === 'o2'); if (e2) n.pkt(A, { t: 'ack', id: e2.w.id });
+    await n.settle(10);
+  }
   clearInterval(keep);
   console.log(passes + ' passed, ' + fails + ' failed');
   process.exit(fails ? 1 : 0);
