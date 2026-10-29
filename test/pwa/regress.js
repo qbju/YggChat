@@ -248,6 +248,18 @@ const postSig = (kp, gid, pid, ts, text) => Buffer.from(Y.signHex(kp, 'ygg-gpost
     ok(Object.keys(n.st.contacts).length === 1 && JSON.stringify(n.kv.get('state')) === before, 'pwa: failed identity reset keeps the chats and key');
     n.failPut = false;
   }
+  { // nightly 10-29: a send whose write failed stayed in the localStorage outbox; an identity reset kept it and the next load put the old chat's message back (and sent it from the new ID)
+    const n = await node();
+    n.failPut = true;
+    await n.api('send', { To: A, Text: 'from the old ID' }); await n.settle(10);
+    n.failPut = false;
+    const r = await n.api('identity/reset', { Confirm: true }); await n.settle(10);
+    ok(r.status === 200, 'pwa: reset after a failed send works (' + r.status + ')');
+    const n2 = makeNode({ kp: K.ME, store: n.kv.get('state') });
+    for (const k of ['yggchat-outbox', 'yggchat-outbox-enc']) { const v = n.ctx.localStorage.getItem(k); if (v != null) n2.ctx.localStorage.setItem(k, v); }
+    await n2.ready(); await n2.settle(10);
+    ok(!n2.st.messages.some(m => m.text === 'from the old ID'), 'pwa: identity reset drops the old ID\'s outbox');
+  }
   clearInterval(keep);
   console.log(passes + ' passed, ' + fails + ' failed');
   process.exit(fails ? 1 : 0);

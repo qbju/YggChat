@@ -130,6 +130,9 @@
     lsSet(OUTBOX, outboxGet().filter(e => !(e && e.v && e.v.id === id)));
     lsSet(OUTBOX_ENC, lsList(OUTBOX_ENC).filter(e => !(e && e.id === id)));
   }
+  // The ID changed (reset, device move): sends of the old ID that never reached
+  // IndexedDB must not come back under the new one at the next load or unlock.
+  function outboxClear() { outboxRestored = false; for (const k of [OUTBOX, OUTBOX_ENC]) try { localStorage.removeItem(k); } catch {} }
   function mergeOutbox(r, o) {
     let n = 0;
     r.messages = r.messages || [];
@@ -1529,7 +1532,7 @@
       st = oldSt; outer.key = oldKey;
       throw new Error('データを保存できませんでした');
     }
-    saveOuter(); await saving;
+    outboxClear(); saveOuter(); await saving;
     setTimeout(() => location.reload(), 700);
   }
   async function onMoveIn(src, w) {
@@ -2330,7 +2333,7 @@
         // A failed write (storage full) was ignored: saveOuter then put the
         // empty key over the old chats, which came back under the new ID.
         if (!(await save()) && !locked) { st = oldSt; outer.key = oldKey; return bad('設定を保存できませんでした'); }
-        saveOuter(); await saving;
+        outboxClear(); saveOuter(); await saving;
         setTimeout(() => location.reload(), 300);
         return ok({});
       }
