@@ -501,6 +501,14 @@ func (c *cli) onEvent(b []byte) {
 			return
 		}
 		c.mu.Lock()
+		for _, x := range c.st.Messages {
+			if x.ID == m.ID && x.Peer == m.Peer {
+				// Already here: our own send's reply was read before its
+				// event (it was added twice and shown twice in /hist).
+				c.mu.Unlock()
+				return
+			}
+		}
 		c.st.Messages = append(c.st.Messages, m)
 		if _, ok := c.st.Contacts[m.Peer]; !ok && !isGroupKey(m.Peer) {
 			c.st.Contacts[m.Peer] = cliContact{Addr: m.Peer, Nick: m.Nick, Req: !m.Out}

@@ -278,3 +278,34 @@ func TestIdentityResetWipesEncryptedHistory(t *testing.T) {
 		t.Fatal("old chats still on disk")
 	}
 }
+
+// nightly 10-29: the CLI added our sent message from the /api/send reply and
+// again from its "message" event when the reply was read first, so /hist
+// showed it twice (and a later status updated both lines).
+func TestCLISentMessageNotDoubled(t *testing.T) {
+	old := uiKey
+	uiKey = strings.Repeat("ab", 32)
+	defer func() { uiKey = old }()
+	m := Message{ID: "18e2f650d5ea4abe", Peer: tHost, From: tMe, Text: "hi", TS: time.Now().Unix(), Out: true, Status: "sending"}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/proof" {
+			w.Write([]byte(`{"mac":"` + uiProof(r.URL.Query().Get("n")) + `"}`))
+			return
+		}
+		json.NewEncoder(w).Encode(m)
+	}))
+	defer srv.Close()
+	c := &cli{base: srv.URL, out: bufio.NewWriter(io.Discard), st: cliState{Contacts: map[string]cliContact{tHost: {Addr: tHost}}}, gdone: map[string]bool{}, cur: tHost}
+	c.send("hi") // the reply lands first...
+	ev, _ := json.Marshal(map[string]any{"type": "message", "data": m})
+	c.onEvent(ev) // ...then the event for the same message
+	n := 0
+	for _, x := range c.st.Messages {
+		if x.ID == m.ID {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("message held %d times, want 1", n)
+	}
+}
